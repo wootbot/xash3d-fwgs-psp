@@ -14,7 +14,7 @@ verified **on the PSP**, not just compiled.
 
 ## Phase 0 — Setup
 
-- [ ] Add `reference/` and local tool/build output folders to `.gitignore`.
+- [~] Add `reference/` (done) and local tool/build output folders to `.gitignore`.
 - [ ] Add `upstream` remote (FWGS/xash3d-fwgs).
 - [ ] Re-acquire the PSPLink PC tools (usbhostfs_pc, pspsh, cygwin DLLs) into an ignored `tools/`
       folder with launcher scripts (usbhostfs with `-g -c <relative build dir>`, pspsh, psp-gdb via Docker).

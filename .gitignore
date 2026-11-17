@@ -375,3 +375,6 @@ GEMINI.md
 .continue/
 .codeium/
 .github/copilot-instructions.md
+
+# PSP port: read-only reference sources (old PSP fork, hlsdk)
+reference/
