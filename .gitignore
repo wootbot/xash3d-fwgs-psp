@@ -378,3 +378,6 @@ GEMINI.md
 
 # PSP port: read-only reference sources (old PSP fork, hlsdk)
 reference/
+
+# PSP port: local PC tools (PSPLink usbhostfs_pc, pspsh, ...), build output is covered by build-*
+tools/psplink/

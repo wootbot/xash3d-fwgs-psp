@@ -28,7 +28,7 @@ GNU General Public License for more details.
 #endif
 
 // do not waste precious CPU cycles on mobiles or low memory devices
-#if !XASH_WIN32 && ( !XASH_MOBILE_PLATFORM || XASH_SAILFISH ) && !XASH_LOW_MEMORY && !XASH_EMSCRIPTEN
+#if !XASH_WIN32 && ( !XASH_MOBILE_PLATFORM || XASH_SAILFISH ) && !XASH_LOW_MEMORY && !XASH_EMSCRIPTEN && !XASH_PSP
 #define XASH_COLORIZE_CONSOLE 1
 #else
 #define XASH_COLORIZE_CONSOLE 0

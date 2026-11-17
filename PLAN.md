@@ -14,41 +14,73 @@ verified **on the PSP**, not just compiled.
 
 ## Phase 0 — Setup
 
-- [~] Add `reference/` (done) and local tool/build output folders to `.gitignore`.
-- [ ] Add `upstream` remote (FWGS/xash3d-fwgs).
-- [ ] Re-acquire the PSPLink PC tools (usbhostfs_pc, pspsh, cygwin DLLs) into an ignored `tools/`
+- [x] Add `reference/`, `tools/psplink/` to `.gitignore` (build output: `build-*` already ignored).
+- [x] Add `upstream` remote (FWGS/xash3d-fwgs).
+- [ ] Re-acquire the PSPLink PC tools (usbhostfs_pc, pspsh, cygwin DLLs) into the ignored `tools/psplink/`
       folder with launcher scripts (usbhostfs with `-g -c <relative build dir>`, pspsh, psp-gdb via Docker).
-- [ ] Build script/doc for the Docker build (copy source into container, configure, build, copy
-      `EBOOT.PBP`/`xash.prx`/unstripped ELF back out).
-- [ ] Import-stub audit script (every `.sceStub.text` symbol covered by `.lib.stub`), run after each link.
-- [ ] Build the game PRXs from `reference/hlsdk-portable` (`psp-hl`) and keep them with the PSP data
+- [x] Docker build: `scripts/psp/docker-build.sh` (persistent `xash3d-psp-build` container, tar sync,
+      `configure|build|all|shell|exec|hlsdk|rm`) -> `build-psp/` (`EBOOT.PBP`, `xash.prx`, `xash.elf`).
+- [x] Import-stub audit `scripts/psp/check_stubs.py`, run automatically after every engine and game
+      PRX build. Verified it catches the split-library bug (19 unresolved stubs with `-lpsputility`
+      listed early, 0 with the fixed link line).
+- [~] Game PRXs: `docker-build.sh hlsdk` builds `reference/hlsdk-portable` (`psp-hl`) and installs them
+      as `valve/dlls/hl_psp_mipsel.prx` and `valve/cl_dlls/client_psp_mipsel.prx` (current engine's
+      library naming, see below). 0 unresolved stubs. Still todo: keep them with the PSP data
       (configs from Crow-bar release `2603`, `extras.pak`).
 
 ## Phase 1 — Toolchain and engine bring-up (no renderer)
 
 Upstream already contains a partial 2023 PSP scaffold. Fix and complete it:
 
-- [ ] `scripts/waifulib/xcompile.py` `PSP` class: `PSP_ENVVARS` is defined but `PSP_SDK_ENVVARS` is used
-      (NameError); `stdlibs()` has the link-order bug (drop `-lpspkernel`, `-lpsputility`, `-lpspsdk`,
-      `-lpsprtc`, `-lpspuser` — psp-gcc specs append them); add `-std=gnu11` / `-D_GNU_SOURCE`.
-- [ ] `scripts/waifulib/psp.py`: missing `from waflib import Task, TaskGen`; check it's loaded from
-      `wscript` and that EBOOT.PBP / PARAM.SFO / PRX tasks work with the current waf.
-- [ ] `common/defaults.h`: `#define XASH_PSP LIB_PSP` should be `#define XASH_LIB LIB_PSP`; review all
-      PSP defaults (renderer `gu`, backends, timer, messagebox).
-- [ ] `wscript` / `engine/wscript` PSP configuration: static linking of ref, menu and filesystem into
-      the engine (upstream `STATIC_LINKING`/`XASH_STATIC_LIBS`, compare with old fork's `SINGLE_BINARY`
-      + `xshlib` setup), disable what the PSP can't afford: VGUI, voice/opus, AVI, freetype/maintui,
-      async DNS; decide on bzip2/mpg123/vorbis/MultiEmulator (MultiEmulator = revemu ticket
-      generator, keep it — useful for non-Steam GoldSrc servers).
-- [ ] `engine/platform/psp/`: port from the reference to current upstream platform APIs —
-      `sys_psp.c` (module info, heap threshold, power callback, clock 333 MHz, `ka.prx` VRAM, P5 RAM),
-      `in_psp.c` (pad, analog curve, HOME combos/AUX keys), `snd_psp.c`, `vid_psp.c`, `lib_psp.c`
-      (load/unload game PRX modules and their export tables against the current `library.h`/
-      `lib_common.c`), timer, message box.
-- [ ] Network stays stubbed (`XASH_NO_NETWORK`) for now.
+- [x] `scripts/waifulib/xcompile.py` `PSP` class: fixed `PSP_SDK_ENVVARS` NameError and the stdlibs
+      link-order bug, `-std=gnu11` (C) / `-D_GNU_SOURCE` (C++), `NULL` render type, `psp-ld` for
+      relocatable links, `PROFILING` option guard. **`int32_t` is made an `int`** with
+      `-U/-D__INT32_TYPE__` & co (psp-gcc makes it `long`; newlib follows the macros). This removed
+      every format/`CRC32_t*` error in shared code and the mainui miniutl clash without source changes.
+- [x] `scripts/waifulib/psp.py`: imports, `configure()` sets `STATIC_LINKING` (filesystem_stdio, menu,
+      renderer by render type) and EBOOT parameters; EBOOT/PRX tasks only for real build targets;
+      installs only `EBOOT.PBP` + `xash.prx` (+ `valve/extras.pk3`).
+- [x] `common/defaults.h`: `XASH_LIB LIB_PSP` typo fixed, `XASH_ALLOW_SAVERESTORE_OFFSETS`.
+      Not `XASH_INTERNAL_GAMELIBS`: game libraries come from `gameinfo`/`liblist.gam` paths.
+      `xash3d_types.h`: PSP keeps `MAX_QPATH 64` (GoldSrc), `MAX_MODS 16`. Note: mainui's copy of
+      `xash3d_types.h` (submodule) still says 48 for PSP; harmless unless it ends up in a shared struct.
+- [x] `wscript` / `engine/wscript`: PSP defaults (no GL/soft, `NULL` renderer for now, bundled deps,
+      stb_truetype, **no mbedTLS** (HTTPS downloads only), no libbacktrace, no SDL, no large files),
+      `platform/psp/*.c` + `*/*.S` (gas), no POSIX platform code. `LOW_MEMORY` stays 0 (1 and 2
+      shrink protocol limits). Still built and linked: opus/opusfile (voice), vorbis, mpg123,
+      bzip2, MultiEmulator; revisit when trimming memory.
+- [x] `engine/platform/psp/`: `sys_psp.c` (module info, heap threshold 3 MB, power callback thread,
+      333 MHz, `ka.prx` VRAM unlock, timer, debug-screen message box, `start.cmd` arguments, PRX
+      load/unload), `lib_psp.c` (static table + PRX modules, same `module_start` export-table ABI
+      as the old port), `vid_psp.c` (fixed 480x272, software framebuffer), `snd_psp.c`, `in_psp.c`
+      (same key names and axes as the old port so its configs keep working), `net_psp.h`.
+      Not ported yet: P5 RAM, power suspend/resume handling, hw MP3, `fsh_psp.c`.
+- [x] Network: no `XASH_NO_NETWORK` (the old stub header has rotted); instead `net_psp.h` makes
+      `net_ws.c` build against pspsdk sockets (IPv4 only, `getaddrinfo` emulated with
+      `gethostbyname`, `SO_NONBLOCK`). Sockets just fail until Phase 3 brings the net modules up.
 - [ ] Game PRX interface: confirm `psp-hl` server/client still work with the current engine's game
-      API (it should — upstream keeps the old SDK ABI), including the custom PRX export table.
+      API (it should, upstream keeps the old SDK ABI), including the custom PRX export table.
 - [ ] Memory budget: measure free memory after startup (`meminfo`) and record it here.
+- [ ] Client identification (`identification.c`): use OpenPSID like the Vita uses its PSID.
+
+**Game library names:** the current engine generates `<name>_psp_mipsel.prx` from `liblist.gam`
+(`gamedll_linux "dlls/hl.so"` -> `dlls/hl_psp_mipsel.prx`, client -> `cl_dlls/client_psp_mipsel.prx`).
+The old port used `dlls/server.prx`/`cl_dlls/client.prx`; rename on the stick.
+
+**Static memory (engine image, measured 2026-11-17):** release (`-O3`) text 3.40 MB, data 30 KB,
+**BSS 13.4 MB**, so ~16.9 MB before any heap. Debug: text 4.6 MB. Biggest BSS users: `cl` 3.4 MB,
+`sv_` 2.4 MB, `net` 1.6 MB, `mod_known` 1.6 MB, `frame_ents` 0.7 MB, `s_knownSfx` 0.6 MB,
+`cls` 0.4 MB, 2x `gpMove` 0.3 MB, `clgame` 0.3 MB, `net_message_buffer`/`msg_buf` 0.2 MB each.
+Game PRXs (`-Ofast`): server 1.33 MB text + 0.12 MB data/bss, client 0.56 + 0.14 MB, ~2.2 MB of
+the 3 MB module reserve plus their own heaps; may need a bigger threshold.
+
+**How to test Milestone 1 under PSPLink:** build (`scripts/psp/docker-build.sh all` and
+`scripts/psp/docker-build.sh hlsdk`), copy `build-psp/xash.prx` and `EBOOT.PBP` to
+`ms0:/PSP/GAME/Xash3D/` and `build-psp/valve/` over the stick's `valve/` (adds `extras.pk3`,
+`dlls/hl_psp_mipsel.prx`, `cl_dlls/client_psp_mipsel.prx`), then in pspsh:
+`cd ms0:/PSP/GAME/Xash3D/` and `./xash.prx -ref null -dev 2 -log +map c0a0`
+(the working directory is the root directory). Or put the same arguments into `start.cmd` and
+launch from the XMB.
 
 **Milestone 1:** with `ref/null`, EBOOT boots under PSPLink, loads `server.prx`, runs `map c0a0`
 (headless), console output visible over USB, zero unresolved import stubs.
@@ -132,3 +164,6 @@ music), launched from the XMB.
 ## Progress log
 
 - 2026-11-17: Fresh upstream fork created; old fork and hlsdk moved to `reference/`. Plan written.
+- 2026-11-17: Phase 0 tooling (Docker build, stub audit, hlsdk build). Phase 1: upstream builds and
+  links for PSP with `ref_null` (`--psp=prx,660,NULL`), EBOOT.PBP produced, 0 unresolved stubs in
+  engine and game PRXs. Not run on hardware yet. Static memory measured (see Phase 1).
