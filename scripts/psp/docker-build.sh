@@ -7,6 +7,7 @@
 #   scripts/psp/docker-build.sh all [extra waf configure args]   # configure + build
 #   scripts/psp/docker-build.sh shell                            # interactive shell in /src
 #   scripts/psp/docker-build.sh exec <command...>                # run a command in /src
+#   scripts/psp/docker-build.sh hlsdk [hlsdk dir]                # build game PRXs (default: reference/hlsdk-portable)
 #   scripts/psp/docker-build.sh rm                               # remove the build container
 #
 # Environment:
@@ -82,6 +83,26 @@ do_build()
 	echo "Output in $OUT/"
 }
 
+# hlsdk-portable psp-hl branch, Makefile.psp. The engine looks for game libraries with
+# platform suffixes: dlls/hl_psp_mipsel.prx (from gamedll_linux "dlls/hl.so"), cl_dlls/client_psp_mipsel.prx
+do_hlsdk()
+{
+	hlsdk=${1:-reference/hlsdk-portable}
+	docker exec "$CONTAINER" rm -rf /hlsdk
+	docker exec "$CONTAINER" mkdir -p /hlsdk
+	git -C "$hlsdk" ls-files | (cd "$hlsdk" && tar -T - -cf -) | docker exec -i "$CONTAINER" tar -xf - -C /hlsdk
+	docker exec -w /hlsdk "$CONTAINER" sh -c 'make -f Makefile.psp -j$(nproc) >/dev/null'
+	for elf in build/server/server.elf build/client/client.elf; do
+		docker exec -w /src "$CONTAINER" python3 scripts/psp/check_stubs.py "/hlsdk/$elf"
+	done
+	mkdir -p "$OUT/valve/dlls" "$OUT/valve/cl_dlls"
+	docker cp "$CONTAINER:/hlsdk/build/server/server.prx" "$OUT/valve/dlls/hl_psp_mipsel.prx"
+	docker cp "$CONTAINER:/hlsdk/build/client/client.prx" "$OUT/valve/cl_dlls/client_psp_mipsel.prx"
+	docker cp "$CONTAINER:/hlsdk/build/server/server.elf" "$OUT/server.elf"
+	docker cp "$CONTAINER:/hlsdk/build/client/client.elf" "$OUT/client.elf"
+	echo "Game libraries in $OUT/valve/"
+}
+
 cmd=${1:-all}
 [ $# -gt 0 ] && shift
 
@@ -91,6 +112,7 @@ build)     ensure_container; sync_sources; do_build ;;
 all)       ensure_container; sync_sources; do_configure "$@"; do_build ;;
 shell)     ensure_container; sync_sources; docker exec -it -w /src "$CONTAINER" bash ;;
 exec)      ensure_container; sync_sources; run "$@" ;;
+hlsdk)     ensure_container; sync_sources; do_hlsdk "$@" ;;
 rm)        docker rm -f "$CONTAINER" ;;
 *)         echo "unknown command: $cmd" >&2; exit 1 ;;
 esac
