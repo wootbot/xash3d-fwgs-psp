@@ -335,6 +335,9 @@ def configure(conf):
 	if conf.options.PS4:
 		conf.load('ps4')
 
+	if conf.options.PSP_OPTS:
+		conf.load('psp')
+
 	# HACKHACK: override msvc DEST_CPU value by something that we understand
 	if conf.env.DEST_CPU == 'amd64':
 		conf.env.DEST_CPU = 'x86_64'
@@ -381,6 +384,16 @@ def configure(conf):
 		conf.options.BUILD_BUNDLED_DEPS = True # the toolchain has no packages, host ones must not leak in
 		# opengnm calls them, both the engine and ref_gl link it
 		conf.env.LIB_PS4GNM_SYS = ['SceGnmDriver', 'SceVideoOut']
+	elif conf.env.DEST_OS == 'psp':
+		# no dynamic linker: renderer, menu and filesystem are linked into the engine (see psp.py),
+		# only the game libraries are loaded as PRX modules
+		conf.options.GL               = False
+		conf.options.SOFT             = False
+		conf.options.NULL             = conf.env.PSP_RENDER_TYPE == 'NULL'
+		conf.options.ALL_RENDERERS    = False
+		conf.options.BUILD_BUNDLED_DEPS = True # the toolchain has no packages, host ones must not leak in
+		conf.options.USE_STBTT        = True  # mainui: no freetype2
+		conf.options.MBEDTLS          = False # HTTPS downloads aren't worth the memory
 	elif conf.env.SAILFISH:
 		conf.options.NANOGL           = True
 		conf.options.GLWES            = False # deprecated
@@ -634,8 +647,8 @@ def configure(conf):
 		# with our native API level
 		# https://android.googlesource.com/platform/bionic/+/HEAD/docs/32-bit-abi.md
 		pass
-	elif conf.env.DEST_OS == 'psvita':
-		# PSVita don't have large file support at all
+	elif conf.env.DEST_OS in ['psvita', 'psp']:
+		# PSVita and PSP don't have large file support at all
 		pass
 	else:
 		# try to guess how to support large files

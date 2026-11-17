@@ -658,13 +658,13 @@ class PSP:
 		self.fw_version = fwversion
 		self.render_type = rendertype
 
-		for i in PSP_SDK_ENVVARS:
+		for i in PSP_ENVVARS:
 			self.sdk_home = os.getenv(i)
 			if self.sdk_home != None:
 				break
 		else:
 			ctx.fatal('Set %s environment variable pointing to the root of PSP SDK!' %
-				' or '.join(PSP_SDK_ENVVARS))
+				' or '.join(PSP_ENVVARS))
 
 		self.psptoolchain_path = os.path.join(self.sdk_home, 'psp')
 		self.pspsdk_path = os.path.join(self.psptoolchain_path, 'sdk')
@@ -674,7 +674,21 @@ class PSP:
 		cflags = []
 		cflags += ['-I%s' % (os.path.join(self.pspsdk_path, 'include'))]
 		cflags += ['-I.']
-		cflags += ['-DNDEBUG', '-D_PSP_FW_VERSION=%s' % self.fw_version, '-G0']
+		cflags += ['-D_PSP_FW_VERSION=%s' % self.fw_version, '-G0']
+		# psp-gcc makes int32_t a long, unlike every other 32-bit target the engine is built for,
+		# breaking printf formats and int/int32_t pointer compatibility all over the code.
+		# Both are 32-bit on MIPS, so make it an int, newlib's headers follow GCC's macros.
+		for k, v in [('INT32_TYPE', 'int'), ('UINT32_TYPE', 'unsigned int'),
+			('INT_LEAST32_TYPE', 'int'), ('UINT_LEAST32_TYPE', 'unsigned int'),
+			('INT32_MAX', '0x7fffffff'), ('UINT32_MAX', '0xffffffffU'),
+			('INT_LEAST32_MAX', '0x7fffffff'), ('UINT_LEAST32_MAX', '0xffffffffU'),
+			('INT32_C(c)', 'c'), ('UINT32_C(c)', 'c ## U')]:
+			name = k.split('(')[0]
+			cflags += ['-U__%s__' % name, '-D__%s__%s=%s' % (name, k[len(name):], v)]
+		if cxx:
+			cflags += ['-D_GNU_SOURCE'] # newlib hides vasprintf and friends otherwise
+		else:
+			cflags += ['-std=gnu11'] # GCC 15 defaults to C23, where bool is a keyword
 		return cflags
 
 	# they go before object list
@@ -696,8 +710,12 @@ class PSP:
 		stdlibs += ['-lpspdisplay', '-lpspgum_vfpu', '-lpspgu','-lpspge', '-lpspvfpu']
 		stdlibs += ['-lpspaudio', '-lpspdmac']
 		stdlibs += ['-lstdc++', '-lc', '-lm']
-		stdlibs += ['-lpspctrl', '-lpspdebug', '-lpsppower', '-lpsputility',  '-lpspsdk', '-lpsprtc']
-		stdlibs += ['-lpspuser', '-lpspkernel']
+		stdlibs += ['-lpspctrl', '-lpspdebug', '-lpsppower']
+		# psputility, psprtc, pspnet*, pspsdk and pspuser are appended by psp-gcc's specs after
+		# libcglue. Listing them here as well splits a library's import stubs between two
+		# archive scans and psp-fixup-imports leaves the late ones unresolved (they silently
+		# return garbage). libpspkernel is kernel-mode only, never link it into user modules.
+		# Check with scripts/psp/check_stubs.py after linking.
 		return stdlibs
 
 def options(opt):
@@ -725,7 +743,7 @@ def options(opt):
 	xc.add_option('--emscripten', action='store_true', dest='EMSCRIPTEN', default = None,
 		help='enable building for Emscripten')
 	xc.add_option('--psp', action='store', dest='PSP_OPTS', default=None,
-		help='enable building for PlayStation Portable, format: --psp=<module type>,<fw version>,<render type>, example: --psp=prx,660,HW')
+		help='enable building for PlayStation Portable, format: --psp=<module type>,<fw version>,<render type>, render type is one of SW, HW, ALL, NULL, example: --psp=prx,660,HW')
 	xc.add_option('--ios', action='store_true', dest='IOS', default=False, 
 		help='enable building for iOS [default: %(default)s]')
 	xc.add_option('--ios-simulator', action='store_true', dest='IOSSIM', default=False, 
@@ -847,7 +865,7 @@ def configure(conf):
 			conf.fatal('Invalid --psp paramater value!')
 
 		valid_module_type = ['elf', 'prx']
-		valid_render_type = ['SW', 'HW', 'ALL']
+		valid_render_type = ['SW', 'HW', 'ALL', 'NULL']
 
 		if values[0] not in valid_module_type:
 			conf.fatal('Unknown module type: %s. Supported: %r' % (values[0], ', '.join(valid_module_type)))
@@ -859,7 +877,7 @@ def configure(conf):
 		conf.environ['CXX'] = os.path.join(psp.binutils_path, 'psp-gcc')
 		conf.environ['AS'] = os.path.join(psp.binutils_path, 'psp-gcc')
 		conf.environ['STRIP'] = os.path.join(psp.binutils_path, 'psp-strip')
-		conf.environ['LD'] = os.path.join(psp.binutils_path, 'psp-gcc')
+		conf.environ['LD'] = os.path.join(psp.binutils_path, 'psp-ld')
 		conf.environ['AR'] = os.path.join(psp.binutils_path, 'psp-ar')
 		conf.environ['RANLIB'] = os.path.join(psp.binutils_path, 'psp-ranlib')
 		conf.environ['OBJCOPY'] = os.path.join(psp.binutils_path, 'psp-objcopy')
@@ -871,7 +889,7 @@ def configure(conf):
 
 		conf.env.ASFLAGS += psp.cflags()
 		conf.env.CFLAGS += psp.cflags()
-		conf.env.CXXFLAGS += psp.cflags()
+		conf.env.CXXFLAGS += psp.cflags(True)
 		conf.env.LINKFLAGS += psp.linkflags()
 		conf.env.LDFLAGS += psp.ldflags()
 
@@ -882,7 +900,7 @@ def configure(conf):
 		conf.msg('... ld flags', ' '.join(psp.ldflags()).replace(psp.sdk_home, '$PSPSDK'))
 		conf.msg('Bulid prx', '%s' % (psp.build_prx))
 
-		if conf.options.PROFILING:
+		if getattr(conf.options, 'PROFILING', False):
 			conf.env.LDFLAGS += ['-lpspprof']
 			conf.env.CFLAGS += ['-pg']
 			conf.env.CXXFLAGS += ['-pg']
