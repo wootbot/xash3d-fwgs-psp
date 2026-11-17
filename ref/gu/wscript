@@ -1,0 +1,22 @@
+#! /usr/bin/env python
+# encoding: utf-8
+# ref_gu -- PSP Graphics Engine (sceGu) renderer
+
+def options(opt):
+	pass
+
+def configure(conf):
+	pass
+
+def build(bld):
+	# the PSP links the renderer into the engine as a relocatable object (see scripts/waifulib/psp.py
+	# and xshlib.py), which doesn't pull in static libraries: build ref/common sources in directly
+	source = bld.path.ant_glob('*.c') + bld.path.parent.ant_glob('common/*.c')
+
+	bld.shlib(source = source,
+		target = 'ref_gu',
+		includes = ['.', '../common'],
+		features = 'format',
+		use = ['engine_includes', 'sdk_includes', 'werror'],
+		defines = ['REF_DLL=1'],
+		install_path = bld.env.LIBDIR)

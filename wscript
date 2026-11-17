@@ -123,6 +123,7 @@ SUBDIRS = [
 	Subproject('ref/gl',                lambda x: x.env.CLIENT and (x.env.GL or x.env.NANOGL or x.env.GLWES or x.env.GL4ES or x.env.GLES3COMPAT)),
 	Subproject('ref/soft',              lambda x: x.env.CLIENT and x.env.SOFT),
 	Subproject('ref/null',              lambda x: x.env.CLIENT and x.env.NULL),
+	Subproject('ref/gu',                lambda x: x.env.CLIENT and x.env.GU),
 	Subproject('3rdparty/bzip2',        lambda x: x.env.CLIENT and not x.env.HAVE_SYSTEM_BZ2),
 	Subproject('3rdparty/mpg123',       lambda x: x.env.CLIENT and not x.env.HAVE_SYSTEM_MPG123),
 	Subproject('3rdparty/mbedtls'),
@@ -168,6 +169,7 @@ REFDLLS = [
 	RefDll('gl4es', False),
 	RefDll('gles3compat', False, 'GLES3COMPAT'),
 	RefDll('null', False),
+	RefDll('gu', False, all_renderers = False), # PSP only
 ]
 
 def options(opt):
@@ -390,6 +392,7 @@ def configure(conf):
 		conf.options.GL               = False
 		conf.options.SOFT             = False
 		conf.options.NULL             = conf.env.PSP_RENDER_TYPE == 'NULL'
+		conf.options.GU               = conf.env.PSP_RENDER_TYPE in ('HW', 'ALL')
 		conf.options.ALL_RENDERERS    = False
 		conf.options.BUILD_BUNDLED_DEPS = True # the toolchain has no packages, host ones must not leak in
 		conf.options.USE_STBTT        = True  # mainui: no freetype2
