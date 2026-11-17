@@ -33,7 +33,11 @@ half-life implementation of saverestore system
 #define SAVEGAME_VERSION		0x0071				// Version 0.71 GoldSrc compatible
 #define CLIENT_SAVEGAME_VERSION	0x0067				// Version 0.67
 
+#if XASH_PSP
+#define SAVE_HEAPSIZE		0x200000				// 2Mb, a 4Mb block doesn't fit next to a map on PSP
+#else
 #define SAVE_HEAPSIZE		0x400000				// reserve 4Mb for now
+#endif
 #define SAVE_HASHSTRINGS		0xFFF				// 4095 unique strings
 
 // savedata headers
