@@ -137,15 +137,19 @@ qboolean SNDDMA_Init( void )
 	return true;
 }
 
+// the mixer nests BeginPainting/Submit pairs (S_UpdateChannels -> S_PaintChannels),
+// they're only called from the engine thread, so count the depth instead of a recursive lock
+static int snd_psp_lock_depth;
+
 void SNDDMA_BeginPainting( void )
 {
-	if( snd_psp.sema >= 0 )
+	if( snd_psp.sema >= 0 && snd_psp_lock_depth++ == 0 )
 		sceKernelWaitSema( snd_psp.sema, 1, NULL );
 }
 
 void SNDDMA_Submit( void )
 {
-	if( snd_psp.sema >= 0 )
+	if( snd_psp.sema >= 0 && snd_psp_lock_depth > 0 && --snd_psp_lock_depth == 0 )
 		sceKernelSignalSema( snd_psp.sema, 1 );
 }
 
