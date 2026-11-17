@@ -743,7 +743,19 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 			}
 
 			// Load palette
-			GL_PixelConverter( tex->dstPalette, pic->palette, 256, PC_SWF( pic->type ), PC_HWF( PALETTE_FORMAT ));
+			if( pic->type == PF_INDEXED_32 && !FBitSet( pic->flags, IMAGE_HAS_ALPHA ))
+			{
+				// 32-bit palettes carry garbage alpha when the image has none (e.g. BMP reserved
+				// bytes are 0); ref_gl uploads such images without an alpha channel, do the same
+				byte opaque[256 * 4];
+
+				memcpy( opaque, pic->palette, sizeof( opaque ));
+				for( i = 0; i < 256; i++ )
+					opaque[i * 4 + 3] = 0xff;
+
+				GL_PixelConverter( tex->dstPalette, opaque, 256, PC_SWF( pic->type ), PC_HWF( PALETTE_FORMAT ));
+			}
+			else GL_PixelConverter( tex->dstPalette, pic->palette, 256, PC_SWF( pic->type ), PC_HWF( PALETTE_FORMAT ));
 			sceKernelDcacheWritebackRange( tex->dstPalette, PALETTE_SIZE );
 		}
 		else tex->dstPalette = gl_palette_332;

@@ -39,6 +39,11 @@ static int psp_dummy_window; // host.hWnd must be non-NULL while the screen is o
 static CVAR_DEFINE_AUTO( vid_autoshot, "0", 0, "take a screenshot every N seconds (0 - disabled)" );
 static double vid_autoshot_next;
 
+// debugging aid: commands written into this file (relative to the root directory, so on the PC
+// when running from host0:) are executed and the file is deleted, e.g. "+sys_cmdfile cmd.txt"
+static CVAR_DEFINE_AUTO( sys_cmdfile, "", 0, "execute and delete this file once a second (debugging)" );
+static double sys_cmdfile_next;
+
 static struct
 {
 	qboolean opened;
@@ -139,9 +144,32 @@ static void VID_CheckAutoShot( void )
 }
 
 
+static void VID_CheckCmdFile( void )
+{
+	char buf[1024];
+
+	if( COM_StringEmpty( sys_cmdfile.string ) || host.realtime < sys_cmdfile_next )
+		return;
+
+	sys_cmdfile_next = host.realtime + 1.0;
+
+	FILE *f = fopen( sys_cmdfile.string, "rb" );
+	if( !f )
+		return;
+
+	size_t len = fread( buf, 1, sizeof( buf ) - 2, f );
+	fclose( f );
+	remove( sys_cmdfile.string );
+
+	buf[len] = '\n';
+	buf[len + 1] = 0;
+	Cbuf_AddText( buf );
+}
+
 void GL_SwapBuffers( void )
 {
 	VID_CheckAutoShot();
+	VID_CheckCmdFile();
 
 	// ref_gu swaps the buffers itself
 	if( vid_psp.vsync )
@@ -175,6 +203,7 @@ qboolean VID_SetMode( void )
 		refState.window_mode = WINDOW_MODE_FULLSCREEN;
 		SetBits( gl_vsync.flags, FCVAR_CHANGED );
 		Cvar_RegisterVariable( &vid_autoshot );
+		Cvar_RegisterVariable( &sys_cmdfile );
 	}
 
 	VID_SetDisplayTransform( &w, &h );
