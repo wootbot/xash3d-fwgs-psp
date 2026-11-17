@@ -17,8 +17,12 @@ verified **on the PSP**, not just compiled.
 - [x] Add `reference/`, `tools/psplink/` to `.gitignore` (build output: `build-*` already ignored).
 - [x] Add `upstream` remote (FWGS/xash3d-fwgs).
 - [x] PSPLink PC tools: official `pspsh-windows.zip` from pspdev/psplinkusb v3.2.1 (matches PSPLink 3.2.1
-      on the PSP, cygwin + libusb-win32) in the ignored `tools/psplink/`, with `usbhostfs.bat`
-      (`-g -c ../../build-psp`) and `pspsh.bat`. psp-gdb via Docker still untested.
+      on the PSP, cygwin + libusb-win32) in the ignored `tools/psplink/`, with `usbhostfs.bat` and
+      `pspsh.bat`. psp-gdb via Docker still untested. **usbhostfs root arguments don't work** with
+      this build (`host0:` stays unreadable for relative and `/cygdrive` paths); roots that aren't
+      given default to the current directory, so start `usbhostfs_pc -g` *from* `build-psp/`.
+      pspsh can be driven by piping commands into it (`(printf 'cmd
+'; sleep N) | pspsh.exe`).
 - [x] Docker build: `scripts/psp/docker-build.sh` (persistent `xash3d-psp-build` container, tar sync,
       `configure|build|all|shell|exec|hlsdk|rm`) -> `build-psp/` (`EBOOT.PBP`, `xash.prx`, `xash.elf`).
 - [x] Import-stub audit `scripts/psp/check_stubs.py`, run automatically after every engine and game
@@ -59,9 +63,16 @@ Upstream already contains a partial 2023 PSP scaffold. Fix and complete it:
 - [x] Network: no `XASH_NO_NETWORK` (the old stub header has rotted); instead `net_psp.h` makes
       `net_ws.c` build against pspsdk sockets (IPv4 only, `getaddrinfo` emulated with
       `gethostbyname`, `SO_NONBLOCK`). Sockets just fail until Phase 3 brings the net modules up.
-- [ ] Game PRX interface: confirm `psp-hl` server/client still work with the current engine's game
-      API (it should, upstream keeps the old SDK ABI), including the custom PRX export table.
-- [ ] Memory budget: measure free memory after startup (`meminfo`) and record it here.
+- [x] Game PRX interface: `psp-hl` server and client PRXs load through the export-table ABI and run
+      `c0a0` (server: extended EntityAPI 140; client: only optional exports missing).
+- [x] File descriptors: only **9** kernel file handles are free for the engine under PSPLink
+      (`0x80020320` = too many open files). `XASH_REDUCE_FD` was dead code in the filesystem library
+      (it doesn't include `defaults.h`) — revived, keeps one read-only file open. pspsdk bug to keep
+      in mind: libcglue `__set_errno` only maps `0x8001xxxx` errors, other SCE errors come back from
+      `open()` as huge "descriptors" (opendir then crashes in `getdents`).
+- [x] Memory budget (debug build, `c0a0` running, `-ref null`): partition 2 has 693 KB free,
+      468 KB largest block; that's what's left of the 3 MB module reserve after both game PRXs.
+      Engine heap usage not measured yet (needs a `meminfo`-style engine command).
 - [ ] Client identification (`identification.c`): use OpenPSID like the Vita uses its PSID.
 
 **Game library names:** the current engine generates `<name>_psp_mipsel.prx` from `liblist.gam`
@@ -84,7 +95,10 @@ the 3 MB module reserve plus their own heaps; may need a bigger threshold.
 launch from the XMB.
 
 **Milestone 1:** with `ref/null`, EBOOT boots under PSPLink, loads `server.prx`, runs `map c0a0`
-(headless), console output visible over USB, zero unresolved import stubs.
+(headless), console output visible over USB, zero unresolved import stubs. **Reached 2026-11-17**
+(debug build): time to first frame 35 s, of which ~17 s is mainui rendering its TrueType fonts
+with stb_truetype (old port used bitmap fonts — fix in Phase 2); `c0a0` loaded at 58 s, the tram
+ride and scripted sequences run. Resource verification `stat()`s every file on the stick (slow).
 
 ## Phase 2 — Renderer (`ref/gu`)
 
@@ -168,3 +182,5 @@ music), launched from the XMB.
 - 2026-11-17: Phase 0 tooling (Docker build, stub audit, hlsdk build). Phase 1: upstream builds and
   links for PSP with `ref_null` (`--psp=prx,660,NULL`), EBOOT.PBP produced, 0 unresolved stubs in
   engine and game PRXs. Not run on hardware yet. Static memory measured (see Phase 1).
+- 2026-11-17: **Milestone 1 on hardware.** Fixes needed: `CreateInterface` export for static
+  filesystem_stdio, `XASH_REDUCE_FD` revived (9 file handles), nested sound lock deadlock.
