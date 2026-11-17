@@ -184,3 +184,8 @@ music), launched from the XMB.
   engine and game PRXs. Not run on hardware yet. Static memory measured (see Phase 1).
 - 2026-11-17: **Milestone 1 on hardware.** Fixes needed: `CreateInterface` export for static
   filesystem_stdio, `XASH_REDUCE_FD` revived (9 file handles), nested sound lock deadlock.
+- 2026-11-17: Running from `host0:` (game root = `build-psp`, PC `valve` data): first frame 13.8 s
+  (stick: 35 s), `c0a0` loads in 4.7 s (stick: ~23 s). Sound audible. Tram ride through
+  `c0a0a`/`c0a0b`/`c0a0c` transitions works after: device-root `chdir` fix, net_graph without font
+  fix, `SAVE_HEAPSIZE` 2 MB on PSP (4 MB didn't fit). Engine heap on `c0a0c`: 24.3 MB allocated.
+  Open: ~25 s after "Verifying and uploading resources" before spawning (custom.hpk?).
