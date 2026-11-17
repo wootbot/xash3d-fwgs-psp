@@ -12,7 +12,7 @@
 #
 # Environment:
 #   PSP_OPTS   --psp= value (default: prx,660,HW; prx,660,NULL builds the headless engine)
-#   BUILD_TYPE waf -T value (default: debug)
+#   BUILD_TYPE waf -T value (default: fast, like the old port; debug is -O0 and several times slower)
 #   OUT        host output directory (default: build-psp)
 #
 # $OUT is also the game root for PSPLink: put the game data into $OUT/valve, start
@@ -26,7 +26,7 @@ set -e
 CONTAINER=${CONTAINER:-xash3d-psp-build}
 IMAGE=${IMAGE:-pspdev/pspdev:latest}
 PSP_OPTS=${PSP_OPTS:-prx,660,HW}
-BUILD_TYPE=${BUILD_TYPE:-debug}
+BUILD_TYPE=${BUILD_TYPE:-fast}
 OUT=${OUT:-build-psp}
 
 # don't let MSYS mangle container paths
