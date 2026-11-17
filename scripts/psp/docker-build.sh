@@ -1,0 +1,96 @@
+#!/bin/sh
+# docker-build.sh -- build the PSP port inside the pspdev/pspdev Docker image
+#
+# Usage (from the repository root, Git Bash or any POSIX shell with docker):
+#   scripts/psp/docker-build.sh configure [extra waf configure args]
+#   scripts/psp/docker-build.sh build
+#   scripts/psp/docker-build.sh all [extra waf configure args]   # configure + build
+#   scripts/psp/docker-build.sh shell                            # interactive shell in /src
+#   scripts/psp/docker-build.sh exec <command...>                # run a command in /src
+#   scripts/psp/docker-build.sh rm                               # remove the build container
+#
+# Environment:
+#   PSP_OPTS   --psp= value (default: prx,660,NULL until ref/gu exists)
+#   BUILD_TYPE waf -T value (default: debug)
+#   OUT        host output directory (default: build-psp)
+#
+# A persistent container keeps installed packages and the waf build directory between runs,
+# so rebuilds are incremental. Sources are synced into /src with tar (tracked and untracked,
+# non-ignored files), which is much faster than building on a Windows bind mount.
+set -e
+
+CONTAINER=${CONTAINER:-xash3d-psp-build}
+IMAGE=${IMAGE:-pspdev/pspdev:latest}
+PSP_OPTS=${PSP_OPTS:-prx,660,NULL}
+BUILD_TYPE=${BUILD_TYPE:-debug}
+OUT=${OUT:-build-psp}
+
+# don't let MSYS mangle container paths
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+ensure_container()
+{
+	if ! docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+		docker create --name "$CONTAINER" "$IMAGE" sleep infinity >/dev/null
+	fi
+	if [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+		docker start "$CONTAINER" >/dev/null
+	fi
+	if ! docker exec "$CONTAINER" sh -c 'command -v python3' >/dev/null 2>&1; then
+		docker exec "$CONTAINER" apk add --no-cache python3 make bash
+	fi
+}
+
+sync_sources()
+{
+	docker exec "$CONTAINER" mkdir -p /src
+	# skip submodule gitlinks (their files are added below) and files deleted from the working tree
+	git ls-files --cached --others --exclude-standard \
+		| grep -v -x -F "$(git submodule foreach --quiet 'echo $sm_path')" \
+		| tar --ignore-failed-read --warning=no-failed-read -T - -cf - \
+		| docker exec -i "$CONTAINER" tar -xf - -C /src
+	# submodules (checked out ones only)
+	git submodule foreach --quiet 'git ls-files -z --cached --others --exclude-standard | sed -z "s|^|$sm_path/|"' \
+		| tar --null -T - -cf - \
+		| docker exec -i "$CONTAINER" tar -xf - -C /src
+}
+
+run()
+{
+	docker exec -w /src "$CONTAINER" sh -c "$*"
+}
+
+do_configure()
+{
+	run "python3 waf configure -T $BUILD_TYPE --psp=$PSP_OPTS --prefix=/out $*"
+}
+
+do_build()
+{
+	run "python3 waf build"
+	run "rm -rf /out && python3 waf install --destdir=/out >/dev/null"
+	rm -rf "$OUT"
+	mkdir -p "$OUT"
+	docker cp "$CONTAINER:/out/." "$OUT/"
+	# unstripped ELF for psp-addr2line / psp-gdb
+	docker cp "$CONTAINER:/src/build/engine/xash" "$OUT/xash.elf" 2>/dev/null || true
+	run "python3 scripts/psp/check_stubs.py build/engine/xash_fixup"
+	echo "Output in $OUT/"
+}
+
+cmd=${1:-all}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+configure) ensure_container; sync_sources; do_configure "$@" ;;
+build)     ensure_container; sync_sources; do_build ;;
+all)       ensure_container; sync_sources; do_configure "$@"; do_build ;;
+shell)     ensure_container; sync_sources; docker exec -it -w /src "$CONTAINER" bash ;;
+exec)      ensure_container; sync_sources; run "$@" ;;
+rm)        docker rm -f "$CONTAINER" ;;
+*)         echo "unknown command: $cmd" >&2; exit 1 ;;
+esac
