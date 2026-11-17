@@ -1540,6 +1540,90 @@ void R_TextureList_f( void )
 	gEngfuncs.Con_Printf( "\n" );
 }
 
+
+/*
+===============
+R_DumpTexture_f
+
+debugging aid: decode a texture back from its GU format (unswizzle, CLUT lookup)
+and save the base level as scrshots/texdump_<num>.png
+===============
+*/
+static void R_DumpTexture_f( void )
+{
+	if( gEngfuncs.Cmd_Argc() < 2 )
+	{
+		gEngfuncs.Con_Printf( S_USAGE "gu_dumptexture <texture number from texturelist>\n" );
+		return;
+	}
+
+	int texnum = Q_atoi( gEngfuncs.Cmd_Argv( 1 ));
+	if( texnum <= 0 || texnum >= gl_numTextures || !gl_textures[texnum].dstTexture )
+	{
+		gEngfuncs.Con_Printf( S_ERROR "%s: bad texture %d\n", __func__, texnum );
+		return;
+	}
+
+	const gl_texture_t *tex = &gl_textures[texnum];
+	int width = tex->width, height = tex->height;
+	int stride = width * tex->bpp; // bytes per row
+
+	if( tex->bpp == 0 )
+	{
+		gEngfuncs.Con_Printf( S_ERROR "%s: %s has a compressed or 4-bit format\n", __func__, tex->name );
+		return;
+	}
+
+	// unswizzle: 16 bytes x 8 rows blocks, row major
+	byte *linear = malloc( stride * height );
+	if( !linear )
+		return;
+
+	if( FBitSet( tex->flags, TF_IMG_SWIZZLED ))
+	{
+		const byte *src = tex->dstTexture;
+		int blocks_x = stride / 16;
+
+		for( int by = 0; by < height / 8; by++ )
+		{
+			for( int bx = 0; bx < blocks_x; bx++ )
+			{
+				for( int row = 0; row < 8; row++, src += 16 )
+					memcpy( &linear[( by * 8 + row ) * stride + bx * 16], src, 16 );
+			}
+		}
+	}
+	else memcpy( linear, tex->dstTexture, stride * height );
+
+	rgbdata_t *pic = Mem_Calloc( r_temppool, sizeof( rgbdata_t ));
+	pic->width = width;
+	pic->height = height;
+	pic->type = PF_RGBA_32;
+	pic->flags = IMAGE_HAS_COLOR|IMAGE_HAS_ALPHA;
+	pic->size = width * height * 4;
+	pic->buffer = Mem_Malloc( r_temppool, pic->size );
+
+	if( tex->format == GU_PSM_T8 )
+	{
+		// expand the CLUT first, then look the indices up
+		uint32_t clut[256];
+
+		GL_PixelConverter( (byte *)clut, tex->dstPalette, 256, PC_HWF( PALETTE_FORMAT ), PC_SWF( PF_RGBA_32 ));
+		for( int i = 0; i < width * height; i++ )
+			((uint32_t *)pic->buffer)[i] = clut[linear[i]];
+	}
+	else GL_PixelConverter( pic->buffer, linear, width * height, PC_HWF( tex->format ), PC_SWF( PF_RGBA_32 ));
+
+	free( linear );
+
+	char name[MAX_QPATH];
+	Q_snprintf( name, sizeof( name ), "scrshots/texdump_%d.png", texnum );
+	if( gEngfuncs.FS_SaveImage( name, pic ))
+		gEngfuncs.Con_Printf( "Write %s (%s, %dx%d, format %d%s)\n", name, tex->name, width, height,
+			tex->format, FBitSet( tex->flags, TF_IMG_SWIZZLED ) ? ", swizzled" : "" );
+	Mem_Free( pic->buffer );
+	Mem_Free( pic );
+}
 /*
 ===============
 R_InitImages
@@ -1563,6 +1647,7 @@ void R_InitImages( void )
 
 
 	gEngfuncs.Cmd_AddCommand( "texturelist", R_TextureList_f, "display loaded textures list" );
+	gEngfuncs.Cmd_AddCommand( "gu_dumptexture", R_DumpTexture_f, "save a texture as decoded from GU memory (debugging)" );
 }
 
 /*
@@ -1576,6 +1661,7 @@ void R_ShutdownImages( void )
 	int		i;
 
 	gEngfuncs.Cmd_RemoveCommand( "texturelist" );
+	gEngfuncs.Cmd_RemoveCommand( "gu_dumptexture" );
 	GL_CleanupAllTextureUnits();
 
 	for( i = 0, tex = gl_textures; i < gl_numTextures; i++, tex++ )
