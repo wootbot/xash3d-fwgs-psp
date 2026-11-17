@@ -28,6 +28,12 @@ GNU General Public License for more details.
 #include <android/asset_manager.h>
 #endif
 
+// defaults.h isn't included here, keep in sync with it
+// only a handful of file descriptors are available, keep only one read-only file open
+#if !defined( XASH_REDUCE_FD ) && ( XASH_DOS4GW || XASH_PSP )
+#define XASH_REDUCE_FD 1
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {

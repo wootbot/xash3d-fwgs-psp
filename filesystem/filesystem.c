@@ -34,7 +34,6 @@ searchpath_t *fs_writepath;
 
 #ifdef XASH_REDUCE_FD
 static file_t *fs_last_readfile;
-static zip_t *fs_last_zip;
 
 void FS_EnsureOpenFile( file_t *file )
 {
@@ -67,9 +66,13 @@ void FS_BackupFileName( file_t *file, const char *path, uint options )
 		if( file == fs_last_readfile )
 			FS_EnsureOpenFile( NULL );
 	}
-	else if( options == O_RDONLY || options == (O_RDONLY|O_BINARY) )
+	else if(( options & ~O_BINARY ) == O_RDONLY )
 	{
-		file->backup_path = copystring( path );
+		size_t len = Q_strlen( path ) + 1;
+		char *copy = (char *)Mem_Malloc( fs_mempool, len );
+
+		memcpy( copy, path, len );
+		file->backup_path = copy;
 		file->backup_options = options;
 	}
 }

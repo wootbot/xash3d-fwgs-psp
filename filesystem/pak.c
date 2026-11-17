@@ -180,12 +180,6 @@ static pack_t *FS_LoadPackPAK( const char *packfile, int *error )
 	pack->numfiles = numpackfiles;
 	qsort( pack->files, pack->numfiles, sizeof( pack->files[0] ), FS_SortPak );
 
-#ifdef XASH_REDUCE_FD
-	// will reopen when needed
-	close( pack->handle );
-	pack->handle = -1;
-#endif
-
 	if( error )
 		*error = PAK_LOAD_OK;
 

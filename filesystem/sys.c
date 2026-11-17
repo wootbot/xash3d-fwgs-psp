@@ -414,7 +414,10 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 	file->handle = fd;
 
 	if( !memfile )
+	{
 		FS_BackupFileName( file, filepath, mod | opt );
+		FS_EnsureOpenFile( file ); // closes the previously used read-only file
+	}
 
 	file->searchpath = NULL;
 	file->real_length = lseek( file->handle, 0, SEEK_END );
@@ -443,9 +446,8 @@ file_t *FS_OpenHandle( searchpath_t *searchpath, int handle, fs_offset_t offset,
 	file_t *file = (file_t *)Mem_Calloc( fs_mempool, sizeof( file_t ));
 
 #ifdef XASH_REDUCE_FD
-	file->backup_position = offset;
-	file->backup_path = copystring( syspath );
-	file->backup_options = O_RDONLY|O_BINARY;
+	// opened on first read
+	FS_BackupFileName( file, searchpath->filename, O_RDONLY|O_BINARY );
 	file->handle = -1;
 #else // !XASH_REDUCE_FD
 #ifdef HAVE_DUP
