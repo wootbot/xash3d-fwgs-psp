@@ -72,6 +72,14 @@ class psp_packpbp(Task.Task):
 def is_psp_build(self):
 	return self.env.DEST_OS == 'psp' and self.bld.__class__.__name__ != 'ConfigurationContext' and getattr(self, 'link_task', None)
 
+def replace_install_files(self, files):
+	tsk = getattr(self, 'install_task', None)
+	if tsk:
+		tsk.install_from = files
+		tsk.inputs = [] # init_files appends
+		tsk.outputs = []
+		tsk.init_files()
+
 @TaskGen.feature('cshlib', 'cxxshlib')
 @TaskGen.after_method('apply_link')
 def build_module(self):
@@ -89,8 +97,14 @@ def build_module(self):
 	self.create_task('psp_fixup', src=link_output, tgt=fixup_output)
 	self.create_task('psp_prxgen', src=fixup_output, tgt=prxgen_output)
 
-	if getattr(self, 'install_task', None):
-		self.install_task.inputs = [prxgen_output]
+	replace_install_files(self, [prxgen_output])
+
+@TaskGen.feature('c', 'cxx')
+@TaskGen.after_method('apply_link')
+def skip_relocatable_install(self):
+	# xshlib turns these into relocatable objects linked into the engine, nothing to install
+	if is_psp_build(self) and self.name in (self.env.STATIC_LINKING or '').split(','):
+		replace_install_files(self, [])
 
 @TaskGen.feature('cprogram', 'cxxprogram', 'cprogram_static', 'cxxprogram_static')
 @TaskGen.after_method('apply_link')
@@ -116,5 +130,7 @@ def build_eboot(self):
 	self.create_task('psp_mksfo', tgt=mksfo_output)
 	self.create_task('psp_packpbp', src=[finalobj_output, mksfo_output], tgt=packpbp_output)
 
-	if getattr(self, 'install_task', None):
-		self.install_task.inputs = [packpbp_output, finalobj_output]
+	# the engine has no install_path, like on other consoles, the ELF isn't useful on the device
+	inst_to = getattr(self, 'special_install_path', None)
+	if inst_to:
+		self.add_install_files(install_to=inst_to, install_from=[packpbp_output, finalobj_output])

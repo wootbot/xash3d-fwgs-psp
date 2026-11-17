@@ -678,13 +678,12 @@ class PSP:
 		# psp-gcc makes int32_t a long, unlike every other 32-bit target the engine is built for,
 		# breaking printf formats and int/int32_t pointer compatibility all over the code.
 		# Both are 32-bit on MIPS, so make it an int, newlib's headers follow GCC's macros.
-		for k, v in [('INT32_TYPE', 'int'), ('UINT32_TYPE', 'unsigned int'),
-			('INT_LEAST32_TYPE', 'int'), ('UINT_LEAST32_TYPE', 'unsigned int'),
-			('INT32_MAX', '0x7fffffff'), ('UINT32_MAX', '0xffffffffU'),
-			('INT_LEAST32_MAX', '0x7fffffff'), ('UINT_LEAST32_MAX', '0xffffffffU'),
-			('INT32_C(c)', 'c'), ('UINT32_C(c)', 'c ## U')]:
-			name = k.split('(')[0]
-			cflags += ['-U__%s__' % name, '-D__%s__%s=%s' % (name, k[len(name):], v)]
+		for k, v in [('__INT32_TYPE__', 'int'), ('__UINT32_TYPE__', 'unsigned int'),
+			('__INT_LEAST32_TYPE__', 'int'), ('__UINT_LEAST32_TYPE__', 'unsigned int'),
+			('__INT32_MAX__', '0x7fffffff'), ('__UINT32_MAX__', '0xffffffffU'),
+			('__INT_LEAST32_MAX__', '0x7fffffff'), ('__UINT_LEAST32_MAX__', '0xffffffffU'),
+			('__INT32_C(c)', 'c'), ('__UINT32_C(c)', 'c ## U')]:
+			cflags += ['-U%s' % k.split('(')[0], '-D%s=%s' % (k, v)]
 		if cxx:
 			cflags += ['-D_GNU_SOURCE'] # newlib hides vasprintf and friends otherwise
 		else:

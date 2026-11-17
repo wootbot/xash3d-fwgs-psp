@@ -126,7 +126,8 @@ def configure(conf):
 			# no SDL, video, sound and input are in platform/ps4
 			conf.env.LIB_PS4CLIENT_SYS = ['SceImeDialog', 'SceCommonDialog', 'SceAudioIn', 'SceAudioOut', 'ScePad', 'SceUserService', 'SceSysmodule', 'SceKeyboard', 'SceMouse']
 		elif conf.env.DEST_OS == 'psp':
-			pass # no SDL, video, sound and input are in platform/psp
+			# no SDL, video, sound and input are in platform/psp
+			conf.load('gas') # import stubs for ka.prx
 		elif conf.env.DEST_OS == 'linux' and conf.options.FBDEV_SW:
 			conf.check_cc(lib='asound')
 		elif conf.options.SDL12: # TODO: move to sdl2.py
@@ -326,7 +327,7 @@ def build(bld):
 		if bld.env.IOS:
 			defines += ['XASH_SDLMAIN=1']
 
-		if bld.env.DEST_OS in ['nswitch', 'psvita', 'emscripten']:
+		if bld.env.DEST_OS in ['nswitch', 'psvita', 'emscripten', 'psp']:
 			install_path = None
 
 		linkflags = []

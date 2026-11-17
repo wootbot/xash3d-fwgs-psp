@@ -66,7 +66,7 @@ run()
 
 do_configure()
 {
-	run "python3 waf configure -T $BUILD_TYPE --psp=$PSP_OPTS --prefix=/out $*"
+	run "python3 waf configure -T $BUILD_TYPE --psp=$PSP_OPTS --prefix=/ $*"
 }
 
 do_build()

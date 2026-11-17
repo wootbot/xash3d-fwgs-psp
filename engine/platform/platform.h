@@ -67,7 +67,7 @@ void IOS_GetWindowInsets( void *window, float insets[4] );
 #endif
 
 // walks the direct dependency list of a game library image loaded from disk
-#if XASH_LIB == LIB_STATIC || XASH_ANDROID || XASH_IOS || XASH_PSVITA || XASH_NSWITCH || XASH_PS4
+#if XASH_LIB == LIB_STATIC || XASH_ANDROID || XASH_IOS || XASH_PSVITA || XASH_NSWITCH || XASH_PS4 || XASH_PSP
 static inline qboolean Platform_CheckLibraryDirectDependency( const byte *data, size_t size, const char *depname )
 {
 	return false;
@@ -182,6 +182,14 @@ void PS4_FramePresented( void );
 void PS4_AllowHideSplash( void );
 #endif
 
+#if XASH_PSP
+void PSP_Init( void );
+void PSP_Shutdown( void );
+int PSP_GetArgv( int in_argc, char **in_argv, char ***out_argv );
+int PSP_LoadModule( const char *filename, int mpid, size_t argsize, void *argp );
+int PSP_UnloadModule( int modid, int *sce_code );
+#endif
+
 #if XASH_DOS
 void DOS_Init( void );
 void DOS_Shutdown( void );
@@ -218,6 +226,8 @@ static inline void Platform_Init( qboolean con_showalways )
 	PSVita_Init( );
 #elif XASH_PS4
 	PS4_Init( );
+#elif XASH_PSP
+	PSP_Init( );
 #elif XASH_DOS
 	DOS_Init( );
 #elif XASH_WIN32
@@ -243,6 +253,8 @@ static inline void Platform_Shutdown( void )
 	PSVita_Shutdown( );
 #elif XASH_PS4
 	PS4_Shutdown( );
+#elif XASH_PSP
+	PSP_Shutdown( );
 #elif XASH_DOS
 	DOS_Shutdown( );
 #elif XASH_WIN32
@@ -403,6 +415,13 @@ void Platform_MouseMove( float *x, float *y );
 #elif XASH_PS4 // the gamepad, keyboard and mouse are polled in Platform_RunEvents
 void Platform_RunEvents( void );
 void Platform_MouseMove( float *x, float *y );
+#elif XASH_PSP // the buttons and the analog stick are polled in Platform_RunEvents
+void Platform_RunEvents( void );
+static inline void Platform_MouseMove( float *x, float *y )
+{
+	if( x ) *x = 0.0f;
+	if( y ) *y = 0.0f;
+}
 #else
 static inline void Platform_RunEvents( void ) { }
 static inline void Platform_MouseMove( float *x, float *y )
@@ -414,7 +433,7 @@ static inline void Platform_MouseMove( float *x, float *y )
 
 // rect is the area where the text is edited, in render coordinates, so the platform
 // might keep it visible when it shows the on-screen keyboard over the game
-#if XASH_SDL >= 2 || XASH_PSVITA || XASH_DOS || XASH_USE_EVDEV || XASH_PS4
+#if XASH_SDL >= 2 || XASH_PSVITA || XASH_DOS || XASH_USE_EVDEV || XASH_PS4 || XASH_PSP
 void Platform_EnableTextInput( qboolean enable, int x, int y, int w, int h );
 #else
 static inline void Platform_EnableTextInput( qboolean enable, int x, int y, int w, int h ) { }
@@ -429,7 +448,7 @@ int Platform_TranslateKeyLayout( int keynum );
 static inline int Platform_TranslateKeyLayout( int keynum ) { return keynum; }
 #endif
 
-#if XASH_SDL >= 2 || XASH_PS4
+#if XASH_SDL >= 2 || XASH_PS4 || XASH_PSP
 int Platform_JoyInit( void ); // returns number of connected gamepads, negative if error
 void Platform_JoyShutdown( void );
 void Platform_CalibrateGamepadGyro( void );

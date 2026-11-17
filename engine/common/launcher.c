@@ -49,6 +49,9 @@ int main( int argc, char **argv )
 	// read command line from file
 	szArgc = PS4_GetArgv( argc, argv, &szArgv );
 	return PS4_RunOnBigStack( PS4_HostMain, NULL );
+#elif XASH_PSP
+	// read command line from start.cmd
+	szArgc = PSP_GetArgv( argc, argv, &szArgv );
 #elif XASH_IOS
 	IOS_LaunchDialog();
 	szArgc = IOS_GetArgs( &szArgv );
