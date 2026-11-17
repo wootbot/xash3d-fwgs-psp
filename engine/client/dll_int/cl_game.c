@@ -440,9 +440,6 @@ void CL_DrawCenterPrint( void )
 	if( !clgame.centerPrint.time )
 		return;
 
-	if( !font || !font->valid ) // e.g. ref_null has no fonts
-		return;
-
 	if(( cl.time - clgame.centerPrint.time ) >= scr_centertime.value )
 	{
 		// time expired
