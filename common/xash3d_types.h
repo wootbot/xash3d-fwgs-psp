@@ -69,8 +69,11 @@ enum { false, true };
 #endif
 typedef int qboolean;
 
-#if XASH_LOW_MEMORY == 1 || XASH_PSP
+#if XASH_LOW_MEMORY == 1
 	#define MAX_QPATH 48
+	#define MAX_MODS  16
+#elif XASH_PSP // MAX_QPATH must match GoldSrc for online play
+	#define MAX_QPATH 64
 	#define MAX_MODS  16
 #elif XASH_LOW_MEMORY == 2
 	#define MAX_QPATH 32 // should be enough for singleplayer

@@ -160,7 +160,7 @@ int FS_Flush( file_t *file )
 	FS_Purge( file );
 
 	// sync
-#if XASH_POSIX
+#if XASH_POSIX || XASH_PSP
 	if( fsync( file->handle ) < 0 )
 		return EOF;
 #else

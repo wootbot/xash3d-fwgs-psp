@@ -58,7 +58,10 @@ GNU General Public License for more details.
 	#define OS_LIB_EXT    "dll"
 	#define OPEN_COMMAND  "open"
 #elif XASH_PSP
+	#include <unistd.h>
+	#define OS_LIB_PREFIX ""
 	#define OS_LIB_EXT    "prx"
+	#define OPEN_COMMAND  ""
 #endif
 
 #if !XASH_WIN32

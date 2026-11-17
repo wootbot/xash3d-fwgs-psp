@@ -502,7 +502,7 @@ int FS_SetCurrentDirectory( const char *path )
 		Sys_Error( "Changing directory to %s failed: %s\n", path, buf );
 		return false;
 	}
-#elif XASH_POSIX
+#elif XASH_POSIX || XASH_PSP
 	if( chdir( path ) < 0 )
 	{
 		Sys_Error( "Changing directory to %s failed: %s\n", path, strerror( errno ));

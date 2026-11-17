@@ -106,7 +106,9 @@ SETUP BACKENDS DEFINITIONS
 #endif
 
 #if XASH_PSP
-	#define XASH_PSP LIB_PSP
+	// renderer, menu and filesystem are linked statically, game libraries are PRX modules
+	#define XASH_LIB LIB_PSP
+	#define XASH_ALLOW_SAVERESTORE_OFFSETS
 #elif defined( XASH_STATIC_LIBS )
 	#define XASH_LIB LIB_STATIC
 	#define XASH_INTERNAL_GAMELIBS
