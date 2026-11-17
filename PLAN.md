@@ -200,3 +200,13 @@ music), launched from the XMB.
   `docker-build.sh` default), 0 unresolved stubs. Static memory with `ref_gu`: text 4.98 MB, BSS
   15.8 MB (+2.4 MB over `ref_null`: 1 MB GU display list, 276 KB texture table, 296 KB studio
   state after capping MAXSTUDIOVERTS at 2048, 245 KB decal pool, 196 KB lightmap blocklights).
+- 2026-11-17: **First frames with `ref_gu` on hardware.** Menu renders (first frame 5–6 s from
+  host0:). Fixed: invisible menu buttons (8-bit BMP palettes have alpha 0), 1024x1024 button atlas
+  (→ mainui text buttons on PSP), HD menu background (105 tiles, 6 MB → classic 12 tiles, menu
+  texture RAM 6.71 → 1.29 MB). `c0a0` loads and runs scripted sequences but memory is exhausted:
+  engine pools 23.5 MB (client edicts 4.8 MB, Zone Engine 4.6 MB, c0a0.bsp 3.9 MB, SoundLib 2.6 MB),
+  textures 4.5 MB RAM + 1.5 MB VRAM, BSS 15.8 MB; even a PNG screenshot fails. max_edicts default
+  now 900 (−0.9 MB, not yet measured). Next: texture compression (32-bit images → CLUT/DXT,
+  fonts → 4-bit alpha CLUT), sound cache, Zone Engine.
+  Debug aids: `+vid_autoshot N`, `+sys_cmdfile cmd.txt` (console commands from the PC via host0:),
+  `gu_dumptexture <n>`; quit with `quit` via the cmdfile instead of PSPLink `reset`.
