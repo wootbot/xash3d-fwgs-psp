@@ -505,6 +505,17 @@ int FS_SetCurrentDirectory( const char *path )
 		return false;
 	}
 #elif XASH_POSIX || XASH_PSP
+#if XASH_PSP
+	// the root directory comes without the trailing slash, a device root ("host0:") needs it
+	char devroot[64];
+	size_t len = Q_strlen( path );
+
+	if( len > 0 && len < sizeof( devroot ) - 1 && path[len - 1] == ':' )
+	{
+		Q_snprintf( devroot, sizeof( devroot ), "%s/", path );
+		path = devroot;
+	}
+#endif // XASH_PSP
 	if( chdir( path ) < 0 )
 	{
 		Sys_Error( "Changing directory to %s failed: %s\n", path, strerror( errno ));
