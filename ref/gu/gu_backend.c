@@ -316,7 +316,8 @@ qboolean VID_ScreenShot( const char *filename, int shot_type )
 	r_shot->buffer = Mem_Malloc( r_temppool, r_shot->size );
 
 	// get the last displayed frame, the framebuffer is top-down already
-	const byte *src = (const byte *)guRender.disp_buffer;
+	// read it through the uncached VRAM mirror, the GE doesn't go through the CPU cache
+	const byte *src = (const byte *)((uintptr_t)guRender.disp_buffer | 0x40000000 );
 	byte *dst = r_shot->buffer;
 
 	for( int y = 0; y < r_shot->height; y++ )

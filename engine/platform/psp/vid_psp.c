@@ -34,6 +34,11 @@ owns the GE and draws by itself, the software renderer gets a 16-bit framebuffer
 
 static int psp_dummy_window; // host.hWnd must be non-NULL while the screen is open
 
+// debugging aid: there is no keyboard under PSPLink, so screenshots can be taken periodically
+// (e.g. "+vid_autoshot 5" in the arguments), they are written through host0: when run from the PC
+static CVAR_DEFINE_AUTO( vid_autoshot, "0", 0, "take a screenshot every N seconds (0 - disabled)" );
+static double vid_autoshot_next;
+
 static struct
 {
 	qboolean opened;
@@ -121,8 +126,23 @@ void GL_UpdateSwapInterval( void )
 	}
 }
 
+static void VID_CheckAutoShot( void )
+{
+	if( vid_autoshot.value <= 0.0f )
+		return;
+
+	if( host.realtime < vid_autoshot_next )
+		return;
+
+	vid_autoshot_next = host.realtime + vid_autoshot.value;
+	Cbuf_AddText( "screenshot\n" );
+}
+
+
 void GL_SwapBuffers( void )
 {
+	VID_CheckAutoShot();
+
 	// ref_gu swaps the buffers itself
 	if( vid_psp.vsync )
 		sceDisplayWaitVblankStart();
@@ -154,6 +174,7 @@ qboolean VID_SetMode( void )
 		host.hWnd = (void *)&psp_dummy_window;
 		refState.window_mode = WINDOW_MODE_FULLSCREEN;
 		SetBits( gl_vsync.flags, FCVAR_CHANGED );
+		Cvar_RegisterVariable( &vid_autoshot );
 	}
 
 	VID_SetDisplayTransform( &w, &h );
