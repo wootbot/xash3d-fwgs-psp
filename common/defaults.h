@@ -202,7 +202,11 @@ Default build-depended cvar and constant values
 #endif // DEFAULT_FULLSCREEN
 
 #ifndef DEFAULT_MAX_EDICTS
-	#define DEFAULT_MAX_EDICTS 1200 // was 900 before HL25
+	#if XASH_PSP
+		#define DEFAULT_MAX_EDICTS 900 // pre-HL25 value, each client entity costs ~3 KB (servers send their own limit)
+	#else
+		#define DEFAULT_MAX_EDICTS 1200 // was 900 before HL25
+	#endif
 #endif // DEFAULT_MAX_EDICTS
 
 

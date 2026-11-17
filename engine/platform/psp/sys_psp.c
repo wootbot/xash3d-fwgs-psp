@@ -24,6 +24,7 @@ GNU General Public License for more details.
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <ctype.h>
+#include <unistd.h>
 
 PSP_MODULE_INFO( "Xash3D", PSP_MODULE_USER, 1, 0 );
 PSP_MAIN_THREAD_ATTR( PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU );
@@ -97,6 +98,11 @@ void Platform_MessageBox( const char *title, const char *message, qboolean paren
 	pspDebugScreenSetTextColor( 0xffffff );
 	pspDebugScreenPrintf( "\n\nPress X to continue.\n" );
 
+	// under PSPLink nobody may be looking at the screen, don't block the engine forever
+	char cwd[16] = "";
+	const qboolean psplink = getcwd( cwd, sizeof( cwd )) && !Q_strnicmp( cwd, "host", 4 );
+	const SceUInt64 deadline = sceKernelGetSystemTimeWide() + 10 * 1000 * 1000;
+
 	// wait for the button to be released first, then pressed
 	do
 	{
@@ -106,6 +112,9 @@ void Platform_MessageBox( const char *title, const char *message, qboolean paren
 	do
 	{
 		sceCtrlReadBufferPositive( &pad, 1 );
+
+		if( psplink && sceKernelGetSystemTimeWide() > deadline )
+			break;
 	} while( !( pad.Buttons & PSP_CTRL_CROSS ));
 
 	pspDebugScreenClear();

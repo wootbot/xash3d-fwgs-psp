@@ -399,14 +399,16 @@ static void UI_ConvertGameInfo( gameinfo2_t *out, const gameinfo_t *in )
 		SetBits( out->flags, GFL_NOSKILLS );
 	if( in->render_picbutton_text )
 		SetBits( out->flags, GFL_RENDER_PICBUTTON_TEXT );
-#if XASH_PSP
-	// the WON button atlas is 1024x1024, too big for the GE (512x512 max) and the memory budget
-	SetBits( out->flags, GFL_RENDER_PICBUTTON_TEXT );
-#endif
 	if( in->hd_background )
 		SetBits( out->flags, GFL_HD_BACKGROUND );
 	if( in->animated_title )
 		SetBits( out->flags, GFL_ANIMATED_TITLE );
+#if XASH_PSP
+	// the WON button atlas is 1024x1024, too big for the GE (512x512 max) and the memory budget
+	SetBits( out->flags, GFL_RENDER_PICBUTTON_TEXT );
+	// the 25th anniversary background is 105 tiles (~6 MB as textures), the old one 12
+	ClearBits( out->flags, GFL_HD_BACKGROUND );
+#endif
 }
 
 static void UI_ToOldGameInfo( GAMEINFO *out, const gameinfo2_t *in )
