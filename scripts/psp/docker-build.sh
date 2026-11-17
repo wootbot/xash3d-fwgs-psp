@@ -11,7 +11,7 @@
 #   scripts/psp/docker-build.sh rm                               # remove the build container
 #
 # Environment:
-#   PSP_OPTS   --psp= value (default: prx,660,NULL until ref/gu exists)
+#   PSP_OPTS   --psp= value (default: prx,660,HW; prx,660,NULL builds the headless engine)
 #   BUILD_TYPE waf -T value (default: debug)
 #   OUT        host output directory (default: build-psp)
 #
@@ -25,7 +25,7 @@ set -e
 
 CONTAINER=${CONTAINER:-xash3d-psp-build}
 IMAGE=${IMAGE:-pspdev/pspdev:latest}
-PSP_OPTS=${PSP_OPTS:-prx,660,NULL}
+PSP_OPTS=${PSP_OPTS:-prx,660,HW}
 BUILD_TYPE=${BUILD_TYPE:-debug}
 OUT=${OUT:-build-psp}
 

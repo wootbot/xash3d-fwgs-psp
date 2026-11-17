@@ -102,12 +102,19 @@ ride and scripted sequences run. Resource verification `stat()`s every file on t
 
 ## Phase 2 — Renderer (`ref/gu`)
 
-- [ ] Port `reference/.../ref_gu` to `ref/gu`, REF_API v1 → v20. Use the diff between the reference's
-      `ref_gl` (2020) and today's `ref/gl` as the porting guide; move shared code onto `ref/common`.
-- [ ] Re-apply PSP changes to shared headers only where still needed (`com_model.h`, `render_api.h`,
-      `com_image.h`, `ref_api.h`, `sprite.h`) — prefer keeping them inside `ref/gu`.
-- [ ] VRAM management, texture formats/palettes (`gu_vram.c`, pixel converter), clipping, studio,
-      sprites, beams, decals, particles, triapi, warp/sky, lightmaps.
+- [x] Port `reference/.../ref_gu` to `ref/gu`, REF_API v1 → v20 (builds and links, 2026-11-17; not
+      run on hardware yet). Method: 3-way merge (old `ref_gl` → `ref_gu` diff onto today's `ref/gl`)
+      for small files; image/rsurf/studio/warp/beams/decals rebuilt from today's GL code with the GU
+      parts transplanted. `ref/common/*.c` is compiled into `ref_gu` (the relocatable `ld -r` link
+      doesn't pull static libraries). Left out: VBO, ripples, lightmapped water, cubemap shots,
+      cinematics (`GL_UpdateTexture`), detail-texture tuning, P5 RAM temp buffers (heap for now).
+- [x] Shared headers untouched: polygons are `gu_poly_t` cast from `msurface_t::polys`, PSP pixel
+      formats (`PF_RGB_332`…) and `TF_IMG_*` flags are private to `ref/gu`. The old `sprite.h`
+      `#pragma pack` and `ref_api.h` P5 RAM hooks were not needed so far.
+- [~] VRAM management, texture formats/palettes (`gu_vram.c`, pixel converter), clipping, studio,
+      sprites, beams, decals, particles, triapi, warp/sky, lightmaps — ported, needs hardware testing.
+      GU gotchas: `sceGuDepthMask( GU_TRUE )` *disables* depth writes; the GE reads textures when it
+      executes the list (dynamic lightmap updates mid-frame race, same as the old port).
 - [ ] Menu: upstream `3rdparty/mainui` vs Crow-bar's PSP mainui changes (fonts, resolution 480x272,
       controls). Avoid forking the submodule if possible.
 - [ ] Engine-side PSP optimizations from the reference, as profiling shows they're needed:
@@ -189,3 +196,7 @@ music), launched from the XMB.
   `c0a0a`/`c0a0b`/`c0a0c` transitions works after: device-root `chdir` fix, net_graph without font
   fix, `SAVE_HEAPSIZE` 2 MB on PSP (4 MB didn't fit). Engine heap on `c0a0c`: 24.3 MB allocated.
   Open: ~25 s after "Verifying and uploading resources" before spawning (custom.hpk?).
+- 2026-11-17: Phase 2: `ref/gu` ported to REF_API 20 and linked (`--psp=prx,660,HW`, now the
+  `docker-build.sh` default), 0 unresolved stubs. Static memory with `ref_gu`: text 4.98 MB, BSS
+  15.8 MB (+2.4 MB over `ref_null`: 1 MB GU display list, 276 KB texture table, 296 KB studio
+  state after capping MAXSTUDIOVERTS at 2048, 245 KB decal pool, 196 KB lightmap blocklights).
