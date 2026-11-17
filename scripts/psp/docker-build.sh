@@ -15,6 +15,9 @@
 #   BUILD_TYPE waf -T value (default: debug)
 #   OUT        host output directory (default: build-psp)
 #
+# $OUT is also the game root for PSPLink: put the game data into $OUT/valve, start
+# `usbhostfs_pc -g` from inside $OUT (host0: = $OUT) and run `./xash.prx` from host0:/ in pspsh.
+#
 # A persistent container keeps installed packages and the waf build directory between runs,
 # so rebuilds are incremental. Sources are synced into /src with tar (tracked and untracked,
 # non-ignored files), which is much faster than building on a Windows bind mount.
@@ -74,7 +77,8 @@ do_build()
 {
 	run "python3 waf build"
 	run "rm -rf /out && python3 waf install --destdir=/out >/dev/null"
-	rm -rf "$OUT"
+	# copy over, don't wipe: $OUT doubles as the game root served as host0: by usbhostfs
+	# (game data in $OUT/valve, game PRXs from the hlsdk command)
 	mkdir -p "$OUT"
 	docker cp "$CONTAINER:/out/." "$OUT/"
 	# unstripped ELF for psp-addr2line / psp-gdb
