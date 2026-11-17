@@ -370,6 +370,9 @@ static void NetGraph_DrawTextFields( int x, int y, int w, wrect_t rect, int coun
 	int		j = cls.netchan.incoming_sequence & NET_TIMINGS_MASK;
 	int		last_y = y - net_graphheight.value;
 
+	if( !font || !font->valid ) // e.g. ref_null has no fonts
+		return;
+
 	if( count > 0 )
 	{
 		avg = avg / (float)( count - ( host.frametime * FRAMERATE_AVG_FRAC ));
