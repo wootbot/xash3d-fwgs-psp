@@ -16,8 +16,9 @@ verified **on the PSP**, not just compiled.
 
 - [x] Add `reference/`, `tools/psplink/` to `.gitignore` (build output: `build-*` already ignored).
 - [x] Add `upstream` remote (FWGS/xash3d-fwgs).
-- [ ] Re-acquire the PSPLink PC tools (usbhostfs_pc, pspsh, cygwin DLLs) into the ignored `tools/psplink/`
-      folder with launcher scripts (usbhostfs with `-g -c <relative build dir>`, pspsh, psp-gdb via Docker).
+- [x] PSPLink PC tools: official `pspsh-windows.zip` from pspdev/psplinkusb v3.2.1 (matches PSPLink 3.2.1
+      on the PSP, cygwin + libusb-win32) in the ignored `tools/psplink/`, with `usbhostfs.bat`
+      (`-g -c ../../build-psp`) and `pspsh.bat`. psp-gdb via Docker still untested.
 - [x] Docker build: `scripts/psp/docker-build.sh` (persistent `xash3d-psp-build` container, tar sync,
       `configure|build|all|shell|exec|hlsdk|rm`) -> `build-psp/` (`EBOOT.PBP`, `xash.prx`, `xash.elf`).
 - [x] Import-stub audit `scripts/psp/check_stubs.py`, run automatically after every engine and game
