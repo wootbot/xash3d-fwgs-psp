@@ -111,7 +111,8 @@ typedef struct gltexture_s
 	byte		numMips;		// mipmap count
 	byte		bpp;
 	byte		*dstTexture;	// texture data, in VRAM when TF_IMG_INVRAM, swizzled when TF_IMG_SWIZZLED
-	byte		*dstPalette;	// CLUT for 8-bit textures
+	byte		*dstPalette;	// CLUT for 4/8-bit textures
+	byte		clutFormat;	// GU_PSM_5650, 5551 or 4444, depending on the alpha the palette needs
 	int		format;		// uploaded format (pixformat_t)
 	texFlags_t	flags;
 

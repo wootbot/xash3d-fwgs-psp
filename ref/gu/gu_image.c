@@ -26,19 +26,13 @@ static uint		gl_numTextures;
 static byte*		gl_palette_332 = NULL;
 
 /*
-	num_colors = PALETTE_BLOCKS x 16 (16-bit CLUT)
-	num_colors = PALETTE_BLOCKS x 8 (32-bit CLUT)
+	CLUTs are 16-bit, the format is picked per texture by the alpha the palette needs
+	(5650 opaque, 5551 one bit, 4444 gradients), they all cost the same.
+	num_colors = PALETTE_BLOCKS x 16
 */
-#define PALETTE_FORMAT	GU_PSM_4444
-#if (PALETTE_FORMAT == GU_PSM_4444) || (PALETTE_FORMAT == GU_PSM_5551) || (PALETTE_FORMAT == GU_PSM_5650)
-#define PALETTE_SIZE	2 * 256
+#define PALETTE_SIZE	( 2 * 256 )
 #define PALETTE_BLOCKS	16
-#elif PALETTE_FORMAT == GU_PSM_8888
-#define PALETTE_SIZE	4 * 256
-#define PALETTE_BLOCKS	32
-#else
-#error Current PALETTE_FORMAT not supported!
-#endif
+#define PALETTE_SIZE_T4	( 2 * 16 )
 
 #define TEXTURE_SIZE_MIN	16
 
@@ -83,8 +77,13 @@ void GL_Bind( int tmu, unsigned int texnum )
 	// Set palette
 	if( texture->format == GU_PSM_T8 )
 	{
-		sceGuClutMode( PALETTE_FORMAT, 0, 0xff, 0 );
+		sceGuClutMode( texture->clutFormat, 0, 0xff, 0 );
 		sceGuClutLoad( PALETTE_BLOCKS, texture->dstPalette );
+	}
+	else if( texture->format == GU_PSM_T4 )
+	{
+		sceGuClutMode( texture->clutFormat, 0, 0x0f, 0 );
+		sceGuClutLoad( PALETTE_SIZE_T4 / 32, texture->dstPalette );
 	}
 
 	// Set texture parameters
@@ -651,6 +650,207 @@ static void GL_TextureSwizzle( byte *dst, const byte *src, uint width, uint heig
 
 /*
 ===============
+GL_AllocPalette
+
+private CLUT of the texture, VRAM first
+===============
+*/
+static void GL_AllocPalette( gl_texture_t *tex )
+{
+	if( tex->dstPalette && tex->dstPalette != gl_palette_332 )
+		return;
+
+	tex->dstPalette = (byte *)valloc( PALETTE_SIZE );
+	if( !tex->dstPalette )
+	{
+		tex->dstPalette = (byte *)memalign( 16, PALETTE_SIZE );
+		if( !tex->dstPalette )
+			gEngfuncs.Host_Error( "%s: %s out of memory for palette\n", __func__, tex->name );
+	}
+}
+
+/*
+===============
+GL_FreePalette / GL_Use332Palette
+===============
+*/
+static void GL_FreePalette( gl_texture_t *tex )
+{
+	if( tex->dstPalette && tex->dstPalette != gl_palette_332 )
+	{
+		if( vchkptr( tex->dstPalette ))
+			vfree( tex->dstPalette );
+		else free( tex->dstPalette );
+	}
+	tex->dstPalette = NULL;
+}
+
+static void GL_Use332Palette( gl_texture_t *tex )
+{
+	GL_FreePalette( tex );
+	tex->dstPalette = gl_palette_332;
+	tex->clutFormat = GU_PSM_5650;
+}
+
+/*
+===============
+GL_UploadPalette
+
+store an RGBA32 palette in the 16-bit CLUT format with the most colour bits
+that still keeps its alpha: 5650 opaque, 5551 one bit, 4444 gradients
+===============
+*/
+static void GL_UploadPalette( gl_texture_t *tex, const byte *rgba, int numColors )
+{
+	qboolean opaque = true, onebit = true;
+	int i;
+
+	for( i = 0; i < numColors; i++ )
+	{
+		const byte a = rgba[i * 4 + 3];
+
+		if( a != 0xff )
+			opaque = false;
+		if( a != 0xff && a != 0x00 )
+			onebit = false;
+	}
+
+	if( opaque )
+		tex->clutFormat = GU_PSM_5650;
+	else if( onebit )
+		tex->clutFormat = GU_PSM_5551;
+	else tex->clutFormat = GU_PSM_4444;
+
+	GL_AllocPalette( tex );
+	GL_PixelConverter( tex->dstPalette, rgba, numColors, PC_SWF( PF_RGBA_32 ), PC_HWF( tex->clutFormat ));
+	sceKernelDcacheWritebackRange( tex->dstPalette, PALETTE_SIZE );
+}
+
+/*
+===============
+GL_SingleColorAlpha
+
+fonts and similar images are one colour with varying alpha: a 16 entry CLUT of
+alpha levels (T4) holds them as well as 4444 does, at a quarter of the size
+===============
+*/
+static qboolean GL_SingleColorAlpha( const rgbdata_t *pic, byte color[4] )
+{
+	const byte *p = pic->buffer;
+	qboolean found = false;
+	int i;
+
+	if( pic->type != PF_RGBA_32 && pic->type != PF_BGRA_32 )
+		return false;
+
+	if( !FBitSet( pic->flags, IMAGE_HAS_ALPHA ) || FBitSet( pic->flags, IMAGE_PREMULTIPLIED ))
+		return false;
+
+	for( i = 0; i < pic->width * pic->height; i++, p += 4 )
+	{
+		if(( p[3] >> 4 ) == 0 )
+			continue; // invisible in 4444 too
+
+		if( !found )
+		{
+			color[0] = p[0];
+			color[1] = p[1];
+			color[2] = p[2];
+			found = true;
+		}
+		else if((( p[0] ^ color[0] ) | ( p[1] ^ color[1] ) | ( p[2] ^ color[2] )) & 0xf0 )
+			return false; // differs in 4444
+	}
+
+	if( pic->type == PF_BGRA_32 )
+	{
+		const byte t = color[0];
+		color[0] = color[2];
+		color[2] = t;
+	}
+	color[3] = 0xff;
+
+	return found;
+}
+
+/*
+===============
+GL_PackAlphaT4
+
+RGBA32 (or BGRA32) -> 4-bit alpha level indices, the first pixel in the low nibble
+===============
+*/
+static void GL_PackAlphaT4( gl_texture_t *tex, const byte *src, byte *dst, const byte color[4] )
+{
+	byte pal[16 * 4];
+	int i;
+
+	for( i = 0; i < 16; i++ )
+	{
+		pal[i * 4 + 0] = color[0];
+		pal[i * 4 + 1] = color[1];
+		pal[i * 4 + 2] = color[2];
+		pal[i * 4 + 3] = i * 17;
+	}
+	GL_UploadPalette( tex, pal, 16 );
+
+	for( i = 0; i < tex->width * tex->height; i += 2, src += 8 )
+		*dst++ = ( src[3] >> 4 ) | ( src[7] & 0xf0 );
+}
+
+/*
+===============
+GL_QuantizeTexture
+
+RGBA32 (or BGRA32) without alpha -> 8-bit indices with a palette made for the image
+(NeuQuant from imagelib), much better than the fixed 332 palette at the same size
+===============
+*/
+static qboolean GL_QuantizeTexture( gl_texture_t *tex, int type, const byte *src, byte *dst )
+{
+	rgbdata_t in = { 0 }, *out;
+	byte pal[256 * 4];
+	int i;
+
+	if( type != PF_RGBA_32 && type != PF_BGRA_32 )
+		return false;
+
+	in.width = tex->width;
+	in.height = tex->height;
+	in.type = type;
+	in.flags = IMAGE_HAS_COLOR;
+	in.size = tex->width * tex->height * 4;
+	in.buffer = (byte *)src;
+
+	out = gEngfuncs.FS_CopyImage( &in ); // quantizer works in place on imagelib memory
+	if( !out )
+		return false;
+
+	gEngfuncs.Image_Process( &out, 0, 0, IMAGE_QUANTIZE, 0.0f );
+	if( out->type != PF_INDEXED_24 || !out->palette )
+	{
+		gEngfuncs.FS_FreeImage( out );
+		return false;
+	}
+
+	for( i = 0; i < 256; i++ )
+	{
+		const qboolean bgr = ( type == PF_BGRA_32 );
+
+		pal[i * 4 + 0] = out->palette[i * 3 + ( bgr ? 2 : 0 )];
+		pal[i * 4 + 1] = out->palette[i * 3 + 1];
+		pal[i * 4 + 2] = out->palette[i * 3 + ( bgr ? 0 : 2 )];
+		pal[i * 4 + 3] = 0xff;
+	}
+	GL_UploadPalette( tex, pal, 256 );
+	memcpy( dst, out->buffer, tex->width * tex->height );
+	gEngfuncs.FS_FreeImage( out );
+
+	return true;
+}
+
+/*
+===============
 GL_UploadTexture
 
 upload texture into memory
@@ -665,6 +865,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	qboolean	normalMap;
 	qboolean	swizzle;
 	byte		*tempBuff;
+	byte		alphaColor[4];
 
 	// dedicated server
 	if( !glw_state.initialized )
@@ -675,6 +876,10 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 
 	GL_SetTextureDimensions( tex, pic->width, pic->height );
 	GL_SetTextureFormat( tex, pic->type, pic->flags );
+
+	// one colour with alpha (fonts): 4-bit alpha levels instead of 4444
+	if( tex->format == GU_PSM_4444 && pic->buffer && !IsLightMap( tex ) && GL_SingleColorAlpha( pic, alphaColor ))
+		tex->format = GU_PSM_T4;
 
 	tex->fogParams[0] = pic->fogParams[0];
 	tex->fogParams[1] = pic->fogParams[1];
@@ -695,7 +900,8 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	texSize = GL_CalcTextureSize( tex->format, tex->width, tex->height, &tex->bpp );
 	normalMap = FBitSet( tex->flags, TF_NORMALMAP ) ? true : false;
 	tex->numMips = ImageIND( pic->type ) ? GL_CalcMipmapCount( tex, ( pic->buffer != NULL ), &texSize ) : 1;
-	swizzle = IsLightMap( tex ) ? false : true;
+	// swizzling works on 16 byte x 8 row blocks
+	swizzle = !IsLightMap( tex ) && ( GL_CalcTextureSize( tex->format, tex->width, 1, NULL ) % 16 ) == 0 && ( tex->height % 8 ) == 0;
 	mipOffset = 0;
 
 	// Check allocation size
@@ -731,34 +937,21 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	{
 		if( pic->type != PF_RGB_332 )
 		{
-			if( !tex->dstPalette )
-			{
-				tex->dstPalette = ( byte* )valloc( PALETTE_SIZE );
-				if( !tex->dstPalette )
-				{
-					tex->dstPalette = ( byte* )memalign( 16, PALETTE_SIZE );
-					if ( !tex->dstPalette )
-						gEngfuncs.Host_Error( "GL_UploadTexture: %s out of memory for palette ( %d )\n", tex->name, PALETTE_SIZE );
-				}
-			}
+			byte rgba[256 * 4];
 
-			// Load palette
-			if( pic->type == PF_INDEXED_32 && !FBitSet( pic->flags, IMAGE_HAS_ALPHA ))
-			{
-				// 32-bit palettes carry garbage alpha when the image has none (e.g. BMP reserved
-				// bytes are 0); ref_gl uploads such images without an alpha channel, do the same
-				byte opaque[256 * 4];
+			GL_PixelConverter( rgba, pic->palette, 256, PC_SWF( pic->type ), PC_SWF( PF_RGBA_32 ));
 
-				memcpy( opaque, pic->palette, sizeof( opaque ));
+			// 32-bit palettes carry garbage alpha when the image has none (e.g. BMP reserved
+			// bytes are 0); ref_gl uploads such images without an alpha channel, do the same
+			if( !FBitSet( pic->flags, IMAGE_HAS_ALPHA ))
+			{
 				for( i = 0; i < 256; i++ )
-					opaque[i * 4 + 3] = 0xff;
-
-				GL_PixelConverter( tex->dstPalette, opaque, 256, PC_SWF( pic->type ), PC_HWF( PALETTE_FORMAT ));
+					rgba[i * 4 + 3] = 0xff;
 			}
-			else GL_PixelConverter( tex->dstPalette, pic->palette, 256, PC_SWF( pic->type ), PC_HWF( PALETTE_FORMAT ));
-			sceKernelDcacheWritebackRange( tex->dstPalette, PALETTE_SIZE );
+
+			GL_UploadPalette( tex, rgba, 256 );
 		}
-		else tex->dstPalette = gl_palette_332;
+		else GL_Use332Palette( tex );
 
 		// Volatile memory for temporary buffer
 		if( swizzle )
@@ -817,7 +1010,8 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 		if(( pic->width != tex->width ) || ( pic->height != tex->height ))
 			offset = tex->width * tex->height * 4; // src size
 
-		tempBuff = memalign( 16, swizzle ? ( texSize + offset ) : texSize );
+		// 32-bit source (offset bytes), then the packed texture to swizzle from
+		tempBuff = memalign( 16, swizzle ? ( texSize + offset ) : offset );
 		if( !tempBuff ) gEngfuncs.Host_Error( "GL_UploadTexture: temporary memory error\n" );
 
 		if(( pic->width != tex->width ) || ( pic->height != tex->height ))
@@ -838,12 +1032,23 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 		}
 		else
 		{
-			if( tex->format == GU_PSM_T8 ) tex->dstPalette = gl_palette_332;
+			byte *packed = swizzle ? ( tempBuff + offset ) : tex->dstTexture;
 
-			GL_PixelConverter( swizzle ? (tempBuff + offset) : tex->dstTexture, tempBuff, tex->width * tex->height, PC_SWF( pic->type ), PC_HWF( tex->format ) );
+			if( tex->format == GU_PSM_T4 )
+				GL_PackAlphaT4( tex, tempBuff, packed, alphaColor );
+			else if( tex->format == GU_PSM_T8 && GL_QuantizeTexture( tex, pic->type, tempBuff, packed ))
+				; // own palette
+			else
+			{
+				if( tex->format == GU_PSM_T8 )
+					GL_Use332Palette( tex );
+
+				GL_PixelConverter( packed, tempBuff, tex->width * tex->height, PC_SWF( pic->type ), PC_HWF( tex->format ) );
+			}
+
 			if( swizzle )
 			{
-				GL_TextureSwizzle( tex->dstTexture, tempBuff + offset, tex->width * tex->bpp, tex->height );
+				GL_TextureSwizzle( tex->dstTexture, packed, GL_CalcTextureSize( tex->format, tex->width, 1, NULL ), tex->height );
 				SetBits( tex->flags, TF_IMG_SWIZZLED );
 			}
 		}
@@ -886,11 +1091,19 @@ qboolean GU_UpdateTextureRect( int texnum, int xoff, int yoff, int width, int he
 		return false;
 	}
 
+	if( FBitSet( tex->flags, TF_IMG_SWIZZLED ) || ( FBitSet( tex->flags, TF_IMG_UPLOADED ) && !tex->bpp ))
+	{
+		// only linear 8, 16 and 32-bit textures (lightmaps) can be patched in place
+		gEngfuncs.Con_DPrintf( S_ERROR "GL_UpdateTexture: %s has a packed format\n", tex->name );
+		return false;
+	}
+
 	if( !FBitSet( tex->flags, TF_IMG_UPLOADED ))
 	{
 		tex->size	= GL_CalcTextureSize( tex->format, tex->width, tex->height, &tex->bpp );
 		tex->numMips	= 1;
-		tex->dstPalette	= ( tex->format == GU_PSM_T8 ) ? gl_palette_332 : NULL; // default
+		if( tex->format == GU_PSM_T8 )
+			GL_Use332Palette( tex ); // default
 
 		tex->dstTexture = ( byte* )valloc( tex->size );
 		if( !tex->dstTexture )
@@ -1091,12 +1304,7 @@ static void GL_DeleteTexture( gl_texture_t *tex )
 	if( tex->original )
 		gEngfuncs.FS_FreeImage( tex->original );
 
-	if( tex->dstPalette && tex->dstPalette != gl_palette_332 )
-	{
-		if( vchkptr( tex->dstPalette ))
-			vfree( tex->dstPalette );
-		else free( tex->dstPalette );
-	}
+	GL_FreePalette( tex );
 
 	if( tex->dstTexture )
 	{
@@ -1426,30 +1634,18 @@ static void GL_Create332Palette( void )
 			gEngfuncs.Host_Error( "GL_Create332Palette: out of memory!\n" );
 	}
 
-	for(int i = 0; i < 256; i++)
+	// expand to the full range: 7 (or 3 for blue) must become 255, otherwise lightmaps
+	// (multiplied with the textures) come out darker and tinted
+	byte rgba[256 * 4];
+
+	for( int i = 0; i < 256; i++ )
 	{
-#if PALETTE_FORMAT == GU_PSM_5650
-		gl_palette_332[i * 2 + 0]  = ( i & 0x07 ) << 2;
-		gl_palette_332[i * 2 + 1]  = ( i & 0x38 ) >> 3;
-		gl_palette_332[i * 2 + 1] |= ( i & 0xc0 );
-#elif PALETTE_FORMAT == GU_PSM_5551
-		gl_palette_332[i * 2 + 0]  = ( i & 0x07 ) << 2;
-		gl_palette_332[i * 2 + 0] |= ( i & 0x08 ) << 4;
-		gl_palette_332[i * 2 + 1]  = ( i & 0x30 ) >> 4;
-		gl_palette_332[i * 2 + 1] |= ( i & 0xc0 ) >> 1;
-		gl_palette_332[i * 2 + 1] |= 0x80;
-#elif PALETTE_FORMAT == GU_PSM_4444
-		gl_palette_332[i * 2 + 0]  = ( i & 0x07 ) << 1;
-		gl_palette_332[i * 2 + 0] |= ( i & 0x38 ) << 2;
-		gl_palette_332[i * 2 + 1]  = ( i & 0xc0 ) >> 4;
-		gl_palette_332[i * 2 + 1] |= 0xf0;
-#elif PALETTE_FORMAT == GU_PSM_8888
-		gl_palette_332[i * 4 + 0] = ( i & 0x07 ) << 5;
-		gl_palette_332[i * 4 + 1] = ( i & 0x38 ) << 2;
-		gl_palette_332[i * 4 + 2] = ( i & 0xc0 );
-		gl_palette_332[i * 4 + 3] = 0xff;
-#endif
+		rgba[i * 4 + 0] = (( i >> 0 ) & 7 ) * 255 / 7;
+		rgba[i * 4 + 1] = (( i >> 3 ) & 7 ) * 255 / 7;
+		rgba[i * 4 + 2] = (( i >> 6 ) & 3 ) * 255 / 3;
+		rgba[i * 4 + 3] = 0xff;
 	}
+	GL_PixelConverter( gl_palette_332, rgba, 256, PC_SWF( PF_RGBA_32 ), PC_HWF( GU_PSM_5650 ));
 	sceKernelDcacheWritebackRange( gl_palette_332, PALETTE_SIZE );
 }
 
@@ -1471,7 +1667,12 @@ void R_TextureList_f( void )
 	{
 		if( !image->dstTexture ) continue;
 
-		if( image->dstPalette && image->dstPalette != gl_palette_332 ) ram_bytes += PALETTE_SIZE;
+		if( image->dstPalette && image->dstPalette != gl_palette_332 )
+		{
+			if( vchkptr( image->dstPalette ))
+				vram_bytes += PALETTE_SIZE;
+			else ram_bytes += PALETTE_SIZE;
+		}
 
 		vram_bytes += ( FBitSet( image->flags, TF_IMG_INVRAM ) ) ? image->size : 0;
 		ram_bytes += ( FBitSet( image->flags, TF_IMG_INVRAM ) ) ? 0 : image->size;
@@ -1566,11 +1767,11 @@ static void R_DumpTexture_f( void )
 
 	const gl_texture_t *tex = &gl_textures[texnum];
 	int width = tex->width, height = tex->height;
-	int stride = width * tex->bpp; // bytes per row
+	int stride = GL_CalcTextureSize( tex->format, width, 1, NULL ); // bytes per row
 
-	if( tex->bpp == 0 )
+	if( tex->bpp == 0 && tex->format != GU_PSM_T4 )
 	{
-		gEngfuncs.Con_Printf( S_ERROR "%s: %s has a compressed or 4-bit format\n", __func__, tex->name );
+		gEngfuncs.Con_Printf( S_ERROR "%s: %s has a compressed format\n", __func__, tex->name );
 		return;
 	}
 
@@ -1603,14 +1804,18 @@ static void R_DumpTexture_f( void )
 	pic->size = width * height * 4;
 	pic->buffer = Mem_Malloc( r_temppool, pic->size );
 
-	if( tex->format == GU_PSM_T8 )
+	if( tex->format == GU_PSM_T8 || tex->format == GU_PSM_T4 )
 	{
 		// expand the CLUT first, then look the indices up
+		const int numColors = tex->format == GU_PSM_T8 ? 256 : 16;
 		uint32_t clut[256];
 
-		GL_PixelConverter( (byte *)clut, tex->dstPalette, 256, PC_HWF( PALETTE_FORMAT ), PC_SWF( PF_RGBA_32 ));
+		GL_PixelConverter( (byte *)clut, tex->dstPalette, numColors, PC_HWF( tex->clutFormat ), PC_SWF( PF_RGBA_32 ));
 		for( int i = 0; i < width * height; i++ )
-			((uint32_t *)pic->buffer)[i] = clut[linear[i]];
+		{
+			const int index = tex->format == GU_PSM_T8 ? linear[i] : ( linear[i >> 1] >> (( i & 1 ) * 4 )) & 15;
+			((uint32_t *)pic->buffer)[i] = clut[index];
+		}
 	}
 	else GL_PixelConverter( pic->buffer, linear, width * height, PC_HWF( tex->format ), PC_SWF( PF_RGBA_32 ));
 
