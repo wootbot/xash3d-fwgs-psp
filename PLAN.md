@@ -155,24 +155,32 @@ music), launched from the XMB.
       (other mods/plugins installed there; plain `valve` with stock `hl.dll` works):
       `hlds.exe -console -game valve -condebug -port 27015 +ip <pc ip> +sv_lan 1
       +maxplayers 4 +servercfgfile "" +map crossfire`. `qconsole.log` is shared with older runs.
-- [~] `connect <pc ip>:27015 gs` from the PSP: challenge, connect accept, serverdata,
-      resource list, map/models/sky load work (2026-11-17). Then the engine heap runs out
-      (`_Mem_Alloc` 64 KB in `net_chan.c:494`) before spawning: memory is the next blocker
-      (Wi-Fi modules + 128 KB sceNet pool come from the 3 MB module reserve, not the heap).
-      Still to see: delta entities, `clc_move`, user messages from the `psp-hl` client.
+- [x] `connect <pc ip>:27015 gs` from the PSP: challenge, connect accept, serverdata,
+      resources, map load, spawn, delta entities, `clc_move`, `psp-hl` user messages: **plays**
+      (2026-11-17): walking, shooting (ammo, decals), HUD, `status` forwarded to the server
+      (ping ~61 ms, 0 loss over Wi-Fi), 38–47 fps on crossfire. Connect -> spawned in ~15 s.
+      The first OOM was the client: 64 packet-entity frames (5.3 MB), see the memory note below.
+      ReHLDS's A2S_PLAYER reply always says 0 players; use `status` instead.
 - [ ] Downloads/custom resources: decide policy (`cl_allowdownload`, size limits) given memory stick
       speed and RAM; sprays/customizations off by default.
 - [ ] Voice: GoldSrc voice codec isn't usable here — make sure it's cleanly disabled.
 - [ ] Performance/memory on real servers (`rate`, `cl_updaterate`, `cl_cmdrate`, entity counts,
       32-player maps). Tune defaults in the PSP config.
 
-**Milestone 4:** PSP plays on a GoldSrc server on the LAN.
+**Milestone 4:** PSP plays on a GoldSrc server on the LAN. **Reached 2026-11-17.**
 
 ## Phase 5 — Steam authentication via steam-broker
 
-- [ ] `engine/client/cl_steam.c` on PSP: TCP connect to `cl_steam_broker_addr`, non-blocking
-      send/recv, `sb_gamedir` / `sb_connect` / `sb_disconnect` / `sb_terminate` flow.
-- [ ] Test with FWGS/steam-broker on the PC (Steam running, Half-Life owned), `cl_ticket_generator steam`.
+- [x] `engine/client/cl_steam.c` on PSP: TCP connect to `cl_steam_broker_addr`, non-blocking
+      send/recv, `sb_gamedir` / `sb_connect` / `sb_disconnect` / `sb_terminate` flow. PSP `select()`
+      reports connecting sockets as writable: re-`connect()` (EISCONN) instead. Engine fixes (shared
+      code): no `sb_disconnect` without a prior `sb_connect` (the broker restarts the session), and
+      the first two GoldSrc connection attempts wait for the broker link.
+- [x] Test with steam-broker on the PC: the user's Windows build in `<home>\Projects\steam-broker`
+      (`target/i686-pc-windows-msvc/release/steam-broker.exe 0.0.0.0:27420`, needs a restart loop:
+      it exits after every session, `steam-broker.bat` does that). PSP with `cl_ticket_generator steam`,
+      `cl_steam_broker_addr <pc ip>:27420`: 218-byte ticket for the user's SteamID, joins the
+      LAN server with it (2026-11-17). Not validated by Steam yet: the test HLDS runs `sv_lan 1`.
 - [ ] Join a real VAC-secured official/community HLDS server over the internet. Note: upstream warns
       some servers flag Xash clients as fake clients.
 - [ ] Console input for `connect`/cvars on the PSP: on-screen keyboard (`sceUtilityOsk*`) or a small
@@ -254,3 +262,13 @@ music), launched from the XMB.
 - 2026-11-17: Receive fixed (per-frame yield for the net threads), clean quit with Wi-Fi up.
   **First GoldSrc connection**: the PSP joins ReHLDS (LAN, crossfire) over `connect ... gs`, gets
   serverdata and resources, loads the map, then runs out of engine heap before spawning.
+- 2026-11-17: **Milestone 4: the PSP plays on ReHLDS over GoldSrc protocol** (crossfire, LAN).
+  OOM fix: client packet-entity ring 64 -> 16 frames (5.3 -> 1.3 MB, client-local, protocol
+  untouched), `MAX_STATIC_ENTITIES` 256 like the old port (the client allocated 3096 x 3 KB on the
+  first static entity; server array 1 MB -> 87 KB), console scrollback 1.4 MB -> 224 KB. Out of
+  memory now dumps the pool list and big allocations. Crossfire in game: heap 22.7 MB in use,
+  10.6 MB largest free block (was 28.9 / 4.4); c0a0: 26.0 / 7.0 MB. Kernel: 65 KB free with the
+  Wi-Fi modules loaded (they stay loaded until quit). Remaining big pools in MP: client edicts
+  2.7 MB, temp entities 1.5 MB (`max_tempents` 500), SoundLib 2.2 MB, server edicts/baselines
+  1 MB (allocated even as a pure client).
+- 2026-11-17: **Steam tickets through steam-broker work on the PSP** (LAN server, `sv_lan 1`).
