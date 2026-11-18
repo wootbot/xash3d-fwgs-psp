@@ -48,6 +48,10 @@ static qboolean g_messagemode_privileged = true;
 #define CON_NUMFONTS	1		// do not load different font textures
 #define CON_TEXTSIZE	32768	// max scrollback buffer characters in console (32 kb)
 #define CON_MAXLINES	2048	// max scrollback buffer lines in console
+#elif XASH_PSP
+#define CON_NUMFONTS	3	// maxfonts
+#define CON_TEXTSIZE	131072	// max scrollback buffer characters in console (128 kb)
+#define CON_MAXLINES	4096	// max scrollback buffer lines in console
 #else
 #define CON_NUMFONTS	3	// maxfonts
 #define CON_TEXTSIZE	1048576	// max scrollback buffer characters in console (1 Mb)

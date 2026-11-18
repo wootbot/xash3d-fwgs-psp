@@ -1007,7 +1007,13 @@ void CL_InitEdicts( int maxclients )
 #if XASH_LOW_MEMORY != 2
 	CL_UPDATE_BACKUP = ( maxclients <= 1 ) ? SINGLEPLAYER_BACKUP : MULTIPLAYER_BACKUP;
 #endif
+#if XASH_PSP
+	// client-side ring only: it has to hold the frames the server may delta from,
+	// CL_ValidateDeltaPacket asks for a full update when a base was overwritten
+	cls.num_client_entities = Q_min( CL_UPDATE_BACKUP, SINGLEPLAYER_BACKUP ) * NUM_PACKET_ENTITIES;
+#else
 	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
+#endif
 	cls.packet_entities = Mem_Realloc( clgame.mempool, cls.packet_entities, sizeof( entity_state_t ) * cls.num_client_entities );
 	clgame.entities = Mem_Calloc( clgame.mempool, sizeof( cl_entity_t ) * clgame.maxEntities );
 	clgame.static_entities = NULL; // will be initialized later

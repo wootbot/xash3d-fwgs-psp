@@ -130,6 +130,12 @@ typedef enum instance_e
 #define MAX_STATIC_ENTITIES	32	// static entities that moved on the client when level is spawn
 #endif
 
+#if XASH_PSP
+// the client allocates all of them (~3 KB each) as soon as the first one arrives
+#undef MAX_STATIC_ENTITIES
+#define MAX_STATIC_ENTITIES	256
+#endif
+
 #define MAX_SERVERINFO_STRING 512  // server handles too many settings. expand to 1024?
 #define MAX_PRINT_MSG         8192 // how many symbols can handle single call of Con_Printf or Con_DPrintf
 #define MAX_TOKEN             2048 // parse token length
