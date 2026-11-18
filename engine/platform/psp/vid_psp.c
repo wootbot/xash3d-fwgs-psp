@@ -204,6 +204,7 @@ qboolean VID_SetMode( void )
 		SetBits( gl_vsync.flags, FCVAR_CHANGED );
 		Cvar_RegisterVariable( &vid_autoshot );
 		Cvar_RegisterVariable( &sys_cmdfile );
+		PSP_RegisterCommands();
 	}
 
 	VID_SetDisplayTransform( &w, &h );

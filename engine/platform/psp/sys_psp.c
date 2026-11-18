@@ -25,6 +25,7 @@ GNU General Public License for more details.
 #include <pspdebug.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <malloc.h>
 
 PSP_MODULE_INFO( "Xash3D", PSP_MODULE_USER, 1, 0 );
 PSP_MAIN_THREAD_ATTR( PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU );
@@ -251,6 +252,53 @@ static void PSP_UnlockVRAM( void )
 		kaGeEdramSetSize( ret );
 
 	PSP_UnloadModule( mod, &code );
+}
+
+
+/*
+===========
+PSP_MemInfo_f
+
+the engine heap is one newlib arena sized at startup (all free memory minus
+PSP_HEAP_THRESHOLD_SIZE_KB), memlist only shows what the engine pools hold
+===========
+*/
+static size_t PSP_LargestFreeBlock( void )
+{
+	size_t lo = 0, hi = 64 << 20;
+
+	// binary search for the biggest malloc that still succeeds
+	while( hi - lo > 4096 )
+	{
+		size_t mid = lo + ( hi - lo ) / 2;
+		// volatile, or gcc drops the malloc/free pair and assumes success
+		void *volatile p = malloc( mid );
+
+		if( p )
+		{
+			free( p );
+			lo = mid;
+		}
+		else hi = mid;
+	}
+
+	return lo;
+}
+
+static void PSP_MemInfo_f( void )
+{
+	struct mallinfo mi = mallinfo();
+
+	Con_Printf( "heap: %u KB in use, %u KB free inside the arena (arena %u KB)\n",
+		(uint)( mi.uordblks >> 10 ), (uint)( mi.fordblks >> 10 ), (uint)( mi.arena >> 10 ));
+	Con_Printf( "heap: largest malloc %u KB\n", (uint)( PSP_LargestFreeBlock() >> 10 ));
+	Con_Printf( "kernel: %u KB free, largest block %u KB (game modules come from here)\n",
+		(uint)( sceKernelTotalFreeMemSize() >> 10 ), (uint)( sceKernelMaxFreeMemSize() >> 10 ));
+}
+
+void PSP_RegisterCommands( void )
+{
+	Cmd_AddCommand( "psp_meminfo", PSP_MemInfo_f, "print free heap and kernel memory" );
 }
 
 void PSP_Init( void )

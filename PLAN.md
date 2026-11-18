@@ -72,7 +72,7 @@ Upstream already contains a partial 2023 PSP scaffold. Fix and complete it:
       `open()` as huge "descriptors" (opendir then crashes in `getdents`).
 - [x] Memory budget (debug build, `c0a0` running, `-ref null`): partition 2 has 693 KB free,
       468 KB largest block; that's what's left of the 3 MB module reserve after both game PRXs.
-      Engine heap usage not measured yet (needs a `meminfo`-style engine command).
+      Engine heap: `psp_meminfo` console command (newlib arena use, largest `malloc`, kernel free).
 - [ ] Client identification (`identification.c`): use OpenPSID like the Vita uses its PSID.
 
 **Game library names:** the current engine generates `<name>_psp_mipsel.prx` from `liblist.gam`
@@ -121,6 +121,8 @@ ride and scripted sequences run. Resource verification `stat()`s every file on t
       filesystem cache / `fsh_psp.c` (now in `filesystem/`), hardware MP3 decoder (`scemp3`) for
       soundlib streams, VFPU math (`public/xash3d_mathlib.*`, `matrixlib.c`), studio/bmodel memory trims.
 - [ ] Memory: get singleplayer to fit with headroom; record numbers here.
+      `c0a0` (`-T fast`, 900 edicts): heap 27.8 MB in use, largest `malloc` 5.5 MB; kernel 677 KB
+      free (457 KB largest block). Menu only: largest `malloc` 24.2 MB.
 
 **Milestone 2:** singleplayer on par with the old port (menu, new game, save/load, map changes, sound,
 music), launched from the XMB.
@@ -221,3 +223,4 @@ music), launched from the XMB.
   + 1.56 MB VRAM (incl. palettes); models 1.5 MB, map 0.65 MB, menu background tiles kept in game
   0.45 MB, sky 0.38 MB. Engine pools 22.3 MB (client edicts 4.78 → 3.92 MB with 900 edicts).
   Partition 2 has 0.68 MB free besides our heap (the 3 MB threshold minus game PRXs).
+- 2026-11-17: `psp_meminfo` added. Headroom in `c0a0`: 5.5 MB heap + 0.68 MB kernel memory.
