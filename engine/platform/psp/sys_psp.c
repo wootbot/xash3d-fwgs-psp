@@ -285,7 +285,7 @@ static size_t PSP_LargestFreeBlock( void )
 	return lo;
 }
 
-static void PSP_MemInfo_f( void )
+void PSP_PrintMemInfo( void )
 {
 	struct mallinfo mi = mallinfo();
 
@@ -294,11 +294,17 @@ static void PSP_MemInfo_f( void )
 	Con_Printf( "heap: largest malloc %u KB\n", (uint)( PSP_LargestFreeBlock() >> 10 ));
 	Con_Printf( "kernel: %u KB free, largest block %u KB (game modules come from here)\n",
 		(uint)( sceKernelTotalFreeMemSize() >> 10 ), (uint)( sceKernelMaxFreeMemSize() >> 10 ));
+
+	size_t vused, vtotal;
+	int vblocks;
+
+	PSP_VolatileInfo( &vused, &vblocks, &vtotal );
+	Con_Printf( "P5 RAM: %u KB in use in %d blocks (of %u KB)\n", (uint)( vused >> 10 ), vblocks, (uint)( vtotal >> 10 ));
 }
 
 void PSP_RegisterCommands( void )
 {
-	Cmd_AddCommand( "psp_meminfo", PSP_MemInfo_f, "print free heap and kernel memory" );
+	Cmd_AddCommand( "psp_meminfo", PSP_PrintMemInfo, "print free heap and kernel memory" );
 	PSP_NetRegisterCommands();
 }
 
@@ -313,9 +319,13 @@ void PSP_Init( void )
 	scePowerSetClockFrequency( 333, 333, 166 );
 
 	PSP_UnlockVRAM();
+
+	// P5 RAM for MEM_VOLATILE pools
+	PSP_VolatileInit();
 }
 
 void PSP_Shutdown( void )
 {
 	PSP_NetShutdown();
+	PSP_VolatileShutdown();
 }

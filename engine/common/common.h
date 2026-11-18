@@ -308,6 +308,7 @@ typedef struct host_parm_s
 	game_status_t game;             // game manager
 	instance_t    type;             // running at
 	poolhandle_t  mempool;          // static mempool for misc allocations
+	poolhandle_t  volatilepool;     // big short-lived buffers (save/restore, map files)
 	poolhandle_t  imagepool;        // imagelib mempool
 	poolhandle_t  soundpool;        // soundlib mempool
 	string        downloadfile;     // filename to be downloading
@@ -392,6 +393,7 @@ poolhandle_t _Mem_AllocPool( const char *name, unsigned int flags, const char *f
 
 // pool flags
 #define MEM_SMALL_ALLOC_OPT (1U<<0) // use compact header for allocations <= 255 bytes (drops filename/fileline tracking)
+#define MEM_VOLATILE        (1U<<1) // big short-lived buffers, may come from platform memory outside the heap (PSP P5 RAM)
 
 void _Mem_FreePool( poolhandle_t *poolptr, const char *filename, int fileline );
 void _Mem_EmptyPool( poolhandle_t poolptr, const char *filename, int fileline );
@@ -429,6 +431,8 @@ file_t *FS_Open( const char *filepath, const char *mode, qboolean gamedironly )
 byte *FS_LoadFile( const char *path, fs_offset_t *filesizeptr, qboolean gamedironly )
 	MALLOC_LIKE( _Mem_Free, 1 ) WARN_UNUSED_RESULT;
 byte *FS_LoadDirectFile( const char *path, fs_offset_t *filesizeptr )
+	MALLOC_LIKE( _Mem_Free, 1 ) WARN_UNUSED_RESULT;
+byte *FS_LoadFileToPool( poolhandle_t pool, const char *path, fs_offset_t *filesizeptr, qboolean gamedironly )
 	MALLOC_LIKE( _Mem_Free, 1 ) WARN_UNUSED_RESULT;
 void FS_Rescan_f( void );
 void FS_LoadGameInfo( void );

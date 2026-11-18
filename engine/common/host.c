@@ -1048,6 +1048,7 @@ static void Host_InitCommon( int argc, char **argv, const char *progname, qboole
 	Memory_Init(); // init memory subsystem
 
 	host.mempool = Mem_AllocPool( "Zone Engine" );
+	host.volatilepool = Mem_AllocPoolExt( "Volatile Buffers", MEM_VOLATILE );
 
 	host.allow_console = DEFAULT_ALLOWCONSOLE || DEFAULT_DEV > 0;
 

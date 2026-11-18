@@ -325,7 +325,12 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 	Q_strncpy( tempname, mod->name, sizeof( tempname ));
 	COM_FixSlashes( tempname );
 
+#if XASH_PSP
+	// the file is only needed while loading, keep it out of the heap (P5 RAM)
+	byte *buf = FS_LoadFileToPool( host.volatilepool, tempname, &length, false );
+#else
 	byte *buf = FS_LoadFile( tempname, &length, false );
+#endif
 
 	if( !buf || length < sizeof( uint ))
 	{

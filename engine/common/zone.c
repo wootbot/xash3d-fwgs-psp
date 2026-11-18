@@ -97,6 +97,37 @@ typedef struct mempool_s
 
 static void Mem_PrintList( size_t minallocationsize );
 
+// big allocations, MEM_VOLATILE pools may get memory from outside the heap
+#if XASH_PSP
+static void *Mem_RawAllocBig( unsigned int poolflags, size_t size )
+{
+	if( FBitSet( poolflags, MEM_VOLATILE ))
+	{
+		void *mem = PSP_VolatileAlloc( size );
+		if( mem )
+			return mem;
+	}
+
+	return Q_malloc( size );
+}
+
+static void Mem_RawFreeBig( void *mem )
+{
+	if( PSP_IsVolatile( mem ))
+		PSP_VolatileFree( mem );
+	else Q_free( mem );
+}
+
+static qboolean Mem_RawReallocBigInPlace( unsigned int poolflags, void *mem )
+{
+	return !FBitSet( poolflags, MEM_VOLATILE ) && !PSP_IsVolatile( mem );
+}
+#else
+#define Mem_RawAllocBig( poolflags, size ) Q_malloc( size )
+#define Mem_RawFreeBig( mem ) Q_free( mem )
+#define Mem_RawReallocBigInPlace( poolflags, mem ) true
+#endif
+
 static mempool_t *poolchain = NULL; // critical stuff
 static size_t poolcount = 0;
 
@@ -244,6 +275,9 @@ static void Mem_OutOfMemory( const char *func, size_t size, const char *filename
 	Con_Printf( S_ERROR "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
 	Mem_PrintList( 256 * 1024 );
 	Mem_PrintStats();
+#if XASH_PSP
+	PSP_PrintMemInfo();
+#endif
 	Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
 }
 
@@ -285,7 +319,7 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 	else
 	{
 		size_t blocksize = sizeof( memheader_t ) + size + sizeof( byte );
-		memheader_t *mem = Q_malloc( blocksize );
+		memheader_t *mem = Mem_RawAllocBig( pool->flags, blocksize );
 
 		if( mem == NULL )
 		{
@@ -322,7 +356,7 @@ static void Mem_FreeBlockBig( memheader_t *mem, const char *filename, int fileli
 	Mem_PoolSubtract( pool, mem->size, sizeof( memheader_t ) + mem->size + sizeof( byte ));
 	Mem_PoolUnlinkAllocBig( pool, mem );
 
-	Q_free( mem );
+	Mem_RawFreeBig( mem );
 }
 
 static void Mem_FreeBlockSmall( memheader_small_t *mem, const char *filename, int fileline )
@@ -472,6 +506,21 @@ void *_Mem_Realloc( poolhandle_t poolptr, void *data, size_t size, qboolean clea
 		size_t oldsize = mem->size;
 		if( size == oldsize )
 			return data;
+
+		if( !Mem_RawReallocBigInPlace( pool->flags, mem ))
+		{
+			// libc realloc can't move blocks in or out of platform memory
+			void *newdata = _Mem_Alloc( poolptr, size, false, filename, fileline );
+			if( !newdata )
+				return NULL;
+
+			memcpy( newdata, data, Q_min( oldsize, size ));
+			if( clear && size > oldsize )
+				memset((byte *)newdata + oldsize, 0, size - oldsize );
+
+			Mem_FreeBlockBig( mem, filename, fileline );
+			return newdata;
+		}
 
 		uintptr_t oldmem = (uintptr_t)mem;
 		mem = Q_realloc( mem, sizeof( memheader_t ) + size + sizeof( byte ));

@@ -68,6 +68,36 @@ byte *FS_LoadDirectFile( const char *path, fs_offset_t *filesizeptr )
 	return g_fsapi.LoadDirectFile( path, filesizeptr );
 }
 
+// like FS_LoadFile, but the buffer comes from the given pool (e.g. host.volatilepool)
+byte *FS_LoadFileToPool( poolhandle_t pool, const char *path, fs_offset_t *filesizeptr, qboolean gamedironly )
+{
+	file_t *f = g_fsapi.Open( path, "rb", gamedironly );
+
+	if( filesizeptr )
+		*filesizeptr = 0;
+
+	if( !f )
+		return NULL;
+
+	fs_offset_t size = g_fsapi.FileLength( f );
+	byte *buf = Mem_Malloc( pool, size + 1 );
+
+	if( g_fsapi.Read( f, buf, size ) != size )
+	{
+		Mem_Free( buf );
+		g_fsapi.Close( f );
+		return NULL;
+	}
+
+	g_fsapi.Close( f );
+	buf[size] = 0;
+
+	if( filesizeptr )
+		*filesizeptr = size;
+
+	return buf;
+}
+
 static void COM_StripDirectorySlash( char *pname )
 {
 	size_t len = Q_strlen( pname );

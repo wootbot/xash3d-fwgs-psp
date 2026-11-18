@@ -393,7 +393,7 @@ reserve space for ETABLE's
 */
 static void InitEntityTable( SAVERESTOREDATA *pSaveData, int entityCount )
 {
-	pSaveData->pTable = Mem_Calloc( host.mempool, sizeof( ENTITYTABLE ) * entityCount );
+	pSaveData->pTable = Mem_Calloc( host.volatilepool, sizeof( ENTITYTABLE ) * entityCount );
 	pSaveData->tableCount = entityCount;
 
 	// setup entitytable
@@ -710,8 +710,8 @@ static SAVERESTOREDATA *SaveInit( int size, int tokenCount )
 {
 	SAVERESTOREDATA	*pSaveData;
 
-	pSaveData = Mem_Calloc( host.mempool, sizeof( SAVERESTOREDATA ) + size );
-	pSaveData->pTokens = (char **)Mem_Calloc( host.mempool, tokenCount * sizeof( char* ));
+	pSaveData = Mem_Calloc( host.volatilepool, sizeof( SAVERESTOREDATA ) + size );
+	pSaveData->pTokens = (char **)Mem_Calloc( host.volatilepool, tokenCount * sizeof( char* ));
 	pSaveData->tokenCount = tokenCount;
 
 	pSaveData->pBaseData = (char *)(pSaveData + 1); // skip the save structure);
