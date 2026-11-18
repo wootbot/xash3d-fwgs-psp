@@ -59,7 +59,8 @@ Upstream already contains a partial 2023 PSP scaffold. Fix and complete it:
       load/unload), `lib_psp.c` (static table + PRX modules, same `module_start` export-table ABI
       as the old port), `vid_psp.c` (fixed 480x272, software framebuffer), `snd_psp.c`, `in_psp.c`
       (same key names and axes as the old port so its configs keep working), `net_psp.h`.
-      Not ported yet: P5 RAM, power suspend/resume handling, hw MP3, `fsh_psp.c`.
+      `vmem_psp.c`: P5 RAM (4 MB volatile partition) behind `MEM_VOLATILE` pools, see the log.
+      Not ported yet: power suspend/resume handling, hw MP3, `fsh_psp.c`.
 - [x] Network: no `XASH_NO_NETWORK` (the old stub header has rotted); instead `net_psp.h` makes
       `net_ws.c` build against pspsdk sockets (IPv4 only, `getaddrinfo` emulated with
       `gethostbyname`, `SO_NONBLOCK`). Sockets just fail until Phase 3 brings the net modules up.
@@ -258,7 +259,7 @@ music), launched from the XMB.
   PSP ("<ssid>", profile 2) it connects in a few seconds and UDP works both ways (getchallenge
   reaches the PC, a connectionless `print` from the PC shows up in the PSP console). The PC
   couldn't ARP the PSP at first (stale state; fine after relaunching). `psp-ld -r` of ref_gu
-  sometimes fails with "bad value" in incremental builds; rerunning the build fixes it.
+  sometimes failed with "bad value" (fixed later: duplicate object names, see below).
 - 2026-11-17: Receive fixed (per-frame yield for the net threads), clean quit with Wi-Fi up.
   **First GoldSrc connection**: the PSP joins ReHLDS (LAN, crossfire) over `connect ... gs`, gets
   serverdata and resources, loads the map, then runs out of engine heap before spawning.
@@ -272,3 +273,12 @@ music), launched from the XMB.
   2.7 MB, temp entities 1.5 MB (`max_tempents` 500), SoundLib 2.2 MB, server edicts/baselines
   1 MB (allocated even as a pure client).
 - 2026-11-17: **Steam tickets through steam-broker work on the PSP** (LAN server, `sv_lan 1`).
+- 2026-11-17: **Heap fragmentation on level changes** (c0a0c: 5.8 MB free, 1.5 MB largest block, the
+  1.55 MB surface array didn't fit). Fix: P5 RAM (`vmem_psp.c`, 4 MB volatile partition, one kernel
+  block per allocation) behind a new `MEM_VOLATILE` pool flag in `zone.c`; `host.volatilepool` holds
+  the 2 MB save/restore buffers and, on PSP, the model file buffer while a model loads
+  (`FS_LoadFileToPool`). **The whole c0a0 tram ride runs** (c0a0 -> c0a0e, 4.9 MB largest block
+  at the end). P5 contents don't survive suspend; only short-lived buffers go there.
+  Broker no longer retries (and fails) every 5 s while Wi-Fi is down in singleplayer.
+  The flaky `psp-ld -r` "bad value": `ref_gu` builds ref/common sources itself and waf gave them
+  the same object names as the `ref_common` target, so two tasks wrote the same files (`idx = 7`).
