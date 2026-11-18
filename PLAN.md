@@ -135,22 +135,31 @@ music), launched from the XMB.
       timeout), retried on the next `NET_Config( true )` after a failure, then sockets are reopened.
       BSD sockets via libcglue, non-blocking UDP via `SO_NONBLOCK`, `gethostbyname` resolver,
       `gethostname` = our IP. IPv6 off. **UDP verified both ways on hardware** (2026-11-17).
-      Still untested: TCP (steam-broker), DNS names.
+      Still untested: TCP (steam-broker), DNS names. **The stack's threads (prio 42/48) only run
+      when the main thread (0x20) blocks**: without the 1 ms per-frame yield (`PSP_NetFrame`) the
+      PSP sends fine but receives almost nothing (and doesn't answer ARP). Raising them to 0x18
+      locked up the whole PSP instead.
 - [x] Access point connection: `net_psp_profile`, `net_psp_profiles`, `net_psp_status` (SSID, IP,
       gateway, DNS, signal, WLAN power save), state progress + apctl error codes in the console.
       Optionally the system netconf dialog (`sceUtilityNetconf*`, needs GU dialog drawing) later.
-- [~] Shut down cleanly: `quit` with the stack up works (apctl handler removed, disconnect, terms,
-      modules unloaded). Power/sleep events not handled yet.
+- [~] Shut down cleanly: `quit` with the stack up works (apctl handler removed, **wait for the
+      disconnect to finish** (terminating right away hung the PSP), terms, modules unloaded).
+      Power/sleep events not handled yet.
 - [x] Remove `XASH_NO_NETWORK` for PSP (never enabled in the new port).
 
 **Milestone 3:** PSP joins a Xash3D dedicated server on the LAN (normal Xash protocol) and plays.
 
 ## Phase 4 — GoldSrc protocol
 
-- [ ] Local test server: HLDS (steamcmd app 90) on the PC, LAN mode first; optionally ReHLDS +
-      Reunion to test without Steam auth (`cl_ticket_generator revemu2013`).
-- [ ] `connect <ip>:<port> gs` from the PSP: signon, resource list, delta entities, `clc_move`,
-      user messages from the `psp-hl` client, map CRC.
+- [x] Local test server: the user's ReHLDS 3.15 in `C:\Games\hlds\steamapps\common\Half-Life`
+      (other mods/plugins installed there; plain `valve` with stock `hl.dll` works):
+      `hlds.exe -console -game valve -condebug -port 27015 +ip <pc ip> +sv_lan 1
+      +maxplayers 4 +servercfgfile "" +map crossfire`. `qconsole.log` is shared with older runs.
+- [~] `connect <pc ip>:27015 gs` from the PSP: challenge, connect accept, serverdata,
+      resource list, map/models/sky load work (2026-11-17). Then the engine heap runs out
+      (`_Mem_Alloc` 64 KB in `net_chan.c:494`) before spawning: memory is the next blocker
+      (Wi-Fi modules + 128 KB sceNet pool come from the 3 MB module reserve, not the heap).
+      Still to see: delta entities, `clc_move`, user messages from the `psp-hl` client.
 - [ ] Downloads/custom resources: decide policy (`cl_allowdownload`, size limits) given memory stick
       speed and RAM; sprays/customizations off by default.
 - [ ] Voice: GoldSrc voice codec isn't usable here — make sure it's cleanly disabled.
@@ -242,3 +251,6 @@ music), launched from the XMB.
   reaches the PC, a connectionless `print` from the PC shows up in the PSP console). The PC
   couldn't ARP the PSP at first (stale state; fine after relaunching). `psp-ld -r` of ref_gu
   sometimes fails with "bad value" in incremental builds; rerunning the build fixes it.
+- 2026-11-17: Receive fixed (per-frame yield for the net threads), clean quit with Wi-Fi up.
+  **First GoldSrc connection**: the PSP joins ReHLDS (LAN, crossfire) over `connect ... gs`, gets
+  serverdata and resources, loads the map, then runs out of engine heap before spawning.
