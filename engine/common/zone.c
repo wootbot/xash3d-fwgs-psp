@@ -95,6 +95,8 @@ typedef struct mempool_s
 	char               name[64];      // name of the pool
 } mempool_t;
 
+static void Mem_PrintList( size_t minallocationsize );
+
 static mempool_t *poolchain = NULL; // critical stuff
 static size_t poolcount = 0;
 
@@ -236,6 +238,15 @@ static qboolean Mem_CheckAllocHeaderSmall( const char *func, const memheader_sma
 	return true;
 }
 
+static void Mem_OutOfMemory( const char *func, size_t size, const char *filename, int fileline )
+{
+	// print where the memory went before giving up
+	Con_Printf( S_ERROR "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
+	Mem_PrintList( 256 * 1024 );
+	Mem_PrintStats();
+	Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
+}
+
 void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
 {
 	if( size <= 0 )
@@ -258,7 +269,7 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 
 		if( mem == NULL )
 		{
-			Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", __func__, Q_memprint( size ), filename, fileline );
+			Mem_OutOfMemory( __func__, size, filename, fileline );
 			return NULL;
 		}
 
@@ -278,7 +289,7 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 
 		if( mem == NULL )
 		{
-			Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", __func__, Q_memprint( size ), filename, fileline );
+			Mem_OutOfMemory( __func__, size, filename, fileline );
 			return NULL;
 		}
 
@@ -424,7 +435,7 @@ void *_Mem_Realloc( poolhandle_t poolptr, void *data, size_t size, qboolean clea
 
 		if( mem == NULL )
 		{
-			Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", __func__, Q_memprint( size ), filename, fileline );
+			Mem_OutOfMemory( __func__, size, filename, fileline );
 			return NULL;
 		}
 
@@ -467,7 +478,7 @@ void *_Mem_Realloc( poolhandle_t poolptr, void *data, size_t size, qboolean clea
 
 		if( mem == NULL )
 		{
-			Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", __func__, Q_memprint( size ), filename, fileline );
+			Mem_OutOfMemory( __func__, size, filename, fileline );
 			return NULL;
 		}
 
