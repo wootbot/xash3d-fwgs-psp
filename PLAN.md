@@ -210,3 +210,14 @@ music), launched from the XMB.
   fonts → 4-bit alpha CLUT), sound cache, Zone Engine.
   Debug aids: `+vid_autoshot N`, `+sys_cmdfile cmd.txt` (console commands from the PC via host0:),
   `gu_dumptexture <n>`; quit with `quit` via the cmdfile instead of PSPLink `reset`.
+- 2026-11-17: **World renders in `c0a0`** (screenshots via the cmdfile work in game now). The engine
+  was built with `-T debug` (`-O0`): 4 fps, ~200 ms per server frame (40 fps with the server
+  paused); `docker-build.sh` now defaults to `-T fast` like the old port: 36–52 fps in the tram,
+  xash.prx 6.2 → 4.8 MB, `c0a0` spawn 26 → 13 s. `timerefresh`: 196 fps (5 ms per frame).
+  Textures: almost everything was already T8; mainui stb fonts → T4 alpha CLUT (640 → 160 KB),
+  opaque 32-bit images → NeuQuant palette instead of RGB332, CLUT format per texture
+  (5650/5551/4444 instead of always 4444), the shared 332 palette (lightmaps) no longer tops out
+  at 14/15 red/green and 12/15 blue (darker, tinted lighting). c0a0 now: 735 textures, 3.1 MB RAM
+  + 1.56 MB VRAM (incl. palettes); models 1.5 MB, map 0.65 MB, menu background tiles kept in game
+  0.45 MB, sky 0.38 MB. Engine pools 22.3 MB (client edicts 4.78 → 3.92 MB with 900 edicts).
+  Partition 2 has 0.68 MB free besides our heap (the 3 MB threshold minus game PRXs).
