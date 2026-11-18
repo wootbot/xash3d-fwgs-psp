@@ -197,7 +197,7 @@ music), launched from the XMB.
   (stick: 35 s), `c0a0` loads in 4.7 s (stick: ~23 s). Sound audible. Tram ride through
   `c0a0a`/`c0a0b`/`c0a0c` transitions works after: device-root `chdir` fix, net_graph without font
   fix, `SAVE_HEAPSIZE` 2 MB on PSP (4 MB didn't fit). Engine heap on `c0a0c`: 24.3 MB allocated.
-  Open: ~25 s after "Verifying and uploading resources" before spawning (custom.hpk?).
+  ~~Open: ~25 s after "Verifying and uploading resources" before spawning~~ fixed, see below.
 - 2026-11-17: Phase 2: `ref/gu` ported to REF_API 20 and linked (`--psp=prx,660,HW`, now the
   `docker-build.sh` default), 0 unresolved stubs. Static memory with `ref_gu`: text 4.98 MB, BSS
   15.8 MB (+2.4 MB over `ref_null`: 1 MB GU display list, 276 KB texture table, 296 KB studio
@@ -224,3 +224,11 @@ music), launched from the XMB.
   0.45 MB, sky 0.38 MB. Engine pools 22.3 MB (client edicts 4.78 → 3.92 MB with 900 edicts).
   Partition 2 has 0.68 MB free besides our heap (the 3 MB threshold minus game PRXs).
 - 2026-11-17: `psp_meminfo` added. Headroom in `c0a0`: 5.5 MB heap + 0.68 MB kernel memory.
+- 2026-11-17: **Map load stall fixed** (upstream bug, not PSP-specific): the server starts its
+  netchan sequence at a random number up to BIT( 27 ) and `CL_ParseClientData` marked every
+  "dropped" frame from 1 up to it: 15-36 s of soft-float compares on the PSP after `ucmd->begin()`
+  (also the 10 s freeze when the c0a0 welder sparks fired). `c0a0` now: `map` -> connected 13 s
+  (client connected 7 s after client start); remaining load time is `svc_resourcelist` (6.5 s:
+  model/sound precache + renderer setup over host0:) and a 2.1 s loading-screen frame.
+  Filesystem: PSP dirs count as case insensitive, so missing `custom/`/`valve_downloads/` are no
+  longer rescanned on every lookup.
