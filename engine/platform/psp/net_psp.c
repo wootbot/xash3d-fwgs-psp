@@ -41,6 +41,7 @@ static struct
 	qboolean stack;    // sceNet/Inet/Resolver/Apctl initialized
 	qboolean connected; // got an IP from the access point
 	char     ip[16];
+	int      handler;  // apctl handler id
 	volatile int last_error; // from the apctl handler (runs on the apctl thread)
 } psp_net;
 
@@ -143,11 +144,42 @@ static qboolean PSP_NetLoadStack( void )
 			return false;
 		}
 
-		sceNetApctlAddHandler( PSP_NetApctlHandler, NULL );
+		psp_net.handler = sceNetApctlAddHandler( PSP_NetApctlHandler, NULL );
 		psp_net.stack = true;
 	}
 
 	return true;
+}
+
+/*
+==================
+PSP_NetPickProfile
+
+net_psp_profile if that profile exists, the first existing one otherwise
+==================
+*/
+static int PSP_NetPickProfile( void )
+{
+	int i, profile = (int)net_psp_profile.value;
+
+	if( profile > 0 && sceUtilityCheckNetParam( profile ) == 0 )
+		return profile;
+
+	for( i = 1; i < 32; i++ )
+	{
+		if( sceUtilityCheckNetParam( i ) != 0 )
+			continue;
+
+		Con_Printf( "Wi-Fi: profile %d doesn't exist, using profile %d\n", profile, i );
+		return i;
+	}
+
+	return -1;
+}
+
+qboolean PSP_NetIsConnected( void )
+{
+	return psp_net.connected;
 }
 
 /*
@@ -161,7 +193,7 @@ the selected profile, blocks until there's an IP address
 qboolean PSP_NetConnect( void )
 {
 	union SceNetApctlInfo info;
-	int ret, state, last_state = -1;
+	int ret, state, profile, last_state = -1;
 	double start;
 
 	if( psp_net.connected )
@@ -174,10 +206,17 @@ qboolean PSP_NetConnect( void )
 	if( sceNetApctlGetState( &state ) >= 0 && state == PSP_NET_APCTL_STATE_GOT_IP )
 		goto got_ip;
 
-	Con_Printf( "Wi-Fi: connecting with profile %d\n", net_psp_profile.value > 0 ? (int)net_psp_profile.value : 1 );
+	profile = PSP_NetPickProfile();
+	if( profile < 0 )
+	{
+		Con_Printf( S_ERROR "Wi-Fi: no connection profiles, create one in Settings > Network Settings\n" );
+		return false;
+	}
+
+	Con_Printf( "Wi-Fi: connecting with profile %d\n", profile );
 	psp_net.last_error = 0;
 
-	if(( ret = sceNetApctlConnect( net_psp_profile.value > 0 ? (int)net_psp_profile.value : 1 )) < 0 )
+	if(( ret = sceNetApctlConnect( profile )) < 0 )
 	{
 		Con_Printf( S_ERROR "Wi-Fi: can't connect (0x%08x), check the profile in the system network settings and the Wi-Fi switch\n", ret );
 		return false;
@@ -255,8 +294,14 @@ void PSP_NetShutdown( void )
 {
 	if( psp_net.stack )
 	{
-		if( psp_net.connected )
+		int state;
+
+		if( sceNetApctlGetState( &state ) >= 0 && state != PSP_NET_APCTL_STATE_DISCONNECTED )
 			sceNetApctlDisconnect();
+
+		if( psp_net.handler >= 0 )
+			sceNetApctlDelHandler( psp_net.handler );
+		psp_net.handler = -1;
 
 		sceNetApctlTerm();
 		sceNetResolverTerm();
@@ -301,6 +346,8 @@ static void PSP_NetStatus_f( void )
 		Con_Printf( "DNS: %s\n", info.primaryDns );
 	if( sceNetApctlGetInfo( PSP_NET_APCTL_INFO_STRENGTH, &info ) >= 0 )
 		Con_Printf( "signal: %u%%\n", info.strength );
+	if( sceNetApctlGetInfo( PSP_NET_APCTL_INFO_POWER_SAVE, &info ) >= 0 )
+		Con_Printf( "WLAN power save: %s\n", info.powerSave ? "on" : "off" );
 }
 
 void PSP_NetRegisterCommands( void )

@@ -129,18 +129,18 @@ music), launched from the XMB.
 
 ## Phase 3 — PSP networking
 
-- [~] PSP network backend (`net_psp.c`, 2026-11-17): on the first `NET_Config( true )` it loads the
-      COMMON/INET modules, inits sceNet/Inet/Resolver/Apctl and connects to profile `net_psp_profile`
-      (blocking, 30 s timeout); `net_psp_status`, `net_psp_profiles`; IPv6 off. Builds and loads on
-      hardware; joining the user's AP "<ap name>" fails with apctl error `0x80410106` (router side
-      being checked: PSP needs 2.4 GHz WEP/WPA-PSK). Original notes:
-      load `PSP_NET_MODULE_COMMON`/`INET`, `sceNetInit`, `sceNetInetInit`, `sceNetResolverInit`,
-      `sceNetApctlInit`; BSD sockets via libcglue / `pspnet_inet`; non-blocking UDP; TCP (needed by
-      steam-broker); DNS (sync resolver).
-- [ ] Access point connection: start with a cvar/command selecting the Wi-Fi profile number
-      (`sceNetApctlConnect`), poll state, show progress/errors in the console; optionally the system
-      netconf dialog (`sceUtilityNetconf*`, needs GU dialog drawing) later.
-- [ ] Shut down cleanly (disconnect, unload net modules) on exit and on power/sleep events.
+- [x] PSP network backend (`net_psp.c`): on the first `NET_Config( true )` (connect, listen server,
+      server browser) it loads the COMMON/INET modules, inits sceNet/Inet/Resolver/Apctl and connects
+      to profile `net_psp_profile` (falls back to the first existing profile; blocking, 30 s
+      timeout), retried on the next `NET_Config( true )` after a failure, then sockets are reopened.
+      BSD sockets via libcglue, non-blocking UDP via `SO_NONBLOCK`, `gethostbyname` resolver,
+      `gethostname` = our IP. IPv6 off. **UDP verified both ways on hardware** (2026-11-17).
+      Still untested: TCP (steam-broker), DNS names.
+- [x] Access point connection: `net_psp_profile`, `net_psp_profiles`, `net_psp_status` (SSID, IP,
+      gateway, DNS, signal, WLAN power save), state progress + apctl error codes in the console.
+      Optionally the system netconf dialog (`sceUtilityNetconf*`, needs GU dialog drawing) later.
+- [~] Shut down cleanly: `quit` with the stack up works (apctl handler removed, disconnect, terms,
+      modules unloaded). Power/sleep events not handled yet.
 - [x] Remove `XASH_NO_NETWORK` for PSP (never enabled in the new port).
 
 **Milestone 3:** PSP joins a Xash3D dedicated server on the LAN (normal Xash protocol) and plays.
@@ -237,4 +237,8 @@ music), launched from the XMB.
   Filesystem: PSP dirs count as case insensitive, so missing `custom/`/`valve_downloads/` are no
   longer rescanned on every lookup.
 - 2026-11-17: Phase 3 started: on-demand Wi-Fi bring-up (`net_psp.c`). Modules load and apctl starts
-  joining; the AP join fails (`0x80410106`), waiting on router settings.
+  joining; the AP join failed (`0x80410106`) on the user's main router. With a 2.4 GHz SSID for the
+  PSP ("<ssid>", profile 2) it connects in a few seconds and UDP works both ways (getchallenge
+  reaches the PC, a connectionless `print` from the PC shows up in the PSP console). The PC
+  couldn't ARP the PSP at first (stale state; fine after relaunching). `psp-ld -r` of ref_gu
+  sometimes fails with "bad value" in incremental builds; rerunning the build fixes it.

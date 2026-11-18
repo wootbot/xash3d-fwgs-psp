@@ -1856,6 +1856,20 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 	if( !net.initialized )
 		return;
 
+#if XASH_PSP
+	// the network stack is loaded and the access point connected on demand,
+	// retry until that works and then (re)open the sockets and find our address
+	if( multiplayer && !PSP_NetIsConnected( ))
+	{
+		if( PSP_NetConnect( ))
+		{
+			old_config = false;
+			bFirst = true;
+		}
+		else Con_Printf( S_ERROR "No network connection, only local games will work.\n" );
+	}
+#endif
+
 	if( old_config == multiplayer )
 		return;
 
@@ -1863,12 +1877,6 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 
 	if( multiplayer )
 	{
-#if XASH_PSP
-		// load the network stack and connect to the access point on demand
-		if( !PSP_NetConnect( ))
-			Con_Printf( S_ERROR "No network connection, only local games will work.\n" );
-#endif
-
 		// open sockets
 		if( net.allow_ip )
 			NET_OpenIP( changeport, net.ip_sockets, net_ipname.string, net_iphostport.value, net_ipclientport.value, AF_INET );
