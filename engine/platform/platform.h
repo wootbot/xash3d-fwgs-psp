@@ -190,6 +190,7 @@ int PSP_LoadModule( const char *filename, int mpid, size_t argsize, void *argp )
 int PSP_UnloadModule( int modid, int *sce_code );
 void PSP_RegisterCommands( void );
 void PSP_NetShutdown( void );
+void PSP_NetFrame( void );
 void PSP_NetRegisterCommands( void );
 #endif
 

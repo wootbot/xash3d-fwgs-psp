@@ -113,6 +113,8 @@ void Platform_RunEvents( void )
 	SceCtrlData buf;
 	short x, y;
 
+	PSP_NetFrame();
+
 	if( !psp_joy_init )
 		return;
 

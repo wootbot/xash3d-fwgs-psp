@@ -27,6 +27,8 @@ GNU General Public License for more details.
 // the engine wants real sockets (connect, listen server, server browser)
 
 #define NET_POOL_SIZE       ( 128 * 1024 )
+// below the main thread (0x20) like in the pspsdk samples, PSP_NetFrame lets them run
+// (at 0x18 the whole system locked up)
 #define NET_THREAD_PRIO     42
 #define NET_THREAD_STACK    ( 4 * 1024 )
 #define APCTL_THREAD_STACK  ( 12 * 1024 )
@@ -177,6 +179,21 @@ static int PSP_NetPickProfile( void )
 	return -1;
 }
 
+/*
+==================
+PSP_NetFrame
+
+the network stack's threads receive packets and answer ARP, but they have
+a lower priority than the main thread, which rarely blocks: without this the
+PSP can send but hardly ever receives anything
+==================
+*/
+void PSP_NetFrame( void )
+{
+	if( psp_net.stack )
+		sceKernelDelayThread( 1000 );
+}
+
 qboolean PSP_NetIsConnected( void )
 {
 	return psp_net.connected;
@@ -294,27 +311,44 @@ void PSP_NetShutdown( void )
 {
 	if( psp_net.stack )
 	{
-		int state;
+		int i, state;
 
+		// wait for the disconnect to finish before tearing the stack down
 		if( sceNetApctlGetState( &state ) >= 0 && state != PSP_NET_APCTL_STATE_DISCONNECTED )
+		{
+			Con_Reportf( "Wi-Fi: disconnecting\n" );
 			sceNetApctlDisconnect();
+
+			for( i = 0; i < 40; i++ )
+			{
+				if( sceNetApctlGetState( &state ) < 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED )
+					break;
+				sceKernelDelayThread( 50 * 1000 );
+			}
+		}
 
 		if( psp_net.handler >= 0 )
 			sceNetApctlDelHandler( psp_net.handler );
 		psp_net.handler = -1;
 
+		Con_Reportf( "Wi-Fi: apctl term\n" );
 		sceNetApctlTerm();
+		Con_Reportf( "Wi-Fi: resolver term\n" );
 		sceNetResolverTerm();
+		Con_Reportf( "Wi-Fi: inet term\n" );
 		sceNetInetTerm();
+		Con_Reportf( "Wi-Fi: net term\n" );
 		sceNetTerm();
 		psp_net.stack = false;
 	}
 
 	if( psp_net.modules )
 	{
+		Con_Reportf( "Wi-Fi: unloading modules\n" );
 		sceUtilityUnloadNetModule( PSP_NET_MODULE_INET );
 		sceUtilityUnloadNetModule( PSP_NET_MODULE_COMMON );
 		psp_net.modules = false;
+		Con_Reportf( "Wi-Fi: shut down\n" );
 	}
 
 	psp_net.connected = false;
