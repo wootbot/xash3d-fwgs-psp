@@ -1226,6 +1226,7 @@ void SteamBroker_Init( void );
 void SteamBroker_Shutdown( void );
 void SteamBroker_Frame( void );
 qboolean SteamBroker_InitiateGameConnection( netadr_t serveradr, int challenge );
+qboolean SteamBroker_IsConnecting( void );
 void SteamBroker_TerminateGameConnection( void );
 
 //

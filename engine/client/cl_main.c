@@ -1478,6 +1478,13 @@ static void CL_CheckForResend( void )
 	}
 	else if( !cls.broker_wait )
 	{
+		// give the broker connection a moment, otherwise we would connect without a ticket
+		if( cls.net_protocol == PROTO_GOLDSRC && cls.connect_retry <= 2 && SteamBroker_IsConnecting( ))
+		{
+			Con_Printf( "Connecting to %s... waiting for the Steam broker (retry #%i)\n", cls.servername, cls.connect_retry );
+			return;
+		}
+
 		Con_Printf( "Connecting to %s... (retry #%i)\n", cls.servername, cls.connect_retry );
 		CL_SendGetChallenge( adr );
 	}

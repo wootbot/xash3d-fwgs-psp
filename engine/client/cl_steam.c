@@ -62,6 +62,7 @@ typedef struct
 	sbrk_state_t state;
 	int challenge;
 	netadr_t serveradr;
+	qboolean ticket_requested; // sb_connect was sent, sb_disconnect is expected
 	double connection_timeout;
 	double idle_cycle_timeout;
 	uint8_t rx_buffer[SBRK_MAX_FRAME_SIZE + 64];
@@ -105,6 +106,7 @@ static void SteamBroker_CloseSocket( void )
 static void SteamBroker_Disconnect( void )
 {
 	SteamBroker_CloseSocket();
+	broker.ticket_requested = false;
 	SteamBroker_SetState( SBRK_STATE_IDLE );
 }
 
@@ -391,6 +393,32 @@ static void SteamBroker_UpdateConnecting( void )
 		return;
 	}
 
+#if XASH_PSP
+	// the PSP's select() reports a socket as writable while it's still connecting,
+	// ask connect() again instead: it fails with EISCONN once the connection is up
+	struct sockaddr_storage addr = { 0 };
+
+	NET_NetadrToSockadr( &broker.adr, &addr );
+	if( NET_IsSocketError( connect( broker.socket, (struct sockaddr *)&addr, NET_SockAddrLen( &addr ))))
+	{
+		int err = WSAGetLastError();
+
+		if( err == WSAEWOULDBLOCK || err == WSAEALREADY || err == WSAEINPROGRESS )
+			return;
+
+		if( err != WSAEISCONN )
+		{
+			Con_Printf( S_ERROR "%s: connection failed with error %s\n", __func__, NET_ErrorString( ));
+			SteamBroker_Disconnect();
+			return;
+		}
+	}
+
+	broker.connection_timeout = 0;
+	Con_Printf( S_NOTE "%s: connected to broker at %s\n", __func__, cl_steam_broker_addr.string );
+	SteamBroker_SetState( SBRK_STATE_CONNECTED );
+	SteamBroker_AnnounceGameStart( GI->gamefolder );
+#else
 	fd_set writefds;
 	FD_ZERO( &writefds );
 	FD_SET( broker.socket, &writefds );
@@ -434,6 +462,7 @@ static void SteamBroker_UpdateConnecting( void )
 			SteamBroker_AnnounceGameStart( GI->gamefolder );
 		}
 	}
+#endif
 }
 
 static void SteamBroker_UpdateConnected( void )
@@ -456,6 +485,7 @@ qboolean SteamBroker_InitiateGameConnection( netadr_t serveradr, int challenge )
 
 	broker.challenge = challenge;
 	broker.serveradr = serveradr;
+	broker.ticket_requested = true;
 
 	// sb_connect <ip:port> <server_steamid> <secure> <challenge>
 	char buf[512];
@@ -471,6 +501,12 @@ void SteamBroker_TerminateGameConnection( void )
 {
 	if( broker.state != SBRK_STATE_CONNECTED )
 		return;
+
+	// the broker drops sessions that disconnect without asking for a ticket
+	if( !broker.ticket_requested )
+		return;
+
+	broker.ticket_requested = false;
 
 	if( Q_stricmp( cl_ticket_generator.string, "steam" ) != 0 )
 		return;
@@ -536,4 +572,12 @@ void SteamBroker_Shutdown( void )
 
 	SteamBroker_AnnounceGameShutdown( );
 	SteamBroker_SetState( SBRK_STATE_GAMESHUTDOWN );
+}
+
+qboolean SteamBroker_IsConnecting( void )
+{
+	if( Q_stricmp( cl_ticket_generator.string, "steam" ) != 0 )
+		return false;
+
+	return broker.state == SBRK_STATE_IDLE || broker.state == SBRK_STATE_CONNECTING;
 }
