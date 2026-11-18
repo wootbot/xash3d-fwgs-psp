@@ -55,7 +55,7 @@ typedef struct dir_s
 
 static qboolean Platform_GetDirectoryCaseSensitivity( const char *dir )
 {
-#if XASH_WIN32 || XASH_PSVITA || XASH_NSWITCH
+#if XASH_WIN32 || XASH_PSVITA || XASH_NSWITCH || XASH_PSP
 	return false;
 #elif XASH_ANDROID
 	// on Android, doing code below causes crash in MediaProviderGoogle.apk!libfuse_jni.so
@@ -126,16 +126,18 @@ static void FS_PopulateDirEntries( dir_t *dir, const char *path )
 {
 	stringlist_t list;
 
-	if( !FS_SysFolderExists( path ))
+	// check this first: a missing directory on a case insensitive filesystem
+	// would otherwise be rescanned with listdirectory on every lookup
+	if( !Platform_GetDirectoryCaseSensitivity( path ))
 	{
-		dir->numentries = DIRENTRY_EMPTY_DIRECTORY;
+		dir->numentries = DIRENTRY_CASEINSENSITIVE;
 		dir->entries = NULL;
 		return;
 	}
 
-	if( !Platform_GetDirectoryCaseSensitivity( path ))
+	if( !FS_SysFolderExists( path ))
 	{
-		dir->numentries = DIRENTRY_CASEINSENSITIVE;
+		dir->numentries = DIRENTRY_EMPTY_DIRECTORY;
 		dir->entries = NULL;
 		return;
 	}
