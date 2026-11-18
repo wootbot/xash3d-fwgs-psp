@@ -709,7 +709,7 @@ class PSP:
 		stdlibs += ['-lpspdisplay', '-lpspgum_vfpu', '-lpspgu','-lpspge', '-lpspvfpu']
 		stdlibs += ['-lpspaudio', '-lpspdmac']
 		stdlibs += ['-lstdc++', '-lc', '-lm']
-		stdlibs += ['-lpspctrl', '-lpspdebug', '-lpsppower']
+		stdlibs += ['-lpspctrl', '-lpspdebug', '-lpsppower', '-lpspnet', '-lpspnet_apctl']
 		# psputility, psprtc, pspnet*, pspsdk and pspuser are appended by psp-gcc's specs after
 		# libcglue. Listing them here as well splits a library's import stubs between two
 		# archive scans and psp-fixup-imports leaves the late ones unresolved (they silently

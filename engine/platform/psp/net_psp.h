@@ -126,4 +126,11 @@ static inline int ioctl_psp( int fd, int req, unsigned int *arg )
 
 #define ioctlsocket ioctl_psp
 
+// net_psp.c: the network stack is loaded and the access point connected on demand
+qboolean PSP_NetConnect( void );
+
+// no gethostname in pspsdk, net_psp.c gives our IP address instead
+int PSP_NetGetHostName( char *name, size_t len );
+#define gethostname PSP_NetGetHostName
+
 #endif // NET_PSP_H

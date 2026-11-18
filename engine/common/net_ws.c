@@ -1863,6 +1863,12 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 
 	if( multiplayer )
 	{
+#if XASH_PSP
+		// load the network stack and connect to the access point on demand
+		if( !PSP_NetConnect( ))
+			Con_Printf( S_ERROR "No network connection, only local games will work.\n" );
+#endif
+
 		// open sockets
 		if( net.allow_ip )
 			NET_OpenIP( changeport, net.ip_sockets, net_ipname.string, net_iphostport.value, net_ipclientport.value, AF_INET );
@@ -2016,7 +2022,11 @@ void NET_Init( void )
 	NET_InitializeCriticalSections();
 
 	net.allow_ip = !Sys_CheckParm( "-noip" );
+#if XASH_PSP
+	net.allow_ip6 = false; // IPv4 only network stack
+#else
 	net.allow_ip6 = !Sys_CheckParm( "-noip6" );
+#endif
 
 	// specify custom host port
 	if( Sys_GetParmFromCmdLine( "-port", cmd ) && Q_isdigit( cmd ))

@@ -189,6 +189,8 @@ int PSP_GetArgv( int in_argc, char **in_argv, char ***out_argv );
 int PSP_LoadModule( const char *filename, int mpid, size_t argsize, void *argp );
 int PSP_UnloadModule( int modid, int *sce_code );
 void PSP_RegisterCommands( void );
+void PSP_NetShutdown( void );
+void PSP_NetRegisterCommands( void );
 #endif
 
 #if XASH_DOS

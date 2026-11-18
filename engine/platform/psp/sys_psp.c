@@ -299,6 +299,7 @@ static void PSP_MemInfo_f( void )
 void PSP_RegisterCommands( void )
 {
 	Cmd_AddCommand( "psp_meminfo", PSP_MemInfo_f, "print free heap and kernel memory" );
+	PSP_NetRegisterCommands();
 }
 
 void PSP_Init( void )
@@ -316,4 +317,5 @@ void PSP_Init( void )
 
 void PSP_Shutdown( void )
 {
+	PSP_NetShutdown();
 }
