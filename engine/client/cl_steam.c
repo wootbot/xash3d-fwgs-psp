@@ -343,6 +343,12 @@ static void SteamBroker_HandleDataRx( void )
 
 static void SteamBroker_UpdateIdle( void )
 {
+#if XASH_PSP
+	// Wi-Fi only comes up for network games, don't try (and fail) to open sockets until then
+	if( !PSP_NetIsConnected( ))
+		return;
+#endif
+
 	if( broker.idle_cycle_timeout < Platform_DoubleTime( ))
 	{
 		if( SteamBroker_UpdateBrokerAddress( ))
