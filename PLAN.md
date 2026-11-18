@@ -129,7 +129,11 @@ music), launched from the XMB.
 
 ## Phase 3 — PSP networking
 
-- [ ] PSP network backend (template: `engine/platform/psvita/net_psvita.h` + `net_ws_private.h`):
+- [~] PSP network backend (`net_psp.c`, 2026-11-17): on the first `NET_Config( true )` it loads the
+      COMMON/INET modules, inits sceNet/Inet/Resolver/Apctl and connects to profile `net_psp_profile`
+      (blocking, 30 s timeout); `net_psp_status`, `net_psp_profiles`; IPv6 off. Builds and loads on
+      hardware; joining the user's AP "<ap name>" fails with apctl error `0x80410106` (router side
+      being checked: PSP needs 2.4 GHz WEP/WPA-PSK). Original notes:
       load `PSP_NET_MODULE_COMMON`/`INET`, `sceNetInit`, `sceNetInetInit`, `sceNetResolverInit`,
       `sceNetApctlInit`; BSD sockets via libcglue / `pspnet_inet`; non-blocking UDP; TCP (needed by
       steam-broker); DNS (sync resolver).
@@ -137,7 +141,7 @@ music), launched from the XMB.
       (`sceNetApctlConnect`), poll state, show progress/errors in the console; optionally the system
       netconf dialog (`sceUtilityNetconf*`, needs GU dialog drawing) later.
 - [ ] Shut down cleanly (disconnect, unload net modules) on exit and on power/sleep events.
-- [ ] Remove `XASH_NO_NETWORK` for PSP.
+- [x] Remove `XASH_NO_NETWORK` for PSP (never enabled in the new port).
 
 **Milestone 3:** PSP joins a Xash3D dedicated server on the LAN (normal Xash protocol) and plays.
 
@@ -232,3 +236,5 @@ music), launched from the XMB.
   model/sound precache + renderer setup over host0:) and a 2.1 s loading-screen frame.
   Filesystem: PSP dirs count as case insensitive, so missing `custom/`/`valve_downloads/` are no
   longer rescanned on every lookup.
+- 2026-11-17: Phase 3 started: on-demand Wi-Fi bring-up (`net_psp.c`). Modules load and apctl starts
+  joining; the AP join fails (`0x80410106`), waiting on router settings.
