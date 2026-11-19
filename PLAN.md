@@ -333,3 +333,19 @@ music), launched from the XMB.
   Real fix would be GE skinning + GE lighting, which can't match GoldSrc's wrap lighting exactly.
   Other measured costs: TriBoxInPVS for temp entities 7.6 us/call (1.2 ms), PM_TestPlayerPosition
   ~160 us/call (brush entities can't be bounds-culled, clip hulls stick out).
+- 2026-11-19 (evening): **Only 2 MB of VRAM were mapped**: `ka.prx` was never on the stick, so the
+  unlock silently failed (1.2 MB left for textures after the frame buffers). Now falls back to
+  KUBridge `kuKernelCall` on `sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x5BAA5439)`
+  (sceGeEdramSetSize): **4 MB on 6.20 PRO**, `psp_meminfo` says which path worked. Menu images
+  go to RAM. `gu_texture_maxsize` caps world/model/sprite textures, `gu_texture_vram 0` keeps
+  everything in RAM. In-game texture memory at cap 256: ~6.9 MB + 0.55 MB palettes (studio 2.1,
+  sprites 1.6, world ~1.7, lightmaps 0.3), VRAM full, ~3.5 MB still in RAM; at cap 16 all of it
+  fits with ~1 MB VRAM to spare. **Measured, same 25-model scene before the blastcorpse1 fight:
+  cap 256 27.3-29.5 ms, cap 64 27.0-28.4, cap 16 all VRAM 26.6-26.8, cap 16 all RAM 27.5-27.6.**
+  VRAM vs RAM is ~0.8 ms (3%), downscaling ~1 ms more: textures aren't the bottleneck, default
+  stays 256. Textures are already swizzled T8/T4 (lightmaps and rows < 16 bytes excepted);
+  DXT1 would only halve sizes that don't matter. Palettes (512 B each, ~1000) are as big as
+  the textures at cap 16.
+  **Wi-Fi stopped working** after a TEMP-profiling client PRX (+24 KB BSS) was pushed: only
+  ~32 KB of user memory were left once Wi-Fi was up, the inet module failed with 0x800208d9.
+  Heap threshold 3 MB -> 3.25 MB (290 KB free in the menu now).

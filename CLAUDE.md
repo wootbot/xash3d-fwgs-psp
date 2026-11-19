@@ -128,6 +128,11 @@ Docker Desktop must be in **Linux containers** mode.
     build-psp/valve/cl_dlls/client_psp_mipsel.prx valve/cl_dlls/client_psp_mipsel.prx` for the
     client DLL (`scripts/psp/docker-build.sh hlsdk` builds it). After a restart the Wi-Fi join can
     take a few minutes (retries with `0x80410106`): wait for output before assuming it failed.
+  - User memory is tight: the game PRXs and the Wi-Fi modules share what the heap leaves
+    (`PSP_HEAP_THRESHOLD_SIZE_KB`). If Wi-Fi stops joining with `can't load the inet module
+    (0x800208d9)`, a game PRX grew (e.g. TEMP profiling tables in the client); `psp_meminfo` shows
+    the kernel memory left. PSPLink can still run a stick build to see startup output:
+    `cd ms0:/PSP/GAME/Xash3D` then `./xash.prx -dev 2 -log -dbgcon` (it can't run `EBOOT.PBP`).
   - The PSP FPU has no doubles: every `double` operation is a software call. In hot loops (per
     vertex, particle, bone, entity) keep math in float; find offenders with `psp-objdump -d` and a
     count of `jal __*df*` calls per function. Never change the math in pm_shared/prediction or delta
