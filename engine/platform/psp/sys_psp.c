@@ -32,9 +32,11 @@ PSP_MODULE_INFO( "Xash3D", PSP_MODULE_USER, 1, 0 );
 PSP_MAIN_THREAD_ATTR( PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU );
 PSP_MAIN_THREAD_STACK_SIZE_KB( 512 );
 // current pspsdk: any negative heap size means "all free memory minus the threshold",
-// the threshold is left for the game PRX modules
+// the threshold is left for the game PRX modules (server and client, ~2.6 MB of files) and the
+// Wi-Fi modules, loaded later: with 3 MB only ~32 KB were left once Wi-Fi was up, and a
+// client PRX 24 KB bigger made the inet module fail to load (0x800208d9)
 PSP_HEAP_SIZE_KB( -1 );
-PSP_HEAP_THRESHOLD_SIZE_KB( 3 * 1024 );
+PSP_HEAP_THRESHOLD_SIZE_KB( 3 * 1024 + 256 );
 
 #define PSP_MAX_ARGV     32
 #define PSP_CMDLINE_FILE "start.cmd"
