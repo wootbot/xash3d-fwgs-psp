@@ -331,7 +331,7 @@ static void PSP_DbgConUpdate_f( void )
 		return;
 	}
 
-	Con_Printf( "psp_update: waiting for the EBOOT on TCP port %d\n", DBGCON_PORT );
+	Con_Printf( "psp_update: waiting for %s on TCP port %d\n", dest, DBGCON_PORT );
 	PSP_DbgConFlush();
 
 	for( deadline = Sys_DoubleTime() + 30.0; Sys_DoubleTime() < deadline; )

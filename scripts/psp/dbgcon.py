@@ -68,8 +68,12 @@ def cmd(command, log):
 
 def update(ip, eboot, dest=None):
 	data = open(eboot, 'rb').read()
-	udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	udp.sendto(b'psp_update' + (b' ' + dest.encode() if dest else b''), (ip, PORT))
+	command = 'psp_update' + (' ' + dest if dest else '')
+	# through the listener if it runs: the game sends its output to whoever sent the
+	# last packet, a packet from here would send the psp_update messages nowhere
+	if cmd(command, DEFAULT_LOG) != 0:
+		udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		udp.sendto(command.encode(), (ip, PORT))
 	for attempt in range(40):
 		try:
 			tcp = socket.create_connection((ip, PORT), timeout=3)
