@@ -381,3 +381,5 @@ reference/
 
 # PSP port: local PC tools (PSPLink usbhostfs_pc, pspsh, ...), build output is covered by build-*
 tools/psplink/
+tools/ppsspp/
+tools/dbg/

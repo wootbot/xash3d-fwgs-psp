@@ -114,6 +114,7 @@ void Platform_RunEvents( void )
 	short x, y;
 
 	PSP_NetFrame();
+	PSP_DbgConFrame();
 
 	if( !psp_joy_init )
 		return;

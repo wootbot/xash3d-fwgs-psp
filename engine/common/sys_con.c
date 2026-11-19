@@ -289,10 +289,15 @@ static void Sys_PrintStdout( const char *logtime, size_t logtime_len, const char
 #endif
 
 #if ( !XASH_MOBILE_PLATFORM || XASH_SAILFISH ) && !XASH_WIN32 // Wcon does the job
+#if XASH_PSP
+	if( !psp_nostdout ) // under PSPLink stdout goes over USB
+#endif
+	{
 	Platform_ConsolePrintBegin();
 	Sys_PrintLogfile( STDOUT_FILENO, logtime, logtime_len, XASH_COLORIZE_CONSOLE ? msg : stripped, XASH_COLORIZE_CONSOLE );
 	Sys_FlushStdout();
 	Platform_ConsolePrintEnd( msg );
+	}
 #endif
 
 	XRcon_Print( stripped );
@@ -338,6 +343,9 @@ void Sys_PrintLog( const char *pMsg )
 
 	// spew to stdout
 	Sys_PrintStdout( logtime, logtime_len, pMsg, log_msg );
+#if XASH_PSP
+	PSP_DbgConPrint( log_msg ); // Wi-Fi debug console
+#endif
 
 	size_t len = Q_strlen( pMsg );
 

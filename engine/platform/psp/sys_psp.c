@@ -25,6 +25,7 @@ GNU General Public License for more details.
 #include <pspdebug.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <malloc.h>
 
 PSP_MODULE_INFO( "Xash3D", PSP_MODULE_USER, 1, 0 );
@@ -57,6 +58,166 @@ static int PSP_CallbackThread( SceSize args, void *argp )
 static void PSP_SetupCallbacks( void )
 {
 	int thid = sceKernelCreateThread( "update_thread", PSP_CallbackThread, 0x11, 0xFA0, 0, NULL );
+
+	if( thid >= 0 )
+		sceKernelStartThread( thid, 0, NULL );
+}
+
+/*
+===========
+PSP_WatchdogThread
+
+a main thread spinning without ever blocking starves every lower priority
+thread, PSPLink's shell included, and looks like a hard freeze. If frames stop
+for a while, drop the main thread to the lowest priority so PSPLink can
+answer again (thctx <main uid> shows where it is stuck); restore it once
+frames come back (long map loads trigger this too, harmlessly)
+===========
+*/
+#define PSP_WATCHDOG_SECONDS 15
+
+static SceUID psp_main_thread;
+
+// -nostdout: console and watchdog output only go to the log files, so a PSPLink
+// run from ms0: leaves the USB link idle
+qboolean psp_nostdout;
+static size_t PSP_LargestFreeBlock( void );
+
+// to stdout and to watchdog.log next to the game, for runs without PSPLink
+void PSP_WatchdogLog( qboolean truncate, const char *fmt, ... )
+{
+	char buf[1100];
+	va_list args;
+	int len;
+
+	va_start( args, fmt );
+	len = vsnprintf( buf, sizeof( buf ), fmt, args );
+	va_end( args );
+
+	if( len < 0 )
+		return;
+	if( len >= sizeof( buf ))
+		len = sizeof( buf ) - 1;
+
+	if( !psp_nostdout )
+		printf( "%s", buf );
+	PSP_DbgConSendNow( buf ); // straight out, the main thread may be stuck
+
+	// libc open: it resolves relative paths against the libc cwd, sceIoOpen
+	// in a new thread doesn't
+	int fd = open( "watchdog.log", O_WRONLY | O_CREAT | ( truncate ? O_TRUNC : O_APPEND ), 0777 );
+	if( fd >= 0 )
+	{
+		write( fd, buf, len );
+		close( fd );
+	}
+}
+
+// main thread stack high-water mark, the stack starts out filled with 0xff
+static void PSP_CheckMainStack( void )
+{
+	static SceKernelThreadInfo info;
+	static size_t reported;
+
+	if( !info.size )
+	{
+		info.size = sizeof( info );
+		if( sceKernelReferThreadStatus( psp_main_thread, &info ) < 0 || !info.stack )
+			return;
+	}
+
+	const uint32_t *p = (const uint32_t *)info.stack + 4; // skip the thread id at the bottom
+	const uint32_t *end = (const uint32_t *)((byte *)info.stack + info.stackSize );
+
+	while( p < end && *p == 0xffffffff )
+		p++;
+
+	size_t used = (byte *)end - (byte *)p;
+
+	if( used >= reported + 8 * 1024 )
+	{
+		reported = used;
+		PSP_WatchdogLog( false, "STACK: main thread used %u of %u KB\n", (uint)( used >> 10 ), (uint)( info.stackSize >> 10 ));
+	}
+}
+
+const char * volatile psp_stage[PSP_STAGE_MAX] = { "-", "-" };
+volatile int psp_stage_depth = 2; // [0] host stage and [1] client stage are always there
+
+// what the stuck main thread is doing: the engine stages it entered last and its kernel
+// state (waiting on what, or running: then the run clocks keep growing between reports)
+static void PSP_WatchdogReportStall( void )
+{
+	static SceKernelThreadInfo info;
+	char stages[512];
+	int len = 0, depth = psp_stage_depth;
+
+	stages[0] = 0;
+	for( int i = 0; i < depth && i < PSP_STAGE_MAX && len < (int)sizeof( stages ); i++ )
+		len += snprintf( stages + len, sizeof( stages ) - len, "%s%s", i ? " > " : "", psp_stage[i] ? psp_stage[i] : "?" );
+
+	memset( &info, 0, sizeof( info ));
+	info.size = sizeof( info );
+	if( sceKernelReferThreadStatus( psp_main_thread, &info ) < 0 )
+	{
+		PSP_WatchdogLog( false, "STALL: stage %s (depth %d), no thread status\n", stages, depth );
+		return;
+	}
+
+	PSP_WatchdogLog( false, "STALL: stage %s (depth %d) | status 0x%x wait type %d id 0x%x prio %d run clocks %u ms, preempted intr %u thread %u, release %u\n",
+		stages, depth, info.status, info.waitType, (uint)info.waitId, info.currentPriority,
+		(uint)( info.runClocks.low / 1000 ), info.intrPreemptCount, info.threadPreemptCount, info.releaseCount );
+}
+
+static int PSP_WatchdogThread( SceSize args, void *argp )
+{
+	int last = -1, still = 0, seconds = 0;
+	qboolean demoted = false;
+
+	while( 1 )
+	{
+		sceKernelDelayThread( 1000 * 1000 );
+		PSP_CheckMainStack();
+
+		// heartbeat, the last one tells when a hard freeze happened
+		if( ++seconds % 5 == 0 )
+			PSP_WatchdogLog( false, "WATCHDOG: %d s, frame %d, net pool %d bytes free\n", seconds, host.framecount, PSP_NetPoolFree( ));
+
+		if( host.framecount != last )
+		{
+			last = host.framecount;
+			still = 0;
+
+			if( demoted )
+			{
+				sceKernelChangeThreadPriority( psp_main_thread, 0x20 );
+				PSP_WatchdogLog( false, "WATCHDOG: frames again, main thread priority restored\n" );
+				demoted = false;
+			}
+			continue;
+		}
+
+		if( ++still == PSP_WATCHDOG_SECONDS && !demoted )
+		{
+			// demote first: printf can block on the stdio lock or the USB link
+			sceKernelChangeThreadPriority( psp_main_thread, 0x7e );
+			demoted = true;
+			PSP_WatchdogLog( false, "WATCHDOG: no frame for %d s (frame %d), main thread 0x%08x demoted\n",
+				PSP_WATCHDOG_SECONDS, last, (uint)psp_main_thread );
+		}
+
+		if( still >= PSP_WATCHDOG_SECONDS && ( still - PSP_WATCHDOG_SECONDS ) % 10 == 0 )
+			PSP_WatchdogReportStall();
+	}
+
+	return 0;
+}
+
+static void PSP_StartWatchdog( void )
+{
+	psp_main_thread = sceKernelGetThreadId();
+
+	int thid = sceKernelCreateThread( "xash_watchdog", PSP_WatchdogThread, 0x12, 0x8000, 0, NULL ); // vsnprintf + open() need a few KB each
 
 	if( thid >= 0 )
 		sceKernelStartThread( thid, 0, NULL );
@@ -311,6 +472,7 @@ void PSP_RegisterCommands( void )
 {
 	Cmd_AddCommand( "psp_meminfo", PSP_PrintMemInfo, "print free heap and kernel memory" );
 	PSP_NetRegisterCommands();
+	PSP_DbgConInit();
 }
 
 void PSP_Init( void )
@@ -318,7 +480,18 @@ void PSP_Init( void )
 	// disable FPU exceptions (division by zero and etc...)
 	pspSdkDisableFPUExceptions();
 
+	psp_nostdout = Sys_CheckParm( "-nostdout" );
+	if( psp_nostdout ) // stray printf()s too
+		freopen( "stdout.log", "w", stdout );
+
 	PSP_SetupCallbacks();
+
+	// compare XMB and PSPLink launches, they don't get the same memory
+	PSP_WatchdogLog( true, "start: heap %u KB free (largest malloc), kernel %u KB free (largest block %u KB)\n",
+		(uint)( PSP_LargestFreeBlock() >> 10 ), (uint)( sceKernelTotalFreeMemSize() >> 10 ),
+		(uint)( sceKernelMaxFreeMemSize() >> 10 ));
+
+	PSP_StartWatchdog();
 
 	// set max CPU/GPU frequency
 	scePowerSetClockFrequency( 333, 333, 166 );

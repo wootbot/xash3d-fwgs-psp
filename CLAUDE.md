@@ -110,3 +110,23 @@ Docker Desktop must be in **Linux containers** mode.
   unstripped `server.elf`/`client.elf`.
 - gdb: `psp-gdb` from the Docker image, `target remote host.docker.internal:10001` (untested end to end).
 - Games launched from the XMB can't be attached to — reproduce problems under PSPLink.
+- **"Hard freezes" under PSPLink are the USB link dying while Wi-Fi is up** (found 2026-11-18). PSPLink
+  stops answering and the game looks frozen, but the PSP keeps running: the main thread is blocked
+  forever on a `host0:` file operation (the watchdog's stall report shows `cmdfile open`, waiting on an
+  event flag), and the watchdog kept logging to `ms0:` for 20 minutes. It happens with the Wi-Fi stack
+  loaded, connected or not; never in XMB runs without USB. Not a game bug, players don't hit it.
+  **So: use PSPLink only with Wi-Fi off.** For multiplayer use the Wi-Fi debug console below.
+- **Wi-Fi debug console** (`engine/platform/psp/dbg_psp.c`, `-dbgcon` in `start.cmd`, launch from the
+  XMB with USB unplugged): the game joins Wi-Fi at startup and talks to `scripts/psp/dbgcon.py` on the PC.
+  - `py -I scripts/psp/dbgcon.py listen <psp ip>` (run in the background): console output, watchdog and
+    stall reports go to `build-psp/dbgcon.log`.
+  - `dbgcon.py cmd "<console command>"` runs a command. Wait for output from the game before sending the
+    first one (packets sent before it's up are lost).
+  - `dbgcon.py update <psp ip> build-psp/EBOOT.PBP` pushes a new build over TCP; the game writes it to
+    the stick and restarts with it (`sctrlKernelLoadExecVSHMs2`, needs PRO/ARK CFW).
+  - The PC always sends first (keepalives), so the Windows firewall needs no rule.
+  - Test scripts (ignored): `tools/dbg/fire_test.sh` (connect to the HLDS test server, MP5 fire, PROF
+    lines), `tools/dbg/ab.sh "<setup A>" "<setup B>"`. HLDS test server: `valve/psptest.cfg` (cheats,
+    AFK kick off, `rcon_password <see README>`, no map rotation); `tools/psplink/rcon.ps1` is an rcon client
+    (`powershell -ExecutionPolicy Bypass -File rcon.ps1 status`).
+- Still avoid restarting HLDS while the PSP is connected; send `disconnect` first.
