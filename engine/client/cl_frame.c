@@ -491,7 +491,12 @@ static int CL_InterpolateModel( cl_entity_t *e )
 	}
 
 	VectorSubtract( ph0->origin, ph1->origin, delta );
+#if XASH_PSP
+	// no double precision FPU: only the time differences in double, every entity runs this each frame
+	float frac = (float)( t - t1 ) / (float)( t2 - t1 );
+#else
 	double frac = (t - t1) / (t2 - t1);
+#endif
 
 	if( frac < 0.0f )
 		return 0;
@@ -501,10 +506,17 @@ static int CL_InterpolateModel( cl_entity_t *e )
 
 	VectorMA( ph1->origin, frac, delta, origin );
 
-	AngleQuaternion( ph0->angles, q1, false );
-	AngleQuaternion( ph1->angles, q2, false );
-	QuaternionSlerp( q2, q1, frac, q );
-	QuaternionAngle( q, angles );
+#if XASH_PSP
+	if( VectorCompare( ph0->angles, ph1->angles ))
+		VectorCopy( ph0->angles, angles ); // not turning, most entities
+	else
+#endif
+	{
+		AngleQuaternion( ph0->angles, q1, false );
+		AngleQuaternion( ph1->angles, q2, false );
+		QuaternionSlerp( q2, q1, frac, q );
+		QuaternionAngle( q, angles );
+	}
 
 	VectorCopy( origin, e->origin );
 	VectorCopy( angles, e->angles );
