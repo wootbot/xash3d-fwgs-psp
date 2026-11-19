@@ -310,3 +310,15 @@ music), launched from the XMB.
   Left per frame in the fight: studio ~25 ms for ~55 models (about half in the client DLL's bone
   setup, which does double math: hlsdk), world 6, temp entities 4 (client DLL, double math),
   server messages 4-7, prediction 3.5 + redo 3, sound 3-4.
+- 2026-11-19: **Firefight ~13 -> ~16.5-19 fps** (blastcorpse1, 60 s windows: 75 -> 60 ms per frame
+  with ~59 models, 53 ms with ~47). Client DLL (hlsdk `psp-hl`, committed there): bone setup sin/cos/
+  asin on the VFPU (matrix 5 only, ref_gu keeps state in 6/7), per-model math in float, light
+  transforms copied instead of recomputed: bones 4.4 -> 3.0 ms; pm_shared untouched (prediction
+  must match the server). Engine: entity lighting 4.3 -> 1.6 ms (a dead CL_TraceLine in the sky
+  test, float dlight compares, PSP sky-test cache per entity); particles without software doubles
+  (2-3 -> 0.4 ms); **func_water warp 8.6 -> 1.7 ms** (16 software double ops per vertex, found with
+  new brush-model timers: brush entities were 11 ms of untimed render time); translucent entity
+  sort with precomputed keys (2.3 -> 0.4 ms). Static scan for hot software-double code:
+  `psp-objdump -d xash | awk` counting `jal __*df*` per function. `psp_update <file>` pushes any
+  game file (client PRX). Left per frame: studio ~17-19 (engine mesh submit ~11, client ~7),
+  world 6-7, brush 5, prediction ~6.5, server messages 3.5-5, sound ~3.

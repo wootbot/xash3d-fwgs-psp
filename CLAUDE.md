@@ -123,7 +123,15 @@ Docker Desktop must be in **Linux containers** mode.
   - `dbgcon.py cmd "<console command>"` runs a command. Wait for output from the game before sending the
     first one (packets sent before it's up are lost).
   - `dbgcon.py update <psp ip> build-psp/EBOOT.PBP` pushes a new build over TCP; the game writes it to
-    the stick and restarts with it (`sctrlKernelLoadExecVSHMs2`, needs PRO/ARK CFW).
+    the stick and restarts with it (`sctrlKernelLoadExecVSHMs2`, needs PRO/ARK CFW). With a third
+    argument it replaces another game file instead, e.g. `dbgcon.py update <psp ip>
+    build-psp/valve/cl_dlls/client_psp_mipsel.prx valve/cl_dlls/client_psp_mipsel.prx` for the
+    client DLL (`scripts/psp/docker-build.sh hlsdk` builds it). After a restart the Wi-Fi join can
+    take a few minutes (retries with `0x80410106`): wait for output before assuming it failed.
+  - The PSP FPU has no doubles: every `double` operation is a software call. In hot loops (per
+    vertex, particle, bone, entity) keep math in float; find offenders with `psp-objdump -d` and a
+    count of `jal __*df*` calls per function. Never change the math in pm_shared/prediction or delta
+    decoding: it has to match the server.
   - `dbgcon.py cmd psp_restart` restarts the game, also when it's stuck (hang, error dialog waiting for
     X): the watchdog thread handles it then. Error dialogs are sent to the log too.
   - The PC always sends first (keepalives), so the Windows firewall needs no rule.
