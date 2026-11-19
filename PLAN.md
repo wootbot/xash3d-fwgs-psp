@@ -296,3 +296,17 @@ music), launched from the XMB.
   Left in the 23 s: world load 3.2 s, model precache 3.5 s, CL_RegisterResources 2.8 s, serverdata
   2.7 s. Out of memory while loading a map (brokenpath) now drops to the menu instead of a fatal
   error (uncommitted, needs the earlier soft-fail work cleaned up first).
+- 2026-11-18: **Firefight benchmark on blastcorpse1** (the user's map: walk forward from the spawn
+  into a big fight; `tools/dbg/combat_test.sh`). Started at ~9-10 fps (~100-110 ms/frame), now
+  **~14 fps (~72 ms)**. Movement prediction re-ran every unacknowledged command each frame (15 runs,
+  10 ms): results are now reused until the next packet (7 runs, 4.5 ms), and player traces skip box
+  physents out of reach (brush models can't be culled by their bounds: clip brushes). Sound mixed at
+  22 kHz with the hardware SRC channel resampling (mixing 13 -> 5-7 ms); sentence words stay loaded
+  (they were re-read from the stick, ~35 ms each, every time a soldier talked: svc_sound was up to
+  25% of the frame). Netchan_TransmitBits cleared its 192 KB send buffer for every packet (1.2 ms);
+  entity interpolation in float. Out of memory in game is now a Host_Error back to the menu
+  (committed; host.status was never HOST_FRAME on PSP, which hid it). Maps whose entity lump was
+  stripped by the download server are no longer downloaded again on every connect.
+  Left per frame in the fight: studio ~25 ms for ~55 models (about half in the client DLL's bone
+  setup, which does double math: hlsdk), world 6, temp entities 4 (client DLL, double math),
+  server messages 4-7, prediction 3.5 + redo 3, sound 3-4.
