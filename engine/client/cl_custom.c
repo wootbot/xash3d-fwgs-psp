@@ -51,6 +51,12 @@ qboolean CL_HasResourceFile( const resource_t *pResource, const char *filepath )
 	// A complete file of a different size still passes. GoldSrc never compares sizes at all.
 	//
 	// comparing against a wrapped nDownloadSize (it's sent as a signed 24-bit value, see SV_SendResource) is harmless here, as wrapping only ever makes it smaller
+#if XASH_PSP
+	// maps from download servers often have their entity lump stripped, so they're smaller than the server's copy
+	// but still playable (the map checksum skips entities in multiplayer): don't download them again on every connect
+	if( !Q_stricmp( COM_FileExtension( filepath ), "bsp" ))
+		size = -1;
+#endif
 	if( size >= 0 && size < pResource->nDownloadSize )
 	{
 		Con_Printf( S_WARN "%s is %ld bytes but server reports %d, downloading it again\n", cachepath, (long)size, pResource->nDownloadSize );
