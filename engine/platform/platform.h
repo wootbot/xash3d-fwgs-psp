@@ -215,6 +215,7 @@ void PSP_DbgConInit( void );
 void PSP_DbgConFrame( void );
 void PSP_DbgConPrint( const char *msg );
 void PSP_DbgConSendNow( const char *msg );
+void PSP_DbgConPollStalled( void );
 #endif
 
 #if XASH_DOS

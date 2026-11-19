@@ -208,6 +208,9 @@ static int PSP_WatchdogThread( SceSize args, void *argp )
 
 		if( still >= PSP_WATCHDOG_SECONDS && ( still - PSP_WATCHDOG_SECONDS ) % 10 == 0 )
 			PSP_WatchdogReportStall();
+
+		if( still >= PSP_WATCHDOG_SECONDS )
+			PSP_DbgConPollStalled(); // psp_restart from the PC
 	}
 
 	return 0;
@@ -250,7 +253,8 @@ void Platform_MessageBox( const char *title, const char *message, qboolean paren
 	static qboolean init = false;
 	SceCtrlData pad;
 
-	printf( "%s: %s\n", title, message );
+	// also to watchdog.log and the Wi-Fi debug console: the dialog blocks the main thread
+	PSP_WatchdogLog( false, "%s: %s\n", title, message );
 
 	if( !init )
 	{

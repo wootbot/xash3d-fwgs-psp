@@ -23,6 +23,8 @@ and talks to scripts/psp/dbgcon.py on the PC instead:
 - console output and watchdog reports go back to whoever sent the last packet
   (so the PC's firewall sees replies, not unsolicited traffic)
 - "psp_update" receives a new EBOOT.PBP from the PC over TCP and restarts with it
+- "psp_restart" restarts the game, also when the main thread is stuck: the
+  watchdog thread then reads the commands (see PSP_DbgConPollStalled)
 */
 
 #include "common.h"
@@ -54,7 +56,7 @@ static struct
 	int dropped;
 } dbg = { .sock = -1 };
 
-qboolean PSP_DbgConActive( void )
+static qboolean PSP_DbgConActive( void )
 {
 	return dbg.enabled && dbg.sock >= 0 && dbg.have_pc;
 }
@@ -214,6 +216,75 @@ void PSP_DbgConFrame( void )
 
 /*
 ==================
+PSP_DbgConRestart
+
+start <cwd>/EBOOT.PBP again, through SystemCtrlForUser (PRO/ARK custom
+firmware): user mode sceKernelLoadExec is refused
+==================
+*/
+static void PSP_DbgConRestart( void )
+{
+	struct SceKernelLoadExecVSHParam param;
+	char cwd[256], eboot[300], msg[128];
+	int ret;
+
+	if( !getcwd( cwd, sizeof( cwd )))
+		Q_strncpy( cwd, "ms0:/PSP/GAME/Xash3D", sizeof( cwd ));
+	Q_snprintf( eboot, sizeof( eboot ), "%s/EBOOT.PBP", cwd );
+
+	memset( &param, 0, sizeof( param ));
+	param.size = sizeof( param );
+	param.args = Q_strlen( eboot ) + 1;
+	param.argp = eboot;
+	param.key = "game";
+
+	ret = sctrlKernelLoadExecVSHMs2( eboot, &param );
+
+	Q_snprintf( msg, sizeof( msg ), "dbgcon: sctrlKernelLoadExecVSHMs2 failed (0x%08x), start the game again from the XMB\n", ret );
+	PSP_DbgConSendNow( msg );
+}
+
+static void PSP_DbgConRestart_f( void )
+{
+	Con_Printf( "restarting\n" );
+	PSP_DbgConFlush();
+	Host_WriteConfig();
+	PSP_DbgConRestart();
+}
+
+/*
+==================
+PSP_DbgConPollStalled
+
+watchdog thread, while the main thread is stuck (so it doesn't read the socket
+itself): the only command that works then is psp_restart
+==================
+*/
+void PSP_DbgConPollStalled( void )
+{
+	char packet[256];
+	int n;
+
+	if( !PSP_DbgConActive( ))
+		return;
+
+	while(( n = recvfrom( dbg.sock, packet, sizeof( packet ) - 1, 0, NULL, NULL )) > 0 )
+	{
+		if( (byte)packet[0] == 0xff ) // keepalive
+			continue;
+
+		packet[n] = 0;
+		if( !Q_strncmp( packet, "psp_restart", 11 ))
+		{
+			PSP_DbgConSendNow( "dbgcon: the main thread is stuck, restarting from the watchdog\n" );
+			PSP_DbgConRestart();
+		}
+		else PSP_DbgConSendNow( "dbgcon: the main thread is stuck, only psp_restart works now\n" );
+	}
+}
+
+/*
+==================
 PSP_DbgConUpdate_f
 
 psp_update: wait (30 s) for the PC to connect to TCP port 27999 and send
@@ -322,23 +393,13 @@ static void PSP_DbgConUpdate_f( void )
 		return;
 	}
 
-	Con_Printf( "psp_update: got %d bytes, restarting\n", total );
-	PSP_DbgConFlush();
-	Host_WriteConfig();
-
-	struct SceKernelLoadExecVSHParam param;
-	memset( &param, 0, sizeof( param ));
-	param.size = sizeof( param );
-	param.args = Q_strlen( eboot ) + 1;
-	param.argp = eboot;
-	param.key = "game";
-
-	n = sctrlKernelLoadExecVSHMs2( eboot, &param );
-	Con_Printf( S_ERROR "psp_update: sctrlKernelLoadExecVSHMs2 failed (0x%08x), start it again from the XMB\n", n );
+	Con_Printf( "psp_update: got %d bytes\n", total );
+	PSP_DbgConRestart_f();
 }
 
 void PSP_DbgConInit( void )
 {
 	dbg.enabled = Sys_CheckParm( "-dbgcon" );
+	Cmd_AddCommand( "psp_restart", PSP_DbgConRestart_f, "restart the game (debugging)" );
 	Cmd_AddCommand( "psp_update", PSP_DbgConUpdate_f, "receive a new EBOOT.PBP from scripts/psp/dbgcon.py and restart with it (debugging)" );
 }
