@@ -282,3 +282,17 @@ music), launched from the XMB.
   Broker no longer retries (and fails) every 5 s while Wi-Fi is down in singleplayer.
   The flaky `psp-ld -r` "bad value": `ref_gu` builds ref/common sources itself and waf gave them
   the same object names as the `ref_common` target, so two tasks wrote the same files (`idx = 7`).
+- 2026-11-18: **Combat and load-time profiling over the Wi-Fi debug console** (HLDS test server,
+  c1a3a, ~18 grunts in view). Studio models: one display list block per mesh and precomputed vertex
+  colors (mesh submit 7.9 -> 4.6 ms/frame), a direct vertex lighting path without local lights
+  (3.4 -> 2.0 ms), live entity lights collected once per frame instead of walking all 128 for each
+  model with software double compares (1.2-1.9 ms -> ~0). Studio total ~19.7 -> ~16 ms/frame, idle
+  frame ~32 -> ~27 ms. FPS counter on by default, screen kept on (`scePowerTick`).
+  **Memory stick lookups were the load-time bottleneck**: a stat costs ~15 ms, a file found across
+  the search paths ~45 ms, a missing one ~65 ms, and every console line with `-log` was its own
+  write (~2 ms, sometimes ~130 ms), as was the watchdog heartbeat every 5 s. A directory listing
+  cache in the filesystem (names and sizes, dropped on any write), a buffered `engine.log` and the
+  heartbeat off the stick: **connect to c1a3a 66 s -> 23 s**, a sound loaded in game 85 -> 35 ms.
+  Left in the 23 s: world load 3.2 s, model precache 3.5 s, CL_RegisterResources 2.8 s, serverdata
+  2.7 s. Out of memory while loading a map (brokenpath) now drops to the menu instead of a fatal
+  error (uncommitted, needs the earlier soft-fail work cleaned up first).
