@@ -41,12 +41,12 @@ static color24 gTracerColors[] =
 { 255, 120, 70 },		// Darker red streaks (garg)
 };
 
-static uint CL_ParticleColor( particle_t *p )
+static uint CL_ParticleColor( particle_t *p, float time )
 {
 	p->color = bound( 0, p->color, 255 );
 	color24 color = tr.palette[p->color];
 
-	int alpha = 255 * (p->die - gp_cl->time) * 16.0f;
+	int alpha = 255 * (p->die - time) * 16.0f;
 	if( alpha > 255 || p->type == pt_static )
 		alpha = 255;
 
@@ -63,6 +63,7 @@ update particle color, position, free expired and draw it
 void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float partsize )
 {
 	uint vert_count = 0, max_verts, max_bytes;
+	const float time = gp_cl->time; // particle_t::die is a float, no software doubles per particle
 
 	if( !cl_active_particles )
 		return;	// nothing to draw?
@@ -90,7 +91,7 @@ void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float 
 			{
 				if( vert_count < max_verts )
 				{
-					out[vert_count].c = CL_ParticleColor( p );
+					out[vert_count].c = CL_ParticleColor( p, time );
 					out[vert_count].x = p->org[0];
 					out[vert_count].y = p->org[1];
 					out[vert_count].z = p->org[2];
@@ -141,7 +142,7 @@ void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float 
 					VectorScale( RI.cull_vright, size, right );
 					VectorScale( RI.cull_vup, size, up );
 
-					uint color = CL_ParticleColor( p );
+					uint color = CL_ParticleColor( p, time );
 
 					out[vert_count].u = 0.0f;
 					out[vert_count].v = 0.0f;
@@ -249,13 +250,14 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 	sceGuDepthMask( GU_TRUE ); // no depth writes
 	sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
 
-	float gravity = frametime * gp_movevars->gravity;
-	float scale = 1.0 - (frametime * 0.9);
+	const float ft = frametime, time = gp_cl->time; // no software doubles per tracer
+	float gravity = ft * gp_movevars->gravity;
+	float scale = 1.0f - (ft * 0.9f);
 	if( scale < 0.0f ) scale = 0.0f;
 
 	for( particle_t *p = cl_active_tracers; p; p = p->next )
 	{
-		float atten = (p->die - gp_cl->time);
+		float atten = (p->die - time);
 		if( atten > 0.1f ) atten = 0.1f;
 
 		vec3_t start, end, delta;
@@ -313,7 +315,7 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 		}
 
 		// evaluate position
-		VectorMA( p->org, frametime, p->vel, p->org );
+		VectorMA( p->org, ft, p->vel, p->org );
 
 		if( p->type == pt_grav )
 		{
@@ -321,7 +323,7 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 			p->vel[1] *= scale;
 			p->vel[2] -= gravity;
 
-			p->unused = 255 * (p->die - gp_cl->time) * 2;
+			p->unused = 255 * (p->die - time) * 2;
 			if( p->unused > 255 ) p->unused = 255;
 		}
 		else if( p->type == pt_slowgrav )

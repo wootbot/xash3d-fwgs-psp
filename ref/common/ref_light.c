@@ -176,7 +176,9 @@ int R_PushDlights( model_t *model, int framecount )
 	{
 		const dlight_t *l = &gp_dlights[i];
 
-		if( l->die < gp_cl->time || !l->radius )
+		// radius first: unused dlights are zeroed, and the double compare is
+		// done in software on some FPUs (PSP)
+		if( !l->radius || l->die < gp_cl->time )
 			continue;
 
 		R_MarkLights( l, 1 << i, model->nodes, model, framecount );
@@ -191,7 +193,7 @@ void R_PushDlightsForBmodel( model_t *model, int framecount, const matrix4x4 obj
 	{
 		dlight_t *l = &gp_dlights[i];
 
-		if( l->die < gp_cl->time || !l->radius )
+		if( !l->radius || l->die < gp_cl->time )
 			continue;
 
 		vec3_t oldorigin = Vec3( l->origin );

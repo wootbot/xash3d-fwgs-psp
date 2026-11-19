@@ -1941,12 +1941,13 @@ Free particles that time has expired
 void R_FreeDeadParticles( particle_t **ppparticles )
 {
 	particle_t	*p, *kill;
+	const float	time = cl.time; // die is a float
 
 	// kill all the ones hanging direcly off the base pointer
 	while( 1 )
 	{
 		kill = *ppparticles;
-		if( kill && kill->die < cl.time )
+		if( kill && kill->die < time )
 		{
 			if( kill->on_die )
 				kill->on_die( kill );
@@ -1965,7 +1966,7 @@ void R_FreeDeadParticles( particle_t **ppparticles )
 		while( 1 )
 		{
 			kill = p->next;
-			if( kill && kill->die < cl.time )
+			if( kill && kill->die < time )
 			{
 				if( kill->on_die )
 					kill->on_die( kill );
@@ -2095,17 +2096,20 @@ void CL_DrawEFX( float time, qboolean fTrans )
 
 void CL_ThinkParticle( double frametime, particle_t *p )
 {
-	float		time3 = 15.0f * frametime;
-	float		time2 = 10.0f * frametime;
-	float		time1 = 5.0f * frametime;
-	float		dvel = 4.0f * frametime;
-	float		grav = frametime * clgame.movevars.gravity * 0.05f;
+	// float math: it runs for every particle, and doubles are done in
+	// software on some FPUs (PSP)
+	const float	ft = frametime;
+	float		time3 = 15.0f * ft;
+	float		time2 = 10.0f * ft;
+	float		time1 = 5.0f * ft;
+	float		dvel = 4.0f * ft;
+	float		grav = ft * clgame.movevars.gravity * 0.05f;
 
 
 	if( p->type != pt_custom )
 	{
 		// update position.
-		VectorMA( p->org, frametime, p->vel, p->org );
+		VectorMA( p->org, ft, p->vel, p->org );
 	}
 
 	switch( p->type )
@@ -2129,7 +2133,7 @@ void CL_ThinkParticle( double frametime, particle_t *p )
 		p->ramp += time3;
 		if( p->ramp >= 8.0f ) p->die = -1.0f;
 		else p->color = ramp2[(int)p->ramp];
-		VectorMA( p->vel,-frametime, p->vel, p->vel );
+		VectorMA( p->vel, -ft, p->vel, p->vel );
 		p->vel[2] -= grav;
 		break;
 	case pt_blob:
@@ -2154,7 +2158,7 @@ void CL_ThinkParticle( double frametime, particle_t *p )
 			p->ramp += time2;
 			if( p->ramp >= 9.0f ) p->ramp = 0.0f;
 			p->color = gSparkRamp[(int)p->ramp];
-			VectorMA( p->vel, -frametime * 0.5f, p->vel, p->vel );
+			VectorMA( p->vel, -ft * 0.5f, p->vel, p->vel );
 			p->type = COM_RandomLong( 0, 3 ) ? pt_blob : pt_blob2;
 			p->vel[2] -= grav * 5.0f;
 		}
