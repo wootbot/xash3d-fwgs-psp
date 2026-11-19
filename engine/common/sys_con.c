@@ -74,6 +74,10 @@ static void Sys_FlushStdout( void )
 #endif
 }
 
+#if XASH_PSP
+static void Sys_FlushLogBuffer( void );
+#endif
+
 static void Sys_FlushLogfile( void )
 {
 	if( s_ld.logfile )
@@ -158,6 +162,9 @@ void Sys_CloseLog( const char *finalmsg )
 		}
 	}
 
+#if XASH_PSP
+	Sys_FlushLogBuffer();
+#endif
 	fputc( '\n', s_ld.logfile );
 	fputs( "================================================================================\n", s_ld.logfile );
 	fprintf( s_ld.logfile, "%s (%i, %s, %s, %s-%s)\n", s_ld.title, Q_buildnum(), g_buildcommit, g_buildbranch, Q_buildos(), Q_buildarch());
@@ -245,8 +252,51 @@ static void Sys_PrintLogfile( const int fd, const char *logtime, size_t logtime_
 	Sys_WriteEscapeSequenceForColorcode( fd, 7 );
 }
 
+#if XASH_PSP
+// a write() to the memory stick costs ~2 ms per console line (and ~130 ms
+// now and then), so lines are collected and written in big chunks. What's
+// still in the buffer is lost on a hard crash: the Wi-Fi debug console and
+// the watchdog log cover that.
+static char s_logbuf[16384];
+static size_t s_logbuf_len;
+
+static void Sys_FlushLogBuffer( void )
+{
+	if( s_logbuf_len && s_ld.logfileno >= 0 )
+	{
+		if( write( s_ld.logfileno, s_logbuf, s_logbuf_len ) < 0 )
+		{
+			// not critical for us
+		}
+	}
+	s_logbuf_len = 0;
+}
+
+static void Sys_AppendLogBuffer( const char *s, size_t len )
+{
+	if( s_logbuf_len + len > sizeof( s_logbuf ))
+		Sys_FlushLogBuffer();
+
+	if( len > sizeof( s_logbuf ))
+	{
+		if( write( s_ld.logfileno, s, len ) < 0 )
+		{
+			// not critical for us
+		}
+		return;
+	}
+
+	memcpy( s_logbuf + s_logbuf_len, s, len );
+	s_logbuf_len += len;
+}
+#endif // XASH_PSP
+
 static void Sys_WriteLogfile( int fd, const char *logtime, size_t logtime_len, const char *msg )
 {
+#if XASH_PSP
+	Sys_AppendLogBuffer( logtime, logtime_len );
+	Sys_AppendLogBuffer( msg, Q_strlen( msg ));
+#else
 	if( logtime_len != 0 )
 	{
 		if( write( fd, logtime, logtime_len ) < 0 )
@@ -259,6 +309,7 @@ static void Sys_WriteLogfile( int fd, const char *logtime, size_t logtime_len, c
 	{
 		// not critical for us
 	}
+#endif
 }
 
 static void Sys_PrintStdout( const char *logtime, size_t logtime_len, const char *msg, const char *stripped )
