@@ -245,8 +245,9 @@ def build(bld):
 		# pspsdk libraries are in LDFLAGS, see PSP.stdlibs() in xcompile.py
 		libs += ['M']
 		source += bld.path.ant_glob('platform/psp/*/*.S')
-		# SystemCtrlForUser from the custom firmware, for psp_update's restart
-		bld.env.LDFLAGS += ['-lpspsystemctrl_user']
+		# SystemCtrlForUser and KUBridge from the custom firmware: psp_update's restart
+		# and the 4 MB VRAM unlock
+		bld.env.LDFLAGS += ['-lpspsystemctrl_user', '-lpspkubridge']
 	else: # POSIX
 		libs += ['M', 'RT', 'PTHREAD', 'ASOUND', 'HAIKU', 'MAGX', 'LOG', 'SOCKET']
 		libs += get_frameworks(bld.env)

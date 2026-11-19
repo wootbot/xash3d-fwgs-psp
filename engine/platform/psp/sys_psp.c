@@ -21,6 +21,7 @@ GNU General Public License for more details.
 #pragma GCC diagnostic pop
 #include <pspkernel.h>
 #include <psppower.h>
+#include <pspge.h>
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <ctype.h>
@@ -418,22 +419,77 @@ int PSP_UnloadModule( int modid, int *sce_code )
 PSP_UnlockVRAM
 
 PSP-2000 and later have 4 MB of VRAM, only 2 MB are mapped by default.
-ka.prx is a small kernel module that changes that, optional.
+sceGeEdramSetSize changes that, it's a kernel function: through ka.prx (a small
+kernel module, optional), the user stub or the custom firmware's kernel call
+bridge, whichever works. A PSP-1000 refuses 4 MB.
 ===========
 */
+#define PSP_VRAM_FULL_SIZE	0x400000
+#define PSP_NID_GE_EDRAM_SET_SIZE	0x5BAA5439
+
+// SystemCtrlForUser and KUBridge from PRO/ARK, declared here: their headers clash with pspsdk ones
+typedef struct
+{
+	uint32_t arg[12];
+	uint32_t ret1, ret2;
+} psp_kcall_args_t;
+unsigned int sctrlHENFindFunction( const char *mod_name, const char *library, unsigned int nid );
+int kuKernelCall( void *func_addr, psp_kcall_args_t *args );
+
+static char psp_vram_status[128] = "not tried";
+
 static void PSP_UnlockVRAM( void )
 {
-	int ret, code;
-	int mod = PSP_LoadModule( "ka.prx", 1, 0, NULL );
+	psp_kcall_args_t args = { 0 };
+	int ret, code = 0, mod;
+	unsigned int func;
 
-	if( mod < 0 )
+	if( sceGeEdramGetSize() >= PSP_VRAM_FULL_SIZE )
+	{
+		Q_strncpy( psp_vram_status, "4 MB already mapped", sizeof( psp_vram_status ));
 		return;
+	}
 
-	ret = kaGeEdramGetHwSize();
-	if( ret > 0 )
-		kaGeEdramSetSize( ret );
+	mod = PSP_LoadModule( "ka.prx", 1, 0, NULL );
+	if( mod >= 0 )
+	{
+		ret = kaGeEdramGetHwSize();
+		if( ret > 0 )
+			kaGeEdramSetSize( ret );
 
-	PSP_UnloadModule( mod, &code );
+		PSP_UnloadModule( mod, &code );
+
+		if( sceGeEdramGetSize() >= PSP_VRAM_FULL_SIZE )
+		{
+			Q_strncpy( psp_vram_status, "4 MB through ka.prx", sizeof( psp_vram_status ));
+			return;
+		}
+	}
+
+	ret = sceGeEdramSetSize( PSP_VRAM_FULL_SIZE );
+	if( sceGeEdramGetSize() >= PSP_VRAM_FULL_SIZE )
+	{
+		Q_strncpy( psp_vram_status, "4 MB through sceGe_user", sizeof( psp_vram_status ));
+		return;
+	}
+
+	// kernel address of sceGeEdramSetSize, error codes are below 0x88000000
+	func = sctrlHENFindFunction( "sceGE_Manager", "sceGe_driver", PSP_NID_GE_EDRAM_SET_SIZE );
+	if( func >= 0x88000000 && func < 0x8C000000 )
+	{
+		args.arg[0] = PSP_VRAM_FULL_SIZE;
+		code = kuKernelCall( (void *)func, &args );
+
+		if( sceGeEdramGetSize() >= PSP_VRAM_FULL_SIZE )
+		{
+			Q_strncpy( psp_vram_status, "4 MB through the kernel call bridge", sizeof( psp_vram_status ));
+			return;
+		}
+	}
+
+	Q_snprintf( psp_vram_status, sizeof( psp_vram_status ),
+		"2 MB (ka.prx 0x%08x, sceGe_user 0x%08x, sceGe_driver 0x%08x, kernel call 0x%08x ret 0x%08x)",
+		mod, ret, func, code, (uint)args.ret1 );
 }
 
 
@@ -482,6 +538,7 @@ void PSP_PrintMemInfo( void )
 
 	PSP_VolatileInfo( &vused, &vblocks, &vtotal );
 	Con_Printf( "P5 RAM: %u KB in use in %d blocks (of %u KB)\n", (uint)( vused >> 10 ), vblocks, (uint)( vtotal >> 10 ));
+	Con_Printf( "VRAM: %s\n", psp_vram_status );
 }
 
 void PSP_RegisterCommands( void )
@@ -513,6 +570,7 @@ void PSP_Init( void )
 	scePowerSetClockFrequency( 333, 333, 166 );
 
 	PSP_UnlockVRAM();
+	PSP_WatchdogLog( false, "VRAM: %s\n", psp_vram_status );
 
 	// P5 RAM for MEM_VOLATILE pools
 	PSP_VolatileInit();
