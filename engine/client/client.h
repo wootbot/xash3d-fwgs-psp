@@ -1010,6 +1010,9 @@ void V_RenderView( void );
 // cl_pmove.c
 //
 void CL_SetSolidEntities( void );
+#if XASH_PSP
+void CL_ResetSolidEntities( void );
+#endif
 void CL_SetSolidPlayers( int playernum );
 void CL_InitClientMove( void );
 void CL_PredictMovement( qboolean repredicting );

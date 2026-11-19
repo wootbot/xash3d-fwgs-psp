@@ -461,6 +461,26 @@ static void CL_AddLinksToPmove( frame_t *frame )
 	}
 }
 
+#if XASH_PSP
+// CL_SetSolidEntities runs up to four times a frame (packet parse, after the packets, prediction,
+// CL_CreateCmd) and the list only depends on the entities of the current packet: if none was stored
+// since the last build, the physents are still the same (later additions, the players, all go past
+// these counts)
+static struct
+{
+	const frame_t *frame;
+	const model_t *world;
+	int next, first, num, maxclients, playernum;
+	qboolean valid;
+	int numphysent, numvisent, nummoveent;
+} solid;
+
+void CL_ResetSolidEntities( void )
+{
+	memset( &solid, 0, sizeof( solid ));
+}
+#endif
+
 /*
 ===============
 CL_SetSolidEntities
@@ -471,6 +491,20 @@ Builds all the pmove physents for the current frame
 void CL_SetSolidEntities( void )
 {
 	physent_t	*pe = clgame.pmove->physents;
+
+#if XASH_PSP
+	const frame_t *frame = &cl.frames[cl.parsecountmod];
+
+	if( solid.frame == frame && solid.world == cl.worldmodel && solid.next == cls.next_client_entities
+		&& solid.first == frame->first_entity && solid.num == frame->num_entities && solid.valid == frame->valid
+		&& solid.maxclients == cl.maxclients && solid.playernum == cl.playernum )
+	{
+		clgame.pmove->numphysent = solid.numphysent;
+		clgame.pmove->numvisent = solid.numvisent;
+		clgame.pmove->nummoveent = solid.nummoveent;
+		return;
+	}
+#endif
 
 	// setup physents
 	clgame.pmove->numvisent = 1;
@@ -490,6 +524,20 @@ void CL_SetSolidEntities( void )
 
 	// add all other entities exlucde players
 	CL_AddLinksToPmove( &cl.frames[cl.parsecountmod] );
+
+#if XASH_PSP
+	solid.frame = frame;
+	solid.world = cl.worldmodel;
+	solid.next = cls.next_client_entities;
+	solid.first = frame->first_entity;
+	solid.num = frame->num_entities;
+	solid.valid = frame->valid;
+	solid.maxclients = cl.maxclients;
+	solid.playernum = cl.playernum;
+	solid.numphysent = clgame.pmove->numphysent;
+	solid.numvisent = clgame.pmove->numvisent;
+	solid.nummoveent = clgame.pmove->nummoveent;
+#endif
 }
 
 /*

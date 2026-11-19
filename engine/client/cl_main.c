@@ -1629,6 +1629,9 @@ void CL_ClearState( void )
 	CL_FreeEdicts ();
 
 	PM_ClearPhysEnts( clgame.pmove );
+#if XASH_PSP
+	CL_ResetSolidEntities();
+#endif
 	NetAPI_CancelAllRequests();
 
 	// wipe the entire cl structure
