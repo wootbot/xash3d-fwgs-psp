@@ -320,6 +320,37 @@ loc0:
 	return false;
 }
 
+#if XASH_PSP
+/*
+==================
+PM_PhysEntOutOfReach
+
+broad phase: true when the player box swept from start to end can't touch this physent,
+so tracing against it can't change the result (the server culls by entity bounds the same way)
+==================
+*/
+static qboolean PM_PhysEntOutOfReach( const playermove_t *pmove, const physent_t *pe, const vec3_t start, const vec3_t end )
+{
+	const float *pmins = host.player_mins[pmove->usehull];
+	const float *pmaxs = host.player_maxs[pmove->usehull];
+
+	// brush models can have clip brushes outside their bounds, so only boxes and studio models
+	if( pe->model || pe->solid == SOLID_CUSTOM )
+		return false;
+
+	for( int j = 0; j < 3; j++ )
+	{
+		float lo = Q_min( start[j], end[j] ) + pmins[j] - 1.0f;
+		float hi = Q_max( start[j], end[j] ) + pmaxs[j] + 1.0f;
+
+		if( lo > pe->origin[j] + pe->maxs[j] || hi < pe->origin[j] + pe->mins[j] )
+			return true;
+	}
+
+	return false;
+}
+#endif
+
 pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int flags, int numents, physent_t *ents, int ignore_pe, pfnIgnore pmFilter )
 {
 	pmtrace_t trace_total;
@@ -362,6 +393,11 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 
 		if(( flags & PM_CUSTOM_IGNORE ) && pe->solid == SOLID_CUSTOM )
 			continue;
+
+#if XASH_PSP
+		if( i != 0 && PM_PhysEntOutOfReach( pmove, pe, start, end ))
+			continue;
+#endif
 
 		hullcount = 1;
 
@@ -551,6 +587,11 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 
 		if( pe->model != NULL && pe->solid == SOLID_NOT && pe->skin != CONTENTS_NONE )
 			continue;
+
+#if XASH_PSP
+		if( i != 0 && PM_PhysEntOutOfReach( pmove, pe, pos, pos ))
+			continue;
+#endif
 
 		hullcount = 1;
 
