@@ -31,6 +31,14 @@ GNU General Public License for more details.
 
 #define MIPTEX_CUSTOM_PALETTE_SIZE_BYTES ( sizeof( int16_t ) + 768 )
 
+// the CPU traps on misaligned loads (no unaligned access emulation on the PSP), but some
+// map tools (bspguy) don't pad lumps to 4 bytes: such lumps are copied before loading
+#if XASH_PSP
+#define MOD_STRICT_ALIGNMENT 1
+#else
+#define MOD_STRICT_ALIGNMENT 0
+#endif
+
 typedef struct leaflist_s
 {
 	int      count;
@@ -138,6 +146,11 @@ typedef struct
 	qboolean  isworld;
 	qboolean  isbsp30ext;
 	qboolean  hulls32bit;       // convert 16-bit clipnodes to 32-bit, if needed
+
+#if MOD_STRICT_ALIGNMENT
+	byte      *aligned_lumps[32]; // aligned copies of misaligned lumps
+	int       num_aligned_lumps;
+#endif
 
 } dbspmodel_t;
 
@@ -924,6 +937,18 @@ static void Mod_LoadLump( const void *in, const mlumpinfo_t *info, mlumpstat_t *
 		return;
 
 	byte *data = (byte *)in + l.fileofs;
+
+#if MOD_STRICT_ALIGNMENT
+	// byte lumps too: the textures lump has ints in it
+	if(( (uintptr_t)data & 3 ) && bmod->num_aligned_lumps < ARRAYSIZE( bmod->aligned_lumps ))
+	{
+		byte *copy = Mem_Malloc( host.volatilepool, l.filelen );
+
+		memcpy( copy, data, l.filelen );
+		bmod->aligned_lumps[bmod->num_aligned_lumps++] = copy;
+		data = copy;
+	}
+#endif
 
 	// all checks are passed, store pointers
 	*(byte **)((byte *)bmod + info->dataofs) = data;
@@ -4175,6 +4200,15 @@ static fs_offset_t Mod_FindBSPX( byte *mod_base, size_t bufferlen )
 	return max_offset;
 }
 
+static void Mod_FreeBmodel( dbspmodel_t *bmod )
+{
+#if MOD_STRICT_ALIGNMENT
+	for( int i = 0; i < bmod->num_aligned_lumps; i++ )
+		Mem_Free( bmod->aligned_lumps[i] );
+#endif
+	Mem_Free( bmod );
+}
+
 /*
 =================
 Mod_LoadBmodelLumps
@@ -4257,7 +4291,7 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 		if( loadstat.numerrors )
 		{
 			Con_DPrintf( "%s: %i error(s), %i warning(s)\n", __func__, loadstat.numerrors, loadstat.numwarnings );
-			Mem_Free( bmod );
+			Mod_FreeBmodel( bmod );
 			return false; // there were errors, we can't load this map
 		}
 
@@ -4322,7 +4356,7 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 		Con_Reportf( "Wad files required to run the map: \"%s\"\n", wadvalue );
 	}
 
-	Mem_Free( bmod );
+	Mod_FreeBmodel( bmod );
 	return true;
 }
 
