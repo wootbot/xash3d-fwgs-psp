@@ -94,7 +94,7 @@ do_hlsdk()
 	hlsdk=${1:-reference/hlsdk-portable}
 	docker exec "$CONTAINER" rm -rf /hlsdk
 	docker exec "$CONTAINER" mkdir -p /hlsdk
-	git -C "$hlsdk" ls-files | (cd "$hlsdk" && tar -T - -cf -) | docker exec -i "$CONTAINER" tar -xf - -C /hlsdk
+	git -C "$hlsdk" ls-files --cached --others --exclude-standard | (cd "$hlsdk" && tar -T - -cf -) | docker exec -i "$CONTAINER" tar -xf - -C /hlsdk
 	docker exec -w /hlsdk "$CONTAINER" sh -c 'make -f Makefile.psp -j$(nproc) >/dev/null'
 	for elf in build/server/server.elf build/client/client.elf; do
 		docker exec -w /src "$CONTAINER" python3 scripts/psp/check_stubs.py "/hlsdk/$elf"

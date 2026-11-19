@@ -291,18 +291,27 @@ void PSP_DbgConPollStalled( void )
 ==================
 PSP_DbgConUpdate_f
 
-psp_update: wait (30 s) for the PC to connect to TCP port 27999 and send
-"<size>\n" followed by a new EBOOT.PBP, then restart with it. The PC connects
-to us so its firewall doesn't get in the way. Blocking, it's a debugging tool.
+psp_update [file]: wait (30 s) for the PC to connect to TCP port 27999 and send
+"<size>\n" followed by a new EBOOT.PBP (or the given file, relative to the game
+directory, e.g. valve/cl_dlls/client_psp_mipsel.prx), then restart with it.
+The PC connects to us so its firewall doesn't get in the way. Blocking, it's a
+debugging tool.
 ==================
 */
 static void PSP_DbgConUpdate_f( void )
 {
 	char cwd[256], path[300], eboot[300];
+	const char *dest = Cmd_Argc() > 1 ? Cmd_Argv( 1 ) : "EBOOT.PBP";
 	static char buf[16384];
 	int lsock, sock = -1, fd, n, total = 0, size = 0, have = 0;
 	struct sockaddr_in addr;
 	double deadline;
+
+	if( Q_strstr( dest, ".." ) || dest[0] == '/' || Q_strchr( dest, ':' ))
+	{
+		Con_Printf( S_ERROR "psp_update: bad file name %s\n", dest );
+		return;
+	}
 
 	memset( &addr, 0, sizeof( addr ));
 	addr.sin_family = AF_INET;
@@ -355,7 +364,7 @@ static void PSP_DbgConUpdate_f( void )
 	buf[have] = 0;
 	size = Q_atoi( buf );
 
-	if( size < 1024 * 1024 )
+	if( size < 1024 )
 	{
 		Con_Printf( S_ERROR "psp_update: bad size \"%s\"\n", buf );
 		closesocket( sock );
@@ -365,7 +374,8 @@ static void PSP_DbgConUpdate_f( void )
 	if( !getcwd( cwd, sizeof( cwd )))
 		Q_strncpy( cwd, "ms0:/PSP/GAME/Xash3D", sizeof( cwd ));
 
-	Q_snprintf( path, sizeof( path ), "%s/EBOOT.NEW", cwd );
+	Q_snprintf( eboot, sizeof( eboot ), "%s/%s", cwd, dest );
+	Q_snprintf( path, sizeof( path ), "%s.new", eboot );
 	if(( fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0777 )) < 0 )
 	{
 		Con_Printf( S_ERROR "psp_update: can't write %s\n", path );
@@ -389,7 +399,6 @@ static void PSP_DbgConUpdate_f( void )
 		return;
 	}
 
-	Q_snprintf( eboot, sizeof( eboot ), "%s/EBOOT.PBP", cwd );
 	remove( eboot );
 	if( rename( path, eboot ) < 0 )
 	{
@@ -405,5 +414,5 @@ void PSP_DbgConInit( void )
 {
 	dbg.enabled = Sys_CheckParm( "-dbgcon" );
 	Cmd_AddCommand( "psp_restart", PSP_DbgConRestart_f, "restart the game (debugging)" );
-	Cmd_AddCommand( "psp_update", PSP_DbgConUpdate_f, "receive a new EBOOT.PBP from scripts/psp/dbgcon.py and restart with it (debugging)" );
+	Cmd_AddCommand( "psp_update", PSP_DbgConUpdate_f, "receive a new EBOOT.PBP (or the given file) from scripts/psp/dbgcon.py and restart with it (debugging)" );
 }

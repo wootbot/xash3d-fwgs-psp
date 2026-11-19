@@ -7,7 +7,10 @@ UDP 27999. The PC always sends first, so its firewall only sees replies.
   dbgcon.py listen <psp ip> [log]      keepalives, console output -> log (default build-psp/dbgcon.log),
                                        commands from <log>.cmd (one per line) -> PSP. Runs until killed.
   dbgcon.py cmd "<command>" [log]      queue a console command for the running listener
-  dbgcon.py update <psp ip> <eboot>    send psp_update, push the EBOOT over TCP; the game restarts with it
+  dbgcon.py update <psp ip> <eboot> [dest]
+                                       send psp_update, push the EBOOT over TCP; the game restarts with it.
+                                       With dest (relative to the game directory, e.g.
+                                       valve/cl_dlls/client_psp_mipsel.prx) the file is written there instead
 """
 import os
 import socket
@@ -63,10 +66,10 @@ def cmd(command, log):
 	return 1
 
 
-def update(ip, eboot):
+def update(ip, eboot, dest=None):
 	data = open(eboot, 'rb').read()
 	udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	udp.sendto(b'psp_update', (ip, PORT))
+	udp.sendto(b'psp_update' + (b' ' + dest.encode() if dest else b''), (ip, PORT))
 	for attempt in range(40):
 		try:
 			tcp = socket.create_connection((ip, PORT), timeout=3)
@@ -89,8 +92,8 @@ def main():
 		listen(a[1], a[2] if len(a) > 2 else DEFAULT_LOG)
 	elif len(a) >= 2 and a[0] == 'cmd':
 		return cmd(a[1], a[2] if len(a) > 2 else DEFAULT_LOG)
-	elif len(a) == 3 and a[0] == 'update':
-		return update(a[1], a[2])
+	elif len(a) in (3, 4) and a[0] == 'update':
+		return update(a[1], a[2], a[3] if len(a) > 3 else None)
 	else:
 		print(__doc__)
 		return 2
