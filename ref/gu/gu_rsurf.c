@@ -852,6 +852,15 @@ static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 	// reset fog color for nonlightmapped water
 	GL_ResetFogColor();
 
+	// the time terms of the table indices below, once per surface and wrapped to
+	// the table period: per vertex they were ~16 software double operations on
+	// the PSP (and lost precision in float after a long uptime). The 256 * 1024
+	// keeps the sums positive, so (int) truncates them the same way as before.
+	const float uv_time = fmod( gp_cl->time * TURBSCALE, 256.0 ) + 256.0f * 1024.0f;
+	const float wave_time1 = fmod( gp_cl->time * 160.0, 256.0 ) + 256.0f * 1024.0f;
+	const float wave_time2 = fmod( gp_cl->time * 171.0, 256.0 ) + 256.0f * 1024.0f;
+	const float uv_scale = 0.125f * TURBSCALE; // TURBSCALE is a double
+
 	for( gu_poly_t *p = GU_POLYS( warp ); p; p = p->next )
 	{
 		const gu_vert_t *v = reverse ? &p->verts[p->numverts - 1] : &p->verts[0];
@@ -862,16 +871,16 @@ static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 			float os = v->uv[0];
 			float ot = v->uv[1];
 
-			out[i].uv[0] = ( os + r_turbsin[(int)((ot * 0.125f + gp_cl->time) * TURBSCALE) & 255] ) * ( 1.0f / SUBDIVIDE_SIZE );
-			out[i].uv[1] = ( ot + r_turbsin[(int)((os * 0.125f + gp_cl->time) * TURBSCALE) & 255] ) * ( 1.0f / SUBDIVIDE_SIZE );
+			out[i].uv[0] = ( os + r_turbsin[(int)( ot * uv_scale + uv_time ) & 255] ) * ( 1.0f / SUBDIVIDE_SIZE );
+			out[i].uv[1] = ( ot + r_turbsin[(int)( os * uv_scale + uv_time ) & 255] ) * ( 1.0f / SUBDIVIDE_SIZE );
 
 			out[i].xyz[0] = v->xyz[0];
 			out[i].xyz[1] = v->xyz[1];
 
 			if( waveHeight )
 			{
-				float nv = r_turbsin[(int)(gp_cl->time * 160.0f + v->xyz[1] + v->xyz[0]) & 255] + 8.0f;
-				nv = (r_turbsin[(int)(v->xyz[0] * 5.0f + gp_cl->time * 171.0f - v->xyz[1]) & 255] + 8.0f ) * 0.8f + nv;
+				float nv = r_turbsin[(int)( wave_time1 + v->xyz[1] + v->xyz[0] ) & 255] + 8.0f;
+				nv = (r_turbsin[(int)( v->xyz[0] * 5.0f + wave_time2 - v->xyz[1] ) & 255] + 8.0f ) * 0.8f + nv;
 				out[i].xyz[2] = nv * waveHeight + v->xyz[2];
 			}
 			else out[i].xyz[2] = v->xyz[2];
