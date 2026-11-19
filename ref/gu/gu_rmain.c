@@ -79,52 +79,65 @@ qboolean R_OpaqueEntity( cl_entity_t *ent )
 
 /*
 ===============
-R_TransEntityCompare
+R_SortTransEntities
 
-Sorting translucent entities by rendermode then by distance
+sort translucent entities by distance, then by rendermode. The sort keys are
+computed once per entity: R_GetEntityRenderMode walks all the textures of a
+studio model, and the qsort compare function used to call it twice per
+comparison (~2 ms per frame with a couple of hundred temp entities in a fight)
 ===============
 */
-static int R_TransEntityCompare( const void *a, const void *b )
+typedef struct
 {
-	cl_entity_t *ent1 = *(cl_entity_t **)a;
-	cl_entity_t *ent2 = *(cl_entity_t **)b;
-	int rendermode1 = R_GetEntityRenderMode( ent1 );
-	int rendermode2 = R_GetEntityRenderMode( ent2 );
+	cl_entity_t *ent;
+	float dist;
+	int rank;
+} trans_sort_t;
 
-	vec3_t vecLen, org;
-	float dist1, dist2;
+static int R_TransSortCompare( const void *a, const void *b )
+{
+	const trans_sort_t *s1 = a, *s2 = b;
 
-	// sort by distance
-	if( ent1->model->type != mod_brush || rendermode1 != kRenderTransAlpha )
-	{
-		VectorAverage( ent1->model->mins, ent1->model->maxs, org );
-		VectorAdd( ent1->origin, org, org );
-		VectorSubtract( RI.rvp.vieworigin, org, vecLen );
-		dist1 = DotProduct( vecLen, vecLen );
-	}
-	else dist1 = 1000000000;
-
-	if( ent2->model->type != mod_brush || rendermode2 != kRenderTransAlpha )
-	{
-		VectorAverage( ent2->model->mins, ent2->model->maxs, org );
-		VectorAdd( ent2->origin, org, org );
-		VectorSubtract( RI.rvp.vieworigin, org, vecLen );
-		dist2 = DotProduct( vecLen, vecLen );
-	}
-	else dist2 = 1000000000;
-
-	if( dist1 > dist2 )
+	if( s1->dist > s2->dist )
 		return -1;
-	if( dist1 < dist2 )
+	if( s1->dist < s2->dist )
 		return 1;
-
-	// then sort by rendermode
-	if( R_RankForRenderMode( rendermode1 ) > R_RankForRenderMode( rendermode2 ))
+	if( s1->rank > s2->rank )
 		return 1;
-	if( R_RankForRenderMode( rendermode1 ) < R_RankForRenderMode( rendermode2 ))
+	if( s1->rank < s2->rank )
 		return -1;
-
 	return 0;
+}
+
+static void R_SortTransEntities( void )
+{
+	static trans_sort_t sort[MAX_VISIBLE_PACKET];
+	const int count = tr.draw_list->num_trans_entities;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_t *ent = tr.draw_list->trans_entities[i];
+		int rendermode = R_GetEntityRenderMode( ent );
+
+		sort[i].ent = ent;
+		sort[i].rank = R_RankForRenderMode( rendermode );
+
+		if( ent->model->type != mod_brush || rendermode != kRenderTransAlpha )
+		{
+			vec3_t vecLen, org;
+
+			VectorAverage( ent->model->mins, ent->model->maxs, org );
+			VectorAdd( ent->origin, org, org );
+			VectorSubtract( RI.rvp.vieworigin, org, vecLen );
+			sort[i].dist = DotProduct( vecLen, vecLen );
+		}
+		else sort[i].dist = 1000000000;
+	}
+
+	qsort( sort, count, sizeof( sort[0] ), R_TransSortCompare );
+
+	for( int i = 0; i < count; i++ )
+		tr.draw_list->trans_entities[i] = sort[i].ent;
 }
 
 /*
@@ -505,7 +518,7 @@ static void R_SetupFrame( void )
 	if( !gl_nosort.value )
 	{
 		// sort translucents entities by rendermode and distance
-		qsort( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, sizeof( cl_entity_t* ), R_TransEntityCompare );
+		R_SortTransEntities();
 	}
 
 	// current viewleaf
