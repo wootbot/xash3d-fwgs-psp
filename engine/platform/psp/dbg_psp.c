@@ -269,6 +269,9 @@ void PSP_DbgConPollStalled( void )
 	if( !PSP_DbgConActive( ))
 		return;
 
+	// what the main thread printed before it got stuck (an error dialog...)
+	PSP_DbgConFlush();
+
 	while(( n = recvfrom( dbg.sock, packet, sizeof( packet ) - 1, 0, NULL, NULL )) > 0 )
 	{
 		if( (byte)packet[0] == 0xff ) // keepalive
