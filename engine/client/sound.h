@@ -35,6 +35,10 @@ extern poolhandle_t sndpool;
 
 #define PAINTBUFFER_SIZE 1024
 
+#if XASH_PSP
+extern size_t vox_kept_bytes; // s_vox.c
+#endif
+
 #define S_RAW_SOUND_IDLE_SEC         10 // time interval for idling raw sound before it's freed
 #define S_RAW_SOUND_BACKGROUNDTRACK  -2
 #define S_RAW_SOUND_SOUNDTRACK       -1

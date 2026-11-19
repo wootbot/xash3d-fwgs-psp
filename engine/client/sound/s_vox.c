@@ -167,6 +167,13 @@ void VOX_LoadWord( channel_t *ch )
 	S_TrimStartEndTimes( ch, data, round( start * 0.01f * data->samples ), round( end * 0.01f * data->samples ));
 }
 
+#if XASH_PSP
+// reading a word back from the memory stick takes ~20 ms and soldiers talk all the time
+// in a firefight: keep up to this much of them loaded, they go with the map's other sounds
+#define VOX_KEEP_BYTES ( 384 * 1024 )
+size_t vox_kept_bytes;
+#endif
+
 void VOX_FreeWord( channel_t *ch )
 {
 	// TODO: don't set random fields to zero lol, was memset before
@@ -181,6 +188,15 @@ void VOX_FreeWord( channel_t *ch )
 
 	if( !word->sfx || FBitSet( word->flags, FL_VOXWORD_IN_CACHE ))
 		return;
+
+#if XASH_PSP
+	if( word->sfx->cache && vox_kept_bytes + word->sfx->cache->size <= VOX_KEEP_BYTES )
+	{
+		vox_kept_bytes += word->sfx->cache->size;
+		word->sfx = NULL;
+		return;
+	}
+#endif
 
 	FS_FreeSound( word->sfx->cache );
 	word->sfx->cache = NULL;

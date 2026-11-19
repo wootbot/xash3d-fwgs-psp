@@ -287,6 +287,10 @@ void S_EndRegistration( void )
 			S_FreeSound( sfx ); // don't need this sound
 	}
 
+#if XASH_PSP
+	vox_kept_bytes = 0; // the sentence words kept by VOX_FreeWord went with the old map's sounds
+#endif
+
 	// load everything in
 	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
 	{
