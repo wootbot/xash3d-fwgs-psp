@@ -116,6 +116,10 @@ void Platform_RunEvents( void )
 	SceCtrlData buf;
 	short x, y;
 
+	// SDL sets this on the first focus event: the PSP's window always has the focus
+	if( host.status == HOST_INIT )
+		host.status = HOST_FRAME;
+
 	PSP_NetFrame();
 	PSP_DbgConFrame();
 
