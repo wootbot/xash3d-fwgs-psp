@@ -74,6 +74,11 @@ void Platform_Sleep( int msec )
 }
 #endif // XASH_TIMER == TIMER_PSP
 
+void PSP_DelayMicroseconds( int usec )
+{
+	sceKernelDelayThreadCB( usec > 0 ? usec : 1 );
+}
+
 void Platform_ShellExecute( const char *path, const char *parms )
 {
 }

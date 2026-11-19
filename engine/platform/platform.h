@@ -189,6 +189,7 @@ int PSP_GetArgv( int in_argc, char **in_argv, char ***out_argv );
 int PSP_LoadModule( const char *filename, int mpid, size_t argsize, void *argp );
 int PSP_UnloadModule( int modid, int *sce_code );
 void PSP_RegisterCommands( void );
+void PSP_DelayMicroseconds( int usec );
 void PSP_PrintMemInfo( void );
 void PSP_VolatileInit( void );
 void PSP_VolatileShutdown( void );
@@ -317,6 +318,11 @@ static inline qboolean Platform_NanoSleep( int nsec )
 	return true;
 #elif XASH_WIN32
 	return Win32_NanoSleep( nsec );
+#elif XASH_PSP
+	// without a real sleep the frame limiter spins at the main thread's priority
+	// and starves every lower priority thread (network, PSPLink's USB)
+	PSP_DelayMicroseconds( nsec / 1000 );
+	return true;
 #else
 	return false;
 #endif
