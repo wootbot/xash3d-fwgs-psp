@@ -179,6 +179,17 @@ static int PSP_NetPickProfile( void )
 	return -1;
 }
 
+// free bytes in the network stack pool, -1 if the stack isn't up
+int PSP_NetPoolFree( void )
+{
+	SceNetMallocStat stat;
+
+	if( !psp_net.stack || sceNetGetMallocStat( &stat ) < 0 )
+		return -1;
+
+	return stat.free;
+}
+
 /*
 ==================
 PSP_NetFrame
@@ -199,36 +210,11 @@ qboolean PSP_NetIsConnected( void )
 	return psp_net.connected;
 }
 
-/*
-==================
-PSP_NetConnect
-
-brings the network up and connects to the access point from
-the selected profile, blocks until there's an IP address
-==================
-*/
-qboolean PSP_NetConnect( void )
+// one join attempt, true once there's an IP address
+static qboolean PSP_NetTryConnect( int profile )
 {
-	union SceNetApctlInfo info;
-	int ret, state, profile, last_state = -1;
+	int ret, state, last_state = -1;
 	double start;
-
-	if( psp_net.connected )
-		return true;
-
-	if( !PSP_NetLoadStack( ))
-		return false;
-
-	// already connected (e.g. from a previous attempt that timed out late)?
-	if( sceNetApctlGetState( &state ) >= 0 && state == PSP_NET_APCTL_STATE_GOT_IP )
-		goto got_ip;
-
-	profile = PSP_NetPickProfile();
-	if( profile < 0 )
-	{
-		Con_Printf( S_ERROR "Wi-Fi: no connection profiles, create one in Settings > Network Settings\n" );
-		return false;
-	}
 
 	Con_Printf( "Wi-Fi: connecting with profile %d\n", profile );
 	psp_net.last_error = 0;
@@ -263,7 +249,7 @@ qboolean PSP_NetConnect( void )
 		}
 
 		if( state == PSP_NET_APCTL_STATE_GOT_IP )
-			goto got_ip;
+			return true;
 
 		if( Platform_DoubleTime() - start > APCTL_TIMEOUT )
 		{
@@ -275,6 +261,77 @@ qboolean PSP_NetConnect( void )
 	}
 
 	sceNetApctlDisconnect();
+	return false;
+}
+
+#define APCTL_ATTEMPTS 10
+
+// disconnect from the access point and wait (up to 2 s) until that's done
+static void PSP_NetWaitDisconnected( void )
+{
+	int i, state;
+
+	if( sceNetApctlGetState( &state ) < 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED )
+		return;
+
+	Con_Reportf( "Wi-Fi: disconnecting\n" );
+	sceNetApctlDisconnect();
+
+	for( i = 0; i < 40; i++ )
+	{
+		if( sceNetApctlGetState( &state ) < 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED )
+			break;
+		sceKernelDelayThread( 50 * 1000 );
+	}
+}
+
+/*
+==================
+PSP_NetConnect
+
+brings the network up and connects to the access point from
+the selected profile, blocks until there's an IP address
+==================
+*/
+qboolean PSP_NetConnect( void )
+{
+	union SceNetApctlInfo info;
+	int state, profile;
+
+	if( psp_net.connected )
+		return true;
+
+	if( !PSP_NetLoadStack( ))
+		return false;
+
+	// already connected (e.g. from a previous attempt that timed out late)?
+	if( sceNetApctlGetState( &state ) >= 0 && state == PSP_NET_APCTL_STATE_GOT_IP )
+		goto got_ip;
+
+	profile = PSP_NetPickProfile();
+	if( profile < 0 )
+	{
+		Con_Printf( S_ERROR "Wi-Fi: no connection profiles, create one in Settings > Network Settings\n" );
+		return false;
+	}
+
+	// the access point sometimes refuses a join, mostly right after the
+	// previous session went away without disconnecting
+	for( int i = 0; i < APCTL_ATTEMPTS; i++ )
+	{
+		if( i > 0 )
+		{
+			// keep the stack and the modules loaded: unloading and reloading
+			// them between attempts hard-froze the whole PSP (PSPLink too)
+			Con_Printf( "Wi-Fi: retrying (%d of %d)\n", i + 1, APCTL_ATTEMPTS );
+			PSP_NetWaitDisconnected();
+			sceKernelDelayThread( 2 * 1000 * 1000 );
+		}
+
+		if( PSP_NetTryConnect( profile ))
+			goto got_ip;
+	}
+
 	return false;
 
 got_ip:
@@ -311,21 +368,8 @@ void PSP_NetShutdown( void )
 {
 	if( psp_net.stack )
 	{
-		int i, state;
-
 		// wait for the disconnect to finish before tearing the stack down
-		if( sceNetApctlGetState( &state ) >= 0 && state != PSP_NET_APCTL_STATE_DISCONNECTED )
-		{
-			Con_Reportf( "Wi-Fi: disconnecting\n" );
-			sceNetApctlDisconnect();
-
-			for( i = 0; i < 40; i++ )
-			{
-				if( sceNetApctlGetState( &state ) < 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED )
-					break;
-				sceKernelDelayThread( 50 * 1000 );
-			}
-		}
+		PSP_NetWaitDisconnected();
 
 		if( psp_net.handler >= 0 )
 			sceNetApctlDelHandler( psp_net.handler );
@@ -367,6 +411,11 @@ static void PSP_NetStatus_f( void )
 
 	if( sceNetApctlGetState( &state ) >= 0 )
 		PSP_NetPrintState( state );
+
+	SceNetMallocStat stat;
+
+	if( sceNetGetMallocStat( &stat ) >= 0 )
+		Con_Printf( "net pool: %d KB free, lowest %d KB free (of %d KB)\n", stat.free >> 10, ( stat.pool - stat.maximum ) >> 10, stat.pool >> 10 );
 
 	if( !psp_net.connected )
 		return;

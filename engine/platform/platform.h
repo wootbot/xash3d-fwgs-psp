@@ -198,6 +198,7 @@ qboolean PSP_IsVolatile( const void *ptr );
 void PSP_VolatileInfo( size_t *used, int *blocks, size_t *total );
 void PSP_NetShutdown( void );
 void PSP_NetFrame( void );
+int PSP_NetPoolFree( void );
 void PSP_NetRegisterCommands( void );
 #endif
 
