@@ -124,7 +124,11 @@ Docker Desktop must be in **Linux containers** mode.
     first one (packets sent before it's up are lost).
   - `dbgcon.py update <psp ip> build-psp/EBOOT.PBP` pushes a new build over TCP; the game writes it to
     the stick and restarts with it (`sctrlKernelLoadExecVSHMs2`, needs PRO/ARK CFW).
+  - `dbgcon.py cmd psp_restart` restarts the game, also when it's stuck (hang, error dialog waiting for
+    X): the watchdog thread handles it then. Error dialogs are sent to the log too.
   - The PC always sends first (keepalives), so the Windows firewall needs no rule.
+  - The test server's RockTheVote plugin changes the map after 60 minutes without players, and
+    `server.cfg` clears `rcon_password` on map changes: restart HLDS (PSP disconnected) to get c1a3a back.
   - Test scripts (ignored): `tools/dbg/fire_test.sh` (connect to the HLDS test server, MP5 fire, PROF
     lines), `tools/dbg/ab.sh "<setup A>" "<setup B>"`. HLDS test server: `valve/psptest.cfg` (cheats,
     AFK kick off, `rcon_password <see README>`, no map rotation); `tools/psplink/rcon.ps1` is an rcon client
