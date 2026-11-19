@@ -41,6 +41,79 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 		} \
 	} \
 
+#if XASH_PSP
+// the PSP's FPU is single precision only: double math in these per-sample loops
+// is emulated in software and made mixing the most expensive part of a firefight.
+// Step through the source with a 32-bit fixed point fraction instead
+#define S_FIXED_STEP( offset_frac, rate_scale ) \
+	uint step_int = (uint)( rate_scale ); \
+	uint32_t step_frac = (uint32_t)(( (float)( rate_scale ) - (float)step_int ) * 4294967296.0f ); \
+	uint32_t frac = (uint32_t)( (float)( offset_frac ) * 4294967296.0f ); \
+	uint sample_idx = 0
+
+#define S_FIXED_ADVANCE( shift ) \
+	do { uint32_t old = frac; frac += step_frac; sample_idx += ( step_int + ( frac < old )) << ( shift ); } while( 0 )
+
+// source sample a..b at the current fraction, 16 bits of weight
+#define S_FIXED_LERP( a, b ) ( (a) + (int)((( (int)(b) - (int)(a) ) * (int)( frac >> 16 )) >> 16 ))
+
+#define S_MakeMixMonoPitch( x ) \
+	static void S_MixMonoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		S_FIXED_STEP( offset_frac, rate_scale ); \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			pbuf[i].left  += ( data[sample_idx] * volume[0] ) >> ( x - 8 ); \
+			pbuf[i].right += ( data[sample_idx] * volume[1] ) >> ( x - 8 ); \
+			S_FIXED_ADVANCE( 0 ); \
+		} \
+	} \
+
+#define S_MakeMixStereoPitch( x ) \
+	static void S_MixStereoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		S_FIXED_STEP( offset_frac, rate_scale ); \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			pbuf[i].left  += ( data[sample_idx+0] * volume[0] ) >> ( x - 8 ); \
+			pbuf[i].right += ( data[sample_idx+1] * volume[1] ) >> ( x - 8 ); \
+			S_FIXED_ADVANCE( 1 ); \
+		} \
+	} \
+
+#define S_MakeMixMonoLerp( x ) \
+	static void S_MixMonoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		S_FIXED_STEP( offset_frac, rate_scale ); \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			int s = S_FIXED_LERP( data[sample_idx], data[sample_idx + 1] ); \
+			pbuf[i].left  += ( s * volume[0] ) >> ( x - 8 ); \
+			pbuf[i].right += ( s * volume[1] ) >> ( x - 8 ); \
+			S_FIXED_ADVANCE( 0 ); \
+		} \
+	} \
+
+#define S_MakeMixStereoLerp( x ) \
+	static void S_MixStereoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		S_FIXED_STEP( offset_frac, rate_scale ); \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			int sl = S_FIXED_LERP( data[sample_idx + 0], data[sample_idx + 2] ); \
+			int sr = S_FIXED_LERP( data[sample_idx + 1], data[sample_idx + 3] ); \
+			pbuf[i].left  += ( sl * volume[0] ) >> ( x - 8 ); \
+			pbuf[i].right += ( sr * volume[1] ) >> ( x - 8 ); \
+			S_FIXED_ADVANCE( 1 ); \
+		} \
+	} \
+
+#else // !XASH_PSP
+
 #define S_MakeMixMonoPitch( x ) \
 	static void S_MixMonoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
 	{ \
@@ -103,6 +176,8 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 			offset_frac -= (uint)offset_frac; \
 		} \
 	} \
+
+#endif // !XASH_PSP
 
 S_MakeMixMono( 8 )
 S_MakeMixMono( 16 )
