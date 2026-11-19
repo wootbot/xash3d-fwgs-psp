@@ -243,7 +243,7 @@ void Netchan_Setup( netsrc_t sock, netchan_t *chan, netadr_t adr, int qport, voi
 	chan->incoming_sequence = 0;
 
 	// the server picks a random initial outgoing sequence so a remote attacker can't guess where in the sequence space the channel is
-	// kept well below BIT( 30 ) â€” bits 30/31 are reserved for the flags
+	// kept well below BIT( 30 ) — bits 30/31 are reserved for the flags
 	// FIXME: BIT( 27 ) taken so in the worst case we have few months of stable client<->server connection
 	// as netchan doesn't currently handle wrapping around
 	if( sock == NS_SERVER )
@@ -1670,7 +1670,13 @@ void Netchan_TransmitBits( netchan_t *chan, int length, const byte *data )
 		}
 	}
 
+#if XASH_PSP
+	// clearing all of it (192 KB) took 1.2 ms a packet: only what this one can use,
+	// header, fragment info, reliable and unreliable data, the padding to 16 bytes
+	memset( send_buf, 0, Q_min( sizeof( send_buf ), HEADER_BYTES + 64 + ( chan->reliable_length + length ) / 8 + 8 ));
+#else
 	memset( send_buf, 0, sizeof( send_buf ));
+#endif
 	MSG_Init( &send, "NetSend", send_buf, sizeof( send_buf ));
 
 	// prepare the packet header
@@ -1923,7 +1929,7 @@ qboolean Netchan_Process( netchan_t *chan, sizebuf_t *msg )
 	}
 
 	// reject packets that leap too far ahead of the expected sequence
-	// skip on the very first packet â€” the server starts with a random
+	// skip on the very first packet — the server starts with a random
 	// outgoing_sequence, so the first one legitimately jumps far ahead of 0
 	// NOTE: disable sequence window with cookie extension, if cookie ext proves
 	// to be inefficient, we can safely enable sequence window back
