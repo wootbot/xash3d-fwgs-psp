@@ -42,6 +42,42 @@ void extGuStart(int cid, void* list, int size)
 	sceGuStart( cid, list );
 }
 
+/*
+In a GU_DIRECT list sceGuGetMemory and sceGuDrawArray update the GE's stall
+address after every call, which is a syscall. These don't: batch them and
+call extGuUpdateStall once at the end, the GE stops at the old stall address
+until then.
+*/
+void *extGuGetMemoryNoStall( unsigned int size )
+{
+	unsigned int *current = gu_list->current;
+	unsigned int *next = ( unsigned int * )(( unsigned int )current + (( size + 3 ) & ~3u ) + 8 );
+
+	/* jump over the block */
+	current[0] = ( 16 << 24 ) | ((( unsigned int )next >> 8 ) & 0xf0000 );
+	current[1] = ( 8 << 24 ) | (( unsigned int )next & 0xffffff );
+	gu_list->current = next;
+
+	return current + 2;
+}
+
+void extGuDrawArrayNoStall( int prim, int vtype, int count, const void *vertices )
+{
+	unsigned int *p = gu_list->current;
+
+	*p++ = ( 18 << 24 ) | ( vtype & 0xffffff );  /* VTYPE */
+	*p++ = ( 16 << 24 ) | ((( unsigned int )vertices >> 8 ) & 0xf0000 ); /* BASE */
+	*p++ = ( 1 << 24 ) | (( unsigned int )vertices & 0xffffff );  /* VADDR */
+	*p++ = ( 4 << 24 ) | ((( prim << 16 ) | count ) & 0xffffff ); /* PRIM */
+	gu_list->current = p;
+}
+
+void extGuUpdateStall( void )
+{
+	if( !gu_curr_context )
+		sceGeListUpdateStallAddr( ge_list_executed[0], gu_list->current );
+}
+
 /* Begin user packet */
 void *extGuBeginPacket( unsigned int *maxsize )
 {

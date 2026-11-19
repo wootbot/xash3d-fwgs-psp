@@ -19,5 +19,8 @@ GNU General Public License for more details.
 void extGuStart(int cid, void* list, int size);
 void *extGuBeginPacket( unsigned int *maxsize );
 void extGuEndPacket( void *eaddr );
+void *extGuGetMemoryNoStall( unsigned int size );
+void extGuDrawArrayNoStall( int prim, int vtype, int count, const void *vertices );
+void extGuUpdateStall( void );
 
 #endif//GU_EXTENSION_H

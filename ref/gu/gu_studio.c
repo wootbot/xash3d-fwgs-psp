@@ -21,6 +21,7 @@ GNU General Public License for more details.
 #include "triangleapi.h"
 #include "studio.h"
 #include "pm_local.h"
+#include "gu_extension.h"
 
 #define EVENT_CLIENT	5000	// less than this value it's a server-side studio events
 #define MAX_LOCALLIGHTS	4
@@ -92,6 +93,7 @@ typedef struct
 	vec3_t		lightcolor;		// averaging lightcolor
 	vec3_t		blightvec[MAXSTUDIOBONES];	// bone light vecs
 	vec3_t		lightvalues[MAXSTUDIOVERTS];	// precomputed lightvalues per each shared vertex of submodel
+	uint		lightcolors[MAXSTUDIOVERTS];	// the same as GU colors without alpha, for models without local lights
 
 	// chrome stuff
 	vec3_t		chrome_origin;
@@ -1428,6 +1430,17 @@ static void R_LightLambert( vec4_t light[MAX_LOCALLIGHTS], const vec3_t normal, 
 	}
 }
 
+// what R_LightLambert gives without local lights, so strip vertices sharing
+// a normal don't each convert it again
+static inline void R_StudioPackLightColor( int k )
+{
+	const float *lv = g_studio.lightvalues[k];
+	byte c[3];
+
+	VectorScale( lv, 255.0f, c );
+	g_studio.lightcolors[k] = GUCOLOR4UB( c[0], c[1], c[2], 0 );
+}
+
 static void R_StudioSetColorArray( short *ptricmds, vec3_t *pstudionorms, byte *color )
 {
 	float	*lv = (float *)g_studio.lightvalues[ptricmds[1]];
@@ -1584,6 +1597,30 @@ static int R_StudioMeshCompare( const void *a, const void *b )
 
 /*
 ===============
+R_StudioCountMeshVerts
+
+the mesh's strips and fans share one block of display list memory: in a
+GU_DIRECT list every sceGuGetMemory and sceGuDrawArray makes a syscall
+(sceGeListUpdateStallAddr)
+===============
+*/
+static int R_StudioCountMeshVerts( const short *ptricmds )
+{
+	int i, total = 0;
+
+	while(( i = *( ptricmds++ )))
+	{
+		if( i < 0 )
+			i = -i;
+		total += i;
+		ptricmds += i * 4;
+	}
+
+	return total;
+}
+
+/*
+===============
 R_StudioDrawNormalMesh
 
 generic path
@@ -1592,6 +1629,10 @@ generic path
 static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float s, float t )
 {
 	int	i;
+	const qboolean fastlight = !g_studio.numlocallights;
+	const uint alpha = GUCOLOR4UB( 0, 0, 0, (byte)( tr.blend * 255 ));
+
+	gu_vert_ftcv_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
 
 	while(( i = *( ptricmds++ )))
 	{
@@ -1603,23 +1644,28 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 			i = -i;
 		}
 
-		gu_vert_ftcv_t *const out = sceGuGetMemory( sizeof( gu_vert_ftcv_t ) * i );
-
 		for( int index = 0; index < i; index++, ptricmds += 4 )
 		{
-			rgba_t color;
-
-			R_StudioSetColorArray( ptricmds, pstudionorms, color );
+			if( fastlight )
+				out[index].c = g_studio.lightcolors[ptricmds[1]] | alpha;
+			else
+			{
+				rgba_t color;
+				R_StudioSetColorArray( ptricmds, pstudionorms, color );
+				out[index].c = GUCOLOR4UBV( color );
+			}
 			out[index].u = ptricmds[2] * s;
 			out[index].v = ptricmds[3] * t;
-			out[index].c = GUCOLOR4UBV( color );
 			out[index].x = g_studio.verts[ptricmds[0]][0];
 			out[index].y = g_studio.verts[ptricmds[0]][1];
 			out[index].z = g_studio.verts[ptricmds[0]][2];
 		}
 
-		sceGuDrawArray( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, i, 0, out );
+		extGuDrawArrayNoStall( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, i, out );
+		out += i;
 	}
+
+	extGuUpdateStall();
 }
 
 /*
@@ -1632,6 +1678,10 @@ generic path
 static void R_StudioDrawFloatMesh( short *ptricmds, vec3_t *pstudionorms )
 {
 	int	i;
+	const qboolean fastlight = !g_studio.numlocallights;
+	const uint alpha = GUCOLOR4UB( 0, 0, 0, (byte)( tr.blend * 255 ));
+
+	gu_vert_ftcv_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
 
 	while(( i = *( ptricmds++ )))
 	{
@@ -1643,23 +1693,28 @@ static void R_StudioDrawFloatMesh( short *ptricmds, vec3_t *pstudionorms )
 			i = -i;
 		}
 
-		gu_vert_ftcv_t *const out = sceGuGetMemory( sizeof( gu_vert_ftcv_t ) * i );
-
 		for( int index = 0; index < i; index++, ptricmds += 4 )
 		{
-			rgba_t color;
-
-			R_StudioSetColorArray( ptricmds, pstudionorms, color );
+			if( fastlight )
+				out[index].c = g_studio.lightcolors[ptricmds[1]] | alpha;
+			else
+			{
+				rgba_t color;
+				R_StudioSetColorArray( ptricmds, pstudionorms, color );
+				out[index].c = GUCOLOR4UBV( color );
+			}
 			out[index].u = HalfToFloat( ptricmds[2] );
 			out[index].v = HalfToFloat( ptricmds[3] );
-			out[index].c = GUCOLOR4UBV( color );
 			out[index].x = g_studio.verts[ptricmds[0]][0];
 			out[index].y = g_studio.verts[ptricmds[0]][1];
 			out[index].z = g_studio.verts[ptricmds[0]][2];
 		}
 
-		sceGuDrawArray( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, i, 0, out );
+		extGuDrawArrayNoStall( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, i, out );
+		out += i;
 	}
+
+	extGuUpdateStall();
 }
 
 /*
@@ -1674,6 +1729,8 @@ static void R_StudioDrawChromeMesh( short *ptricmds, vec3_t *pstudionorms, float
 	int	i;
 	qboolean	glowShell = (scale > 0.0f) ? true : false;
 
+	gu_vert_ftcv_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
+
 	while(( i = *( ptricmds++ )))
 	{
 		int prim = GU_TRIANGLE_STRIP;
@@ -1683,8 +1740,6 @@ static void R_StudioDrawChromeMesh( short *ptricmds, vec3_t *pstudionorms, float
 			prim = GU_TRIANGLE_FAN;
 			i = -i;
 		}
-
-		gu_vert_ftcv_t *const out = sceGuGetMemory( sizeof( gu_vert_ftcv_t ) * i );
 
 		for( int index = 0; index < i; index++, ptricmds += 4 )
 		{
@@ -1720,8 +1775,11 @@ static void R_StudioDrawChromeMesh( short *ptricmds, vec3_t *pstudionorms, float
 			out[index].v = g_studio.chrome[idx][1] * t;
 		}
 
-		sceGuDrawArray( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, i, 0, out );
+		extGuDrawArrayNoStall( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, i, out );
+		out += i;
 	}
+
+	extGuUpdateStall();
 }
 
 
@@ -1863,6 +1921,7 @@ static void R_StudioDrawPoints( void )
 				if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
 					R_StudioSetupChrome( g_studio.chrome[k], *pnormbone, (float *)pstudionorms );
 				VectorSet( g_studio.lightvalues[k], tr.blend, tr.blend, tr.blend );
+				R_StudioPackLightColor( k );
 			}
 		}
 		else
@@ -1877,6 +1936,7 @@ static void R_StudioDrawPoints( void )
 				if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
 					R_StudioSetupChrome( g_studio.chrome[k], *pnormbone, (float *)pstudionorms );
 				VectorScale( g_studio.lightcolor, lv_tmp, g_studio.lightvalues[k] );
+				R_StudioPackLightColor( k );
 			}
 		}
 	}
