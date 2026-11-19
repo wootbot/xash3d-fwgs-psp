@@ -128,9 +128,23 @@ Docker Desktop must be in **Linux containers** mode.
     X): the watchdog thread handles it then. Error dialogs are sent to the log too.
   - The PC always sends first (keepalives), so the Windows firewall needs no rule.
   - The test server's RockTheVote plugin changes the map after 60 minutes without players, and
-    `server.cfg` clears `rcon_password` on map changes: restart HLDS (PSP disconnected) to get c1a3a back.
-  - Test scripts (ignored): `tools/dbg/fire_test.sh` (connect to the HLDS test server, MP5 fire, PROF
-    lines), `tools/dbg/ab.sh "<setup A>" "<setup B>"`. HLDS test server: `valve/psptest.cfg` (cheats,
-    AFK kick off, `rcon_password <see README>`, no map rotation); `tools/psplink/rcon.ps1` is an rcon client
+    `server.cfg` clears `rcon_password` on map changes, so rcon `changelevel` only works once:
+    restart HLDS (PSP disconnected) to change maps or get a fresh one.
+  - **Restart HLDS with `powershell -ExecutionPolicy Bypass -File tools/dbg/hlds_restart.ps1 <map>`**
+    (default `blastcorpse1`). The user works on this PC: the server window must open minimized
+    without taking the focus. The script does it with `WScript.Shell.Run(cmdline, 7, $false)`
+    (7 = SW_SHOWMINNOACTIVE); never use `Start-Process` for it, that pops the window up in front.
+    Command line: `hlds.exe -console -condebug -game valve -dll dlls/server.dll -num_edicts 2047
+    -port 27015 +ip <pc ip> +sv_lan 1 +sv_steam_auth 0 +maxplayers 4 +servercfgfile psptest.cfg
+    +developer 1 +sv_cheats 1 +map <map>`, working directory `C:\Games\hlds\steamapps\common\Half-Life`.
+  - Test scripts (ignored, in `tools/dbg/`): `deploy.sh` (disconnect, push `build-psp/EBOOT.PBP`,
+    wait until the game is back), `combat_test.sh` (restarts HLDS on `MAP`, default `blastcorpse1`,
+    connects, walks forward into the fight trigger, prints PROF/SVCPROF lines; `FIRE=1` fires the
+    MP5, `WALK`/`HOLD` seconds), `fire_test.sh` (c1a3a, MP5 fire), `idle_test.sh`,
+    `verify_staged.sh` (builds the staged tree in the container before a commit),
+    `ab.sh "<setup A>" "<setup B>"`. **`blastcorpse1` is the combat benchmark**: the user set it up
+    so walking a few units forward from the spawn starts a big firefight.
+  - HLDS test server: `valve/psptest.cfg` (cheats, AFK kick off, `rcon_password <see README>`, no map
+    rotation); `tools/psplink/rcon.ps1` is an rcon client
     (`powershell -ExecutionPolicy Bypass -File rcon.ps1 status`).
 - Still avoid restarting HLDS while the PSP is connected; send `disconnect` first.
