@@ -1441,6 +1441,46 @@ static inline void R_StudioPackLightColor( int k )
 	g_studio.lightcolors[k] = GUCOLOR4UB( c[0], c[1], c[2], 0 );
 }
 
+/*
+===============
+R_StudioLightMeshFast
+
+R_StudioLighting + R_StudioPackLightColor for the common case (no local
+lights, no bone weights, normal shading): goes straight to the GU colors
+===============
+*/
+static void R_StudioLightMeshFast( uint *out, int count, const vec3_t *norms, const byte *bones )
+{
+	const float base = g_studio.ambientlight + g_studio.shadelight;
+	const float k = g_studio.shadelight * ( 1.0f / SHADE_LAMBERT );
+	const float off = SHADE_LAMBERT - 1.0f;
+	const uint16_t *gamma = FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ) ? NULL : tr.lightgammatable;
+	const float cr = g_studio.lightcolor[0] * ( 255.0f / 1023.0f );
+	const float cg = g_studio.lightcolor[1] * ( 255.0f / 1023.0f );
+	const float cb = g_studio.lightcolor[2] * ( 255.0f / 1023.0f );
+
+	for( int i = 0; i < count; i++ )
+	{
+		float d = DotProduct( norms[i], g_studio.blightvec[bones[i]] );
+		float illum = base;
+
+		if( d > 1.0f )
+			d = 1.0f;
+		d += off;
+		if( d > 0.0f )
+			illum -= k * d;
+		if( illum < 0.0f )
+			illum = 0.0f;
+		else if( illum > 255.0f )
+			illum = 255.0f;
+
+		const int b = (int)( illum * 4.0f );
+		const float g = gamma ? gamma[b] : b;
+
+		out[i] = GUCOLOR4UB( (byte)( cr * g ), (byte)( cg * g ), (byte)( cb * g ), 0 );
+	}
+}
+
 static void R_StudioSetColorArray( short *ptricmds, vec3_t *pstudionorms, byte *color )
 {
 	float	*lv = (float *)g_studio.lightvalues[ptricmds[1]];
@@ -1889,8 +1929,12 @@ static void R_StudioDrawPoints( void )
 		for( int i = 0; i < numverts; i++ )
 			Matrix3x4_VectorTransform( g_studio.bonestransform[pvertbone[i]], pstudioverts[i], g_studio.verts[i] );
 
-		for( int i = 0; i < numverts; i++ )
-			R_LightStrength( pvertbone[i], pstudioverts[i], g_studio.lightpos[i] );
+		// only local lights use lightpos
+		if( g_studio.numlocallights )
+		{
+			for( int i = 0; i < numverts; i++ )
+				R_LightStrength( pvertbone[i], pstudioverts[i], g_studio.lightpos[i] );
+		}
 	}
 
 	// generate shared normals for properly scaling glowing shell
@@ -1923,6 +1967,16 @@ static void R_StudioDrawPoints( void )
 				VectorSet( g_studio.lightvalues[k], tr.blend, tr.blend, tr.blend );
 				R_StudioPackLightColor( k );
 			}
+		}
+		else if( !g_studio.numlocallights && !FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS )
+			&& !FBitSet( g_nFaceFlags, STUDIO_NF_FULLBRIGHT|STUDIO_NF_FLATSHADE|STUDIO_NF_CHROME ))
+		{
+			const int n = pmesh[j].numnorms;
+
+			R_StudioLightMeshFast( &g_studio.lightcolors[k], n, (const vec3_t *)pstudionorms, pnormbone );
+			k += n;
+			pstudionorms += n;
+			pnormbone += n;
 		}
 		else
 		{
