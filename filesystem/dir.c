@@ -437,7 +437,7 @@ everything, files written outside it in the search paths aren't seen.
 
 =============================================================================
 */
-#include <dirent.h>
+#include <pspiofilemgr.h>
 
 #define DIRCACHE_BUCKETS 256
 
@@ -449,7 +449,7 @@ typedef struct fs_dircache_s
 	int	count;
 	uint32_t	*hashes;	// lowercased names
 	int	*offsets;	// into names
-	byte	*isdir;
+	int	*sizes;	// -1 for directories
 	char	*names;
 	char	path[1];	// the directory with its trailing slash, allocated with the struct
 } fs_dircache_t;
@@ -483,7 +483,7 @@ void FS_DirCacheClear( void )
 			next = d->next;
 			if( d->hashes ) Mem_Free( d->hashes );
 			if( d->offsets ) Mem_Free( d->offsets );
-			if( d->isdir ) Mem_Free( d->isdir );
+			if( d->sizes ) Mem_Free( d->sizes );
 			if( d->names ) Mem_Free( d->names );
 			Mem_Free( d );
 		}
@@ -493,10 +493,10 @@ void FS_DirCacheClear( void )
 
 static void FS_DirCacheList( fs_dircache_t *d )
 {
-	char path[MAX_SYSPATH];
+	char path[MAX_SYSPATH], abspath[MAX_SYSPATH];
 	int maxcount = 0, nameslen = 0, namessize = 0;
-	struct dirent *ent;
-	DIR *dir;
+	SceIoDirent ent;
+	SceUID dir;
 
 	Q_strncpy( path, d->pathlen ? d->path : "./", sizeof( path ));
 	if( d->pathlen > 1 && d->pathlen < sizeof( path ))
@@ -514,14 +514,28 @@ static void FS_DirCacheList( fs_dircache_t *d )
 			return;
 	}
 
-	if( !( dir = opendir( path )))
+	// sceIoDopen, not opendir: the listing has the sizes too (FS_FileSize).
+	// Relative paths are resolved like libc does, against its cwd
+	if( !Q_strchr( path, ':' ) && getcwd( abspath, sizeof( abspath )))
+	{
+		Q_strncat( abspath, "/", sizeof( abspath ));
+		Q_strncat( abspath, path, sizeof( abspath ));
+	}
+	else Q_strncpy( abspath, path, sizeof( abspath ));
+
+	if(( dir = sceIoDopen( abspath )) < 0 )
 		return; // doesn't exist: nothing in it
 
-	while(( ent = readdir( dir )))
+	while( 1 )
 	{
-		size_t len = Q_strlen( ent->d_name );
+		size_t len;
 
-		if( ent->d_name[0] == '.' && ( len == 1 || ( len == 2 && ent->d_name[1] == '.' )))
+		memset( &ent, 0, sizeof( ent )); // d_private must be NULL
+		if( sceIoDread( dir, &ent ) <= 0 )
+			break;
+
+		len = Q_strlen( ent.d_name );
+		if( ent.d_name[0] == '.' && ( len == 1 || ( len == 2 && ent.d_name[1] == '.' )))
 			continue;
 
 		if( d->count == maxcount )
@@ -529,7 +543,7 @@ static void FS_DirCacheList( fs_dircache_t *d )
 			maxcount = maxcount ? maxcount * 2 : 64;
 			d->hashes = Mem_Realloc( fs_mempool, d->hashes, maxcount * sizeof( *d->hashes ));
 			d->offsets = Mem_Realloc( fs_mempool, d->offsets, maxcount * sizeof( *d->offsets ));
-			d->isdir = Mem_Realloc( fs_mempool, d->isdir, maxcount * sizeof( *d->isdir ));
+			d->sizes = Mem_Realloc( fs_mempool, d->sizes, maxcount * sizeof( *d->sizes ));
 		}
 
 		if( nameslen + len + 1 > namessize )
@@ -538,19 +552,19 @@ static void FS_DirCacheList( fs_dircache_t *d )
 			d->names = Mem_Realloc( fs_mempool, d->names, namessize );
 		}
 
-		d->hashes[d->count] = FS_DirCacheHash( ent->d_name, len );
+		d->hashes[d->count] = FS_DirCacheHash( ent.d_name, len );
 		d->offsets[d->count] = nameslen;
-		d->isdir[d->count] = ent->d_type == DT_DIR;
-		memcpy( d->names + nameslen, ent->d_name, len + 1 );
+		d->sizes[d->count] = FIO_S_ISDIR( ent.d_stat.st_mode ) ? -1 : (int)ent.d_stat.st_size;
+		memcpy( d->names + nameslen, ent.d_name, len + 1 );
 		nameslen += len + 1;
 		d->count++;
 	}
 
-	closedir( dir );
+	sceIoDclose( dir );
 }
 
-// 1 a file, 0 a directory, -1 nothing there
-int FS_DirCacheLookup( const char *path )
+// the size of a file, -1 for a directory, -2 nothing there
+static int FS_DirCacheEntry( const char *path )
 {
 	const char *name = Q_strrchr( path, '/' );
 	size_t dirlen = name ? name - path + 1 : 0;
@@ -559,7 +573,7 @@ int FS_DirCacheLookup( const char *path )
 
 	name = path + dirlen;
 	if( !name[0] )
-		return -1;
+		return -2;
 
 	pathhash = FS_DirCacheHash( path, dirlen );
 
@@ -585,10 +599,26 @@ int FS_DirCacheLookup( const char *path )
 	for( int i = 0; i < d->count; i++ )
 	{
 		if( d->hashes[i] == namehash && !Q_stricmp( d->names + d->offsets[i], name ))
-			return d->isdir[i] ? 0 : 1;
+			return d->sizes[i];
 	}
 
-	return -1;
+	return -2;
+}
+
+// 1 a file, 0 a directory, -1 nothing there
+int FS_DirCacheLookup( const char *path )
+{
+	int size = FS_DirCacheEntry( path );
+
+	return size >= 0 ? 1 : size == -1 ? 0 : -1;
+}
+
+// -1 when it's not a file
+fs_offset_t FS_DirCacheFileSize( const char *path )
+{
+	int size = FS_DirCacheEntry( path );
+
+	return size >= 0 ? size : -1;
 }
 #endif // XASH_PSP
 

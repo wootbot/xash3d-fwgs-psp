@@ -135,6 +135,7 @@ extern poolhandle_t fs_mempool;
 #if XASH_PSP
 void FS_DirCacheClear( void ); // dir.c
 int FS_DirCacheLookup( const char *path );
+fs_offset_t FS_DirCacheFileSize( const char *path );
 #endif
 extern fs_interface_t g_engfuncs;
 extern const fs_api_t g_api;

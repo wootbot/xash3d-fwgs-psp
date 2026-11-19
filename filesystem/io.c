@@ -891,6 +891,30 @@ return size of file in bytes
 */
 fs_offset_t FS_FileSize( const char *filename, qboolean gamedironly )
 {
+#if XASH_PSP
+	// a file in a directory: the size is in the listing cache, no open (dir.c)
+	const char *path = filename;
+
+	if( path[0] == '/' || path[0] == '\\' )
+		path++;
+	if( path[0] == '/' || path[0] == '\\' )
+		path++;
+
+	if( fs_searchpaths && !FS_CheckNastyPath( path ))
+	{
+		char netpath[MAX_SYSPATH], fullpath[MAX_SYSPATH];
+		searchpath_t *search = FS_FindFile( path, NULL, netpath, sizeof( netpath ), gamedironly ? FS_GAMEDIRONLY_SEARCH_FLAGS : 0 );
+
+		if( !search )
+			return -1;
+
+		if( search->type == SEARCHPATH_PLAIN || search->type == SEARCHPATH_PK3DIR )
+		{
+			Q_snprintf( fullpath, sizeof( fullpath ), "%s%s", search->filename, netpath );
+			return FS_DirCacheFileSize( fullpath );
+		}
+	}
+#endif
 	int length = -1; // in case file was missed
 	file_t *fp = FS_Open( filename, "rb", gamedironly );
 
