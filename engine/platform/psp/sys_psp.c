@@ -179,9 +179,19 @@ static int PSP_WatchdogThread( SceSize args, void *argp )
 		sceKernelDelayThread( 1000 * 1000 );
 		PSP_CheckMainStack();
 
-		// heartbeat, the last one tells when a hard freeze happened
+		// heartbeat, the last one tells when a hard freeze happened. On the
+		// stick only without the PC console, once a minute: each append
+		// holds up the game's own file reads for ~130 ms
 		if( ++seconds % 5 == 0 )
-			PSP_WatchdogLog( false, "WATCHDOG: %d s, frame %d, net pool %d bytes free\n", seconds, host.framecount, PSP_NetPoolFree( ));
+		{
+			char msg[128];
+
+			Q_snprintf( msg, sizeof( msg ), "WATCHDOG: %d s, frame %d, net pool %d bytes free\n", seconds, host.framecount, PSP_NetPoolFree( ));
+			if( !PSP_DbgConSendNow( msg ) && seconds % 60 == 0 )
+				PSP_WatchdogLog( false, "%s", msg );
+			else if( !psp_nostdout )
+				printf( "%s", msg );
+		}
 
 		if( host.framecount != last )
 		{

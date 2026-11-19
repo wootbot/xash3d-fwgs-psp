@@ -94,12 +94,13 @@ PSP_DbgConSendNow
 for the watchdog thread: straight to the PC, the main thread may be stuck
 ==================
 */
-void PSP_DbgConSendNow( const char *msg )
+qboolean PSP_DbgConSendNow( const char *msg )
 {
 	if( !PSP_DbgConActive( ))
-		return;
+		return false;
 
 	sendto( dbg.sock, msg, Q_min( Q_strlen( msg ), DBGCON_PACKET ), 0, (struct sockaddr *)&dbg.pc, sizeof( dbg.pc ));
+	return true;
 }
 
 static void PSP_DbgConFlush( void )
