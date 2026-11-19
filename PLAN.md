@@ -322,3 +322,14 @@ music), launched from the XMB.
   `psp-objdump -d xash | awk` counting `jal __*df*` per function. `psp_update <file>` pushes any
   game file (client PRX). Left per frame: studio ~17-19 (engine mesh submit ~11, client ~7),
   world 6-7, brush 5, prediction ~6.5, server messages 3.5-5, sound ~3.
+- 2026-11-19 (later): pmove physents built once per packet instead of up to 4x a frame (-0.8 ms,
+  checked against full rebuilds). **Memory is the studio bottleneck, not math**: with the GE
+  drawing, the CPU's memory accesses run at about half speed (a mesh loop takes 1.6 ms with the GE
+  idle vs 3.0 ms while it draws; 6 uncached stores per vertex alone cost 160 ns). Tried and
+  reverted: vertices written through the cached alias (worse: thrashes the 16 KB dcache), indexed
+  studio strips (each record is shared by only ~1.5 strip vertices: no gain), 16-byte packed
+  vertices (loop -1 ms, but the packing pass costs 2.4 ms). Texture filtering doesn't change CPU
+  times. In-game VRAM is full; all model textures (2.1 MB), lightmaps and most sprites are in RAM.
+  Real fix would be GE skinning + GE lighting, which can't match GoldSrc's wrap lighting exactly.
+  Other measured costs: TriBoxInPVS for temp entities 7.6 us/call (1.2 ms), PM_TestPlayerPosition
+  ~160 us/call (brush entities can't be bounds-culled, clip hulls stick out).
