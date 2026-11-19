@@ -132,6 +132,10 @@ extern char fs_rootdir[MAX_SYSPATH], fs_basedir[MAX_SYSPATH], fs_rodir[MAX_SYSPA
 extern fs_globals_t FI;
 extern searchpath_t *fs_writepath, *fs_searchpaths;
 extern poolhandle_t fs_mempool;
+#if XASH_PSP
+void FS_DirCacheClear( void ); // dir.c
+int FS_DirCacheLookup( const char *path );
+#endif
 extern fs_interface_t g_engfuncs;
 extern const fs_api_t g_api;
 

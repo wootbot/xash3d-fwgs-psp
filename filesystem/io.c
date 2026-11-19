@@ -976,6 +976,9 @@ qboolean FS_Rename( const char *oldname, const char *newname )
 	if( !FS_FixFileCase( fs_writepath->dir, newname2, newpath, sizeof( newpath ), true ))
 		return false;
 
+#if XASH_PSP
+	FS_DirCacheClear();
+#endif
 	ret = rename( oldpath, newpath );
 	if( ret < 0 )
 	{
@@ -1012,6 +1015,9 @@ qboolean GAME_EXPORT FS_Delete( const char *path )
 	if( !FS_FixFileCase( fs_writepath->dir, path2, real_path, sizeof( real_path ), true ))
 		return true;
 
+#if XASH_PSP
+	FS_DirCacheClear();
+#endif
 	ret = remove( real_path );
 	if( ret < 0 && errno != ENOENT )
 	{

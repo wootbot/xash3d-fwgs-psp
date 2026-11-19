@@ -421,10 +421,191 @@ static void FS_PrintInfo_DIR( searchpath_t *search, char *dst, size_t size )
 	Q_strncpy( dst, search->filename, size );
 }
 
+#if XASH_PSP
+/*
+=============================================================================
+
+PSP DIRECTORY LISTING CACHE
+
+Looking a file up on the memory stick costs ~15 ms per stat (more in big
+directories), and finding one file takes a few of them across the search
+paths: ~45 ms per file found, ~65 ms per file missing, tens of seconds per
+connect. Each directory is listed once instead and lookups are answered from
+memory, missing directories included. A write through the filesystem
+(FS_SysOpen for writing, FS_CreatePath, FS_Rename, FS_Delete) drops
+everything, files written outside it in the search paths aren't seen.
+
+=============================================================================
+*/
+#include <dirent.h>
+
+#define DIRCACHE_BUCKETS 256
+
+typedef struct fs_dircache_s
+{
+	struct fs_dircache_s *next;
+	uint32_t	pathhash;
+	size_t	pathlen;
+	int	count;
+	uint32_t	*hashes;	// lowercased names
+	int	*offsets;	// into names
+	byte	*isdir;
+	char	*names;
+	char	path[1];	// the directory with its trailing slash, allocated with the struct
+} fs_dircache_t;
+
+static fs_dircache_t *fs_dircache[DIRCACHE_BUCKETS];
+
+static uint32_t FS_DirCacheHash( const char *s, size_t len )
+{
+	uint32_t h = 2166136261u;
+
+	for( size_t i = 0; i < len; i++ )
+	{
+		byte c = Q_tolower( s[i] );
+
+		if( c == '\\' )
+			c = '/';
+		h = ( h ^ c ) * 16777619u;
+	}
+
+	return h;
+}
+
+void FS_DirCacheClear( void )
+{
+	for( int i = 0; i < DIRCACHE_BUCKETS; i++ )
+	{
+		fs_dircache_t *d, *next;
+
+		for( d = fs_dircache[i]; d; d = next )
+		{
+			next = d->next;
+			if( d->hashes ) Mem_Free( d->hashes );
+			if( d->offsets ) Mem_Free( d->offsets );
+			if( d->isdir ) Mem_Free( d->isdir );
+			if( d->names ) Mem_Free( d->names );
+			Mem_Free( d );
+		}
+		fs_dircache[i] = NULL;
+	}
+}
+
+static void FS_DirCacheList( fs_dircache_t *d )
+{
+	char path[MAX_SYSPATH];
+	int maxcount = 0, nameslen = 0, namessize = 0;
+	struct dirent *ent;
+	DIR *dir;
+
+	Q_strncpy( path, d->pathlen ? d->path : "./", sizeof( path ));
+	if( d->pathlen > 1 && d->pathlen < sizeof( path ))
+		path[d->pathlen - 1] = '\0'; // no trailing slash
+
+	// a failed opendir costs as much as a listing: when the parent's listing
+	// doesn't have this directory, don't try (not for . and .., which
+	// listings leave out)
+	if( d->pathlen > 1 )
+	{
+		const char *last = Q_strrchr( path, '/' );
+
+		last = last ? last + 1 : path;
+		if( Q_strcmp( last, "." ) && Q_strcmp( last, ".." ) && FS_DirCacheLookup( path ) < 0 )
+			return;
+	}
+
+	if( !( dir = opendir( path )))
+		return; // doesn't exist: nothing in it
+
+	while(( ent = readdir( dir )))
+	{
+		size_t len = Q_strlen( ent->d_name );
+
+		if( ent->d_name[0] == '.' && ( len == 1 || ( len == 2 && ent->d_name[1] == '.' )))
+			continue;
+
+		if( d->count == maxcount )
+		{
+			maxcount = maxcount ? maxcount * 2 : 64;
+			d->hashes = Mem_Realloc( fs_mempool, d->hashes, maxcount * sizeof( *d->hashes ));
+			d->offsets = Mem_Realloc( fs_mempool, d->offsets, maxcount * sizeof( *d->offsets ));
+			d->isdir = Mem_Realloc( fs_mempool, d->isdir, maxcount * sizeof( *d->isdir ));
+		}
+
+		if( nameslen + len + 1 > namessize )
+		{
+			namessize = Q_max( namessize * 2, nameslen + len + 1 + 1024 );
+			d->names = Mem_Realloc( fs_mempool, d->names, namessize );
+		}
+
+		d->hashes[d->count] = FS_DirCacheHash( ent->d_name, len );
+		d->offsets[d->count] = nameslen;
+		d->isdir[d->count] = ent->d_type == DT_DIR;
+		memcpy( d->names + nameslen, ent->d_name, len + 1 );
+		nameslen += len + 1;
+		d->count++;
+	}
+
+	closedir( dir );
+}
+
+// 1 a file, 0 a directory, -1 nothing there
+int FS_DirCacheLookup( const char *path )
+{
+	const char *name = Q_strrchr( path, '/' );
+	size_t dirlen = name ? name - path + 1 : 0;
+	uint32_t pathhash, namehash;
+	fs_dircache_t *d;
+
+	name = path + dirlen;
+	if( !name[0] )
+		return -1;
+
+	pathhash = FS_DirCacheHash( path, dirlen );
+
+	for( d = fs_dircache[pathhash % DIRCACHE_BUCKETS]; d; d = d->next )
+	{
+		if( d->pathhash == pathhash && d->pathlen == dirlen && !Q_strnicmp( d->path, path, dirlen ))
+			break;
+	}
+
+	if( !d )
+	{
+		d = Mem_Calloc( fs_mempool, sizeof( *d ) + dirlen );
+		memcpy( d->path, path, dirlen );
+		d->pathlen = dirlen;
+		d->pathhash = pathhash;
+		FS_DirCacheList( d );
+		d->next = fs_dircache[pathhash % DIRCACHE_BUCKETS];
+		fs_dircache[pathhash % DIRCACHE_BUCKETS] = d;
+	}
+
+	namehash = FS_DirCacheHash( name, Q_strlen( name ));
+
+	for( int i = 0; i < d->count; i++ )
+	{
+		if( d->hashes[i] == namehash && !Q_stricmp( d->names + d->offsets[i], name ))
+			return d->isdir[i] ? 0 : 1;
+	}
+
+	return -1;
+}
+#endif // XASH_PSP
+
 static int FS_FindFile_DIR( searchpath_t *search, const char *path, char *fixedname, size_t len )
 {
 	char netpath[MAX_SYSPATH];
 
+#if XASH_PSP
+	// the PSP is case insensitive, no case fix needed
+	Q_snprintf( netpath, sizeof( netpath ), "%s%s", search->filename, path );
+	if( FS_DirCacheLookup( netpath ) != 1 )
+		return -1;
+
+	if( fixedname )
+		Q_strncpy( fixedname, path, len );
+	return 0;
+#else
 	if( !FS_FixFileCase( search->dir, path, netpath, sizeof( netpath ), false ))
 		return -1;
 
@@ -437,6 +618,7 @@ static int FS_FindFile_DIR( searchpath_t *search, const char *path, char *fixedn
 	}
 
 	return -1;
+#endif
 }
 
 static void FS_Search_DIR( searchpath_t *search, stringlist_t *list, const char *pattern, int caseinsensitive )

@@ -231,6 +231,9 @@ void FS_CreatePath( char *path )
 			// create the directory
 			char save = *ofs;
 			*ofs = 0;
+#if XASH_PSP
+			FS_DirCacheClear();
+#endif
 #if XASH_WIN32
 			_mkdir( path ); // use _wmkdir maybe?
 #else // !XASH_WIN32
@@ -373,6 +376,11 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 			break;
 		}
 	}
+
+#if XASH_PSP
+	if( opt & O_CREAT ) // may add a file
+		FS_DirCacheClear();
+#endif
 
 	// the 'm' flag let's user to create temporary file in memory
 	// through so-called "anonymous files"

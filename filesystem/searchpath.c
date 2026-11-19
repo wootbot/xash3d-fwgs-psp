@@ -859,7 +859,11 @@ searchpath_t *FS_FindFile( const char *name, int *index, char *fixedname, size_t
 		Q_snprintf( dirpath, sizeof( dirpath ), "%s/", fs_rootdir );
 		Q_snprintf( netpath, sizeof( netpath ), "%s%s", dirpath, name );
 
+#if XASH_PSP
+		if( FS_DirCacheLookup( netpath ) == 1 ) // see dir.c
+#else
 		if( FS_SysFileExists( netpath ))
+#endif
 		{
 			static searchpath_t fs_directpath;
 
