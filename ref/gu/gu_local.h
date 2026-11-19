@@ -712,6 +712,8 @@ extern convar_t	gl_texture_nearest;
 extern convar_t	gl_lightmap_nearest;
 extern convar_t	gl_keeptjunctions;
 extern convar_t	gl_round_down;
+extern convar_t	gu_texture_maxsize;
+extern convar_t	gu_texture_vram;
 extern convar_t	gl_wireframe;
 extern convar_t	gl_depthoffset;
 extern convar_t	gl_polyoffset;

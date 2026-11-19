@@ -253,6 +253,79 @@ static int GL_CalcMipmapCount( gl_texture_t *tex, qboolean haveBuffer, size_t *m
 
 /*
 ================
+GL_IsSceneTexture
+
+world, model and world sprite textures: gu_texture_maxsize applies to them
+================
+*/
+static qboolean GL_IsSceneTexture( const gl_texture_t *tex )
+{
+	if( IsLightMap( tex ))
+		return false;
+
+	// "#maps/x.bsp:name.mip" and "x.wad/name.mip" (world), "#models/x.mdl/name.bmp" (studio)
+	if( Q_stristr( tex->name, ".mip" ) || Q_stristr( tex->name, ".mdl" ))
+		return true;
+
+	// HUD sprites are drawn 1:1
+	if( !Q_strnicmp( tex->name, "#HUD/", 5 ))
+		return false;
+
+	return Q_stristr( tex->name, ".spr" ) != NULL;
+}
+
+/*
+================
+GL_AllocGEMemory / GL_AllocTextureData
+
+texture data and palettes, VRAM first: texture fetches from main RAM compete
+with the CPU for the bus (only ~3% of the frame in a firefight, measured).
+Menu images go to RAM, they aren't drawn in game and would take VRAM from the
+world and the models.
+================
+*/
+static byte *GL_AllocGEMemory( const gl_texture_t *tex, size_t size, qboolean *inVRAM )
+{
+	qboolean menuImage = FBitSet( tex->flags, TF_IMAGE ) == TF_IMAGE && !FBitSet( tex->flags, TF_ALLOW_NEAREST )
+		&& !IsLightMap( tex ) && Q_strnicmp( tex->name, "#HUD/", 5 ) && !GL_IsSceneTexture( tex );
+	byte *data;
+
+	*inVRAM = false;
+
+	if( gu_texture_vram.value && !menuImage )
+	{
+		data = (byte *)valloc( size );
+		if( data )
+		{
+			*inVRAM = true;
+			return data;
+		}
+	}
+
+	data = (byte *)memalign( 16, size );
+	if( !data && gu_texture_vram.value && menuImage )
+	{
+		data = (byte *)valloc( size );
+		*inVRAM = data != NULL;
+	}
+
+	return data;
+}
+
+static byte *GL_AllocTextureData( gl_texture_t *tex, size_t size )
+{
+	qboolean inVRAM;
+	byte *data = GL_AllocGEMemory( tex, size, &inVRAM );
+
+	if( inVRAM )
+		SetBits( tex->flags, TF_IMG_INVRAM );
+	else ClearBits( tex->flags, TF_IMG_INVRAM );
+
+	return data;
+}
+
+/*
+================
 GL_SetTextureDimensions
 ================
 */
@@ -280,6 +353,9 @@ static void GL_SetTextureDimensions( gl_texture_t *tex, int width, int height )
 
 	width = scaled_width;
 	height = scaled_height;
+
+	if( GL_IsSceneTexture( tex ))
+		maxTextureSize = bound( TEXTURE_SIZE_MIN, (int)gu_texture_maxsize.value, maxTextureSize );
 
 	if( width > maxTextureSize || height > maxTextureSize )
 	{
@@ -660,13 +736,11 @@ static void GL_AllocPalette( gl_texture_t *tex )
 	if( tex->dstPalette && tex->dstPalette != gl_palette_332 )
 		return;
 
-	tex->dstPalette = (byte *)valloc( PALETTE_SIZE );
+	qboolean inVRAM; // GL_FreePalette checks the address
+
+	tex->dstPalette = GL_AllocGEMemory( tex, PALETTE_SIZE, &inVRAM );
 	if( !tex->dstPalette )
-	{
-		tex->dstPalette = (byte *)memalign( 16, PALETTE_SIZE );
-		if( !tex->dstPalette )
-			gEngfuncs.Host_Error( "%s: %s out of memory for palette\n", __func__, tex->name );
-	}
+		gEngfuncs.Host_Error( "%s: %s out of memory for palette\n", __func__, tex->name );
 }
 
 /*
@@ -919,14 +993,9 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	// already allocated?
 	if( !tex->dstTexture )
 	{
-		tex->dstTexture = ( byte* )valloc( texSize );
+		tex->dstTexture = GL_AllocTextureData( tex, texSize );
 		if( !tex->dstTexture )
-		{
-			tex->dstTexture = ( byte* )memalign( 16, texSize );
-			if ( !tex->dstTexture )
-				gEngfuncs.Host_Error( "GL_UploadTexture: %s out of memory for texture ( %u )\n", tex->name, (uint)texSize );
-		}
-		else SetBits( tex->flags, TF_IMG_INVRAM );
+			gEngfuncs.Host_Error( "GL_UploadTexture: %s out of memory for texture ( %u )\n", tex->name, (uint)texSize );
 	}
 
 	if( ImageCompressed( pic->type ) )
@@ -1105,14 +1174,9 @@ qboolean GU_UpdateTextureRect( int texnum, int xoff, int yoff, int width, int he
 		if( tex->format == GU_PSM_T8 )
 			GL_Use332Palette( tex ); // default
 
-		tex->dstTexture = ( byte* )valloc( tex->size );
+		tex->dstTexture = GL_AllocTextureData( tex, tex->size );
 		if( !tex->dstTexture )
-		{
-			tex->dstTexture = ( byte* )memalign( 16, tex->size );
-			if ( !tex->dstTexture )
-				gEngfuncs.Host_Error( "GL_UpdateTexture: out of memory! ( texture: %i %s )\n", tex->size, tex->name );
-		}
-		else SetBits( tex->flags, TF_IMG_INVRAM );
+			gEngfuncs.Host_Error( "GL_UpdateTexture: out of memory! ( texture: %i %s )\n", tex->size, tex->name );
 
 		memset( tex->dstTexture, 0x00, tex->size );
 		SetBits( tex->flags, TF_IMG_UPLOADED ); // done
