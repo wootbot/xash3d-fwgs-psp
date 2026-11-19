@@ -504,8 +504,14 @@ void R_StudioLerpMovement( cl_entity_t *e, double time, vec3_t origin, vec3_t an
 	// don't do it if the goalstarttime hasn't updated in a while.
 	// NOTE: Because we need to interpolate multiplayer characters, the interpolation time limit
 	// was increased to 1.0 s., which is 2x the max lag we are accounting for.
-	if( g_studio.interpolate && ( time < e->curstate.animtime + 1.0f ) && ( e->curstate.animtime != e->latched.prevanimtime ))
-		f = ( time - e->curstate.animtime ) / ( e->curstate.animtime - e->latched.prevanimtime );
+	// float math (no doubles in the PSP FPU), only the time difference needs a double
+	if( g_studio.interpolate && ( e->curstate.animtime != e->latched.prevanimtime ))
+	{
+		const float dt = time - e->curstate.animtime;
+
+		if( dt < 1.0f )
+			f = dt / ( e->curstate.animtime - e->latched.prevanimtime );
+	}
 
 	// Con_Printf( "%4.2f %.2f %.2f\n", f, e->curstate.animtime, g_studio.time );
 	VectorLerp( e->latched.prevorigin, f, e->curstate.origin, origin );
@@ -562,17 +568,20 @@ StudioEstimateFrame
 */
 float R_StudioEstimateFrame( cl_entity_t *e, mstudioseqdesc_t *pseqdesc, double time )
 {
-	double	dfdt, f;
+	// float math (no doubles in the PSP FPU), only the time difference needs a double
+	float	dfdt, f;
 
 	if( g_studio.interpolate )
 	{
-		if( time < e->curstate.animtime ) dfdt = 0.0;
-		else dfdt = (time - e->curstate.animtime) * e->curstate.framerate * pseqdesc->fps;
-	}
-	else dfdt = 0;
+		const float dt = time - e->curstate.animtime;
 
-	if( pseqdesc->numframes <= 1 ) f = 0.0;
-	else f = (e->curstate.frame * (pseqdesc->numframes - 1)) / 256.0f;
+		if( dt < 0.0f ) dfdt = 0.0f;
+		else dfdt = dt * e->curstate.framerate * pseqdesc->fps;
+	}
+	else dfdt = 0.0f;
+
+	if( pseqdesc->numframes <= 1 ) f = 0.0f;
+	else f = (e->curstate.frame * (pseqdesc->numframes - 1)) * ( 1.0f / 256.0f );
 
 	f += dfdt;
 
@@ -584,9 +593,9 @@ float R_StudioEstimateFrame( cl_entity_t *e, mstudioseqdesc_t *pseqdesc, double 
 	}
 	else
 	{
-		if( f >= pseqdesc->numframes - 1.001 )
-			f = pseqdesc->numframes - 1.001;
-		if( f < 0.0 )  f = 0.0;
+		if( f >= pseqdesc->numframes - 1.001f )
+			f = pseqdesc->numframes - 1.001f;
+		if( f < 0.0f )  f = 0.0f;
 	}
 	return f;
 }
@@ -603,7 +612,7 @@ static float R_StudioEstimateInterpolant( cl_entity_t *e )
 
 	if( g_studio.interpolate && ( e->curstate.animtime >= e->latched.prevanimtime + 0.01f ))
 	{
-		dadt = ( g_studio.time - e->curstate.animtime ) / 0.1f;
+		dadt = (float)( g_studio.time - e->curstate.animtime ) * ( 1.0f / 0.1f );
 		if( dadt > 2.0f ) dadt = 2.0f;
 	}
 
