@@ -14,8 +14,9 @@ GNU General Public License for more details.
 */
 
 /*
-A thread copies the engine's DMA buffer into an audio channel, sceAudioOutputPannedBlocking
-waits until the hardware needs the next block, that sets the pace. The semaphore keeps
+A thread copies the engine's DMA buffer into the SRC audio channel, which resamples the engine's
+SOUND_DMA_SPEED (22 kHz) to the hardware rate. sceAudioSRCOutputBlocking waits until the
+hardware needs the next block, that sets the pace. The semaphore keeps
 the mixer and the thread out of the buffer at the same time.
 */
 
@@ -26,7 +27,7 @@ the mixer and the thread out of the buffer at the same time.
 #include <pspkernel.h>
 #include "sound.h"
 
-#define PSP_NUM_AUDIO_SAMPLES  1024 // per channel, must be multiple of 64
+#define PSP_NUM_AUDIO_SAMPLES  512 // per channel, must be multiple of 64 (23 ms at 22 kHz)
 #define PSP_OUTPUT_CHANNELS    2
 #define PSP_OUTPUT_BUFFER_SIZE ( PSP_NUM_AUDIO_SAMPLES * PSP_OUTPUT_CHANNELS )
 
@@ -77,7 +78,7 @@ static int PSP_SoundThread( SceSize args, void *argp )
 
 		sceKernelSignalSema( snd_psp.sema, 1 );
 
-		sceAudioOutputPannedBlocking( snd_psp.channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, out );
+		sceAudioSRCOutputBlocking( PSP_AUDIO_VOLUME_MAX, out );
 		index = !index;
 	}
 
@@ -103,10 +104,10 @@ qboolean SNDDMA_Init( void )
 	snd.samplepos = 0;
 	snd.buffer    = Mem_Calloc( sndpool, snd.samples * 2 );
 
-	snd_psp.channel = sceAudioChReserve( PSP_AUDIO_NEXT_CHANNEL, PSP_NUM_AUDIO_SAMPLES, PSP_AUDIO_FORMAT_STEREO );
+	snd_psp.channel = sceAudioSRCChReserve( PSP_NUM_AUDIO_SAMPLES, SOUND_DMA_SPEED, PSP_OUTPUT_CHANNELS );
 	if( snd_psp.channel < 0 )
 	{
-		Con_Printf( S_ERROR "Audio: sceAudioChReserve failed: 0x%08x\n", (uint)snd_psp.channel );
+		Con_Printf( S_ERROR "Audio: sceAudioSRCChReserve failed: 0x%08x\n", (uint)snd_psp.channel );
 		SNDDMA_Shutdown();
 		return false;
 	}
@@ -175,7 +176,7 @@ void SNDDMA_Shutdown( void )
 
 	if( snd_psp.channel >= 0 )
 	{
-		sceAudioChRelease( snd_psp.channel );
+		sceAudioSRCChRelease();
 		snd_psp.channel = -1;
 	}
 

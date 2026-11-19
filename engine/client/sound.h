@@ -26,7 +26,12 @@ extern poolhandle_t sndpool;
 #define SOUND_22k       22050 // 22khz sample rate
 #define SOUND_44k       44100 // 44khz sample rate
 
+#if XASH_PSP
+// half the mixing work, HL sounds are 22 kHz at most and the PSP resamples in hardware
+#define SOUND_DMA_SPEED SOUND_22k // hardware playback rate
+#else
 #define SOUND_DMA_SPEED SOUND_44k // hardware playback rate
+#endif
 
 #define PAINTBUFFER_SIZE 1024
 

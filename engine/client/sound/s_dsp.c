@@ -149,7 +149,12 @@ static CVAR_DEFINE_AUTO( dsp_coeff_table, "0", FCVAR_ARCHIVE, "select DSP coeffi
 static CVAR_DEFINE_AUTO( room_type, "0",  0, "current room type preset" );
 
 static CVAR_DEFINE( roomwater_type, "waterroom_type", "14", 0, "water room type" );
-static CVAR_DEFINE( hisound, "room_hires", "2", FCVAR_ARCHIVE, "dsp quality. 1 for 22k, 2 for 44k(recommended) and 3 for 96k" );
+#if XASH_PSP
+#define DEFAULT_HIRES "1" // SOUND_DMA_SPEED is 22k
+#else
+#define DEFAULT_HIRES "2"
+#endif
+static CVAR_DEFINE( hisound, "room_hires", DEFAULT_HIRES, FCVAR_ARCHIVE, "dsp quality. 1 for 22k, 2 for 44k(recommended) and 3 for 96k" );
 
 // underwater/special fx modulations
 static CVAR_DEFINE( sxmod_mod, "room_mod", "0", 0, "stereo amptitude modulation for room" );
@@ -223,7 +228,7 @@ void SX_Init( void )
 	idsp_dma_speed = SOUND_11k;
 
 	Cvar_RegisterVariable( &hisound );
-	sxhires = 2;
+	sxhires = Q_atoi( DEFAULT_HIRES );
 
 	sxmod1cur = sxmod1 = 350 * ( idsp_dma_speed / SOUND_11k );
 	sxmod2cur = sxmod2 = 450 * ( idsp_dma_speed / SOUND_11k );
@@ -810,7 +815,9 @@ static void SX_CheckPresets( void )
 
 	if( FBitSet( hisound.flags, FCVAR_CHANGED ))
 	{
+#if !XASH_PSP // fixed by SOUND_DMA_SPEED, configs from before it changed still have 2
 		sxhires = hisound.value;
+#endif
 		ClearBits( hisound.flags, FCVAR_CHANGED );
 	}
 
