@@ -88,6 +88,10 @@ void CL_RedoPrediction( void )
 {
 	if ( cls.netchan.incoming_sequence != cls.lastupdate_sequence )
 	{
+#if XASH_PSP
+		// predict against this packet's entities, like CL_CreateCmd does, so the results can be reused
+		CL_SetSolidEntities();
+#endif
 		CL_PredictMovement( true );
 		CL_CheckPredictionError();
 	}
@@ -965,6 +969,26 @@ void CL_MoveSpectatorCamera( void )
 	VectorCopy( cls.spectator_state.client.view_ofs, cl.viewheight );
 }
 
+#if XASH_PSP
+// commands up to pred_done were already simulated from this server frame and acknowledgement.
+// Sent commands never change, so their results in cl.predicted_frames stay valid until the next packet
+// and only the new commands need to run: saves most of the prediction cost at low framerates
+static int pred_parsecount = -1;
+static uint pred_ack, pred_done;
+
+static void CL_SkipUsercmdTime( int msec, double *time )
+{
+	// same steps as CL_RunUsercmd, so the time adds up exactly the same
+	if( msec > 50 )
+	{
+		CL_SkipUsercmdTime( msec / 2, time );
+		CL_SkipUsercmdTime( msec / 2, time );
+		return;
+	}
+	*time += (double)msec / 1000.0;
+}
+#endif
+
 /*
 =================
 CL_PredictMovement
@@ -1033,6 +1057,9 @@ void CL_PredictMovement( qboolean repredicting )
 	CL_PushPMStates();
 	CL_SetSolidPlayers( cl.playernum );
 
+#if XASH_PSP
+	uint last_done = cls.netchan.incoming_acknowledged;
+#endif
 	for( i = 1; i < CL_UPDATE_MASK && cls.netchan.incoming_acknowledged + i < cls.netchan.outgoing_sequence + stoppoint; i++ )
 	{
 		uint		current_command;
@@ -1046,9 +1073,17 @@ void CL_PredictMovement( qboolean repredicting )
 		to_cmd = &cl.commands[current_command_mod];
 		runfuncs = ( !repredicting && !to_cmd->processedfuncs );
 
+#if XASH_PSP
+		if( !runfuncs && cl.parsecount == pred_parsecount && cls.netchan.incoming_acknowledged == pred_ack && (int)( current_command - pred_done ) <= 0 )
+			CL_SkipUsercmdTime( to_cmd->cmd.msec, &time ); // the result is still in *to
+		else
+#endif
 		CL_RunUsercmd( from, to, &to_cmd->cmd, runfuncs, &time, current_command );
 		VectorCopy( to->playerstate.origin, cl.local.predicted_origins[current_command_mod] );
 		to_cmd->processedfuncs = true;
+#if XASH_PSP
+		last_done = current_command;
+#endif
 
 		if( to_cmd->senttime >= host.realtime )
 			break;
@@ -1056,6 +1091,13 @@ void CL_PredictMovement( qboolean repredicting )
 		from = to;
 		from_cmd = to_cmd;
 	}
+
+#if XASH_PSP
+	// the newest command isn't sent yet and can still change
+	pred_parsecount = cl.parsecount;
+	pred_ack = cls.netchan.incoming_acknowledged;
+	pred_done = (int)( last_done - cls.netchan.outgoing_sequence ) < 0 ? last_done : cls.netchan.outgoing_sequence - 1;
+#endif
 
 	CL_PopPMStates();
 
