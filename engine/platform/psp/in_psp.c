@@ -22,6 +22,8 @@ The key names match the old PSP port, so its configs keep working.
 #include "platform/platform.h"
 #if XASH_INPUT == INPUT_PSP
 #include <pspctrl.h>
+#include <psppower.h>
+#include <pspthreadman.h>
 #include "input.h"
 #include "keydefs.h"
 #include "client.h"
@@ -110,11 +112,21 @@ static void PSP_BuildJoyMap( void )
 
 void Platform_RunEvents( void )
 {
+	static uint32_t last_tick;
 	SceCtrlData buf;
 	short x, y;
 
 	PSP_NetFrame();
 	PSP_DbgConFrame();
+
+	// the XMB's display off / auto sleep timers count from the last button
+	// press: keep the screen on and the PSP awake while the game runs (an
+	// online game or a demo can go minutes without input)
+	if( sceKernelGetSystemTimeLow() - last_tick > 1000000 )
+	{
+		scePowerTick( PSP_POWER_TICK_ALL );
+		last_tick = sceKernelGetSystemTimeLow();
+	}
 
 	if( !psp_joy_init )
 		return;
