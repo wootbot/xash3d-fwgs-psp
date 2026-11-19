@@ -489,6 +489,44 @@ void R_GatherPlayerLight( cl_entity_t *view )
 	gEngfuncs.SetLocalLightLevel(( c.r + c.g + c.b ) / 3 );
 }
 
+#if XASH_PSP
+/*
+===============
+R_EntitySeesSky
+
+the sky test traces across the whole map, ~45 us per model on the PSP, and
+gives the same answer while the entity stays where it is: remember it per
+entity until the entity moves 8 units (or for a second at most)
+===============
+*/
+static qboolean R_EntitySeesSky( const cl_entity_t *ent, const vec3_t origin, const vec3_t skyvec, float time, const vec3_t start, const vec3_t end )
+{
+	static struct
+	{
+		const cl_entity_t *ent;
+		const model_t *world;
+		vec3_t origin, skyvec;
+		float time;
+		qboolean sky;
+	} cache[256];
+	typeof( cache[0] ) *c = &cache[ent->index & ( ARRAYSIZE( cache ) - 1 )];
+
+	if( c->ent == ent && c->world == gp_cl->models[1] && VectorCompare( c->skyvec, skyvec )
+		&& VectorDistance2( c->origin, origin ) < 8.0f * 8.0f && time >= c->time && time < c->time + 1.0f )
+		return c->sky;
+
+	const msurface_t *psurf = gEngfuncs.EV_TraceSurface( 0, (float *)start, (float *)end );
+
+	c->ent = ent;
+	c->world = gp_cl->models[1];
+	VectorCopy( origin, c->origin );
+	VectorCopy( skyvec, c->skyvec );
+	c->time = time;
+	c->sky = psurf && FBitSet( psurf->flags, SURF_DRAWSKY );
+	return c->sky;
+}
+#endif
+
 /*
 ===============
 R_EntityDynamicLight
@@ -538,15 +576,16 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 
 		VectorSubtract( origin, skyvec, vecEnd );
 
-		pmtrace_t trace = gEngfuncs.CL_TraceLine( vecSrc, vecEnd, PM_WORLD_ONLY );
-		msurface_t *psurf;
-		if( trace.ent > 0 )
-			psurf = gEngfuncs.EV_TraceSurface( trace.ent, vecSrc, vecEnd );
-		else
-			psurf = gEngfuncs.EV_TraceSurface( 0, vecSrc, vecEnd );
+		// a PM_WORLD_ONLY trace can only hit the world (ent 0), so it was
+		// always EV_TraceSurface( 0, ... ) anyway, skip the trace itself
+#if XASH_PSP
+		qboolean sky = R_EntitySeesSky( ent, origin, mv->skyvec, (float)time, vecSrc, vecEnd );
+#else
+		msurface_t *psurf = gEngfuncs.EV_TraceSurface( 0, vecSrc, vecEnd );
+		qboolean sky = psurf && FBitSet( psurf->flags, SURF_DRAWSKY );
+#endif
 
-		if(( ent->model->type == mod_studio && FBitSet( ent->model->flags, STUDIO_FORCE_SKYLIGHT ))
-			|| ( psurf && FBitSet( psurf->flags, SURF_DRAWSKY )))
+		if(( ent->model->type == mod_studio && FBitSet( ent->model->flags, STUDIO_FORCE_SKYLIGHT )) || sky )
 		{
 			VectorCopy( mv->skyvec, lightDir );
 
@@ -621,11 +660,15 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 	// scale lightdir by light intentsity
 	VectorScale( lightDir, total, lightDir );
 
-	for( uint lnum = 0; lnum < MAX_DLIGHTS; lnum++ )
+	// die is a float, compare it to a float: comparing with a double costs
+	// two software calls per light on FPUs without doubles (PSP)
+	const float ftime = time;
+
+	for( uint lnum = 0; lnum < MAX_DLIGHTS && r_dynamic->value; lnum++ )
 	{
 		const dlight_t *dl = &gp_dlights[lnum];
 
-		if( dl->die < time || !r_dynamic->value )
+		if( dl->die < ftime )
 			continue;
 
 		vec3_t dist;
