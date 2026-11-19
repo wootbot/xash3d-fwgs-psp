@@ -1213,6 +1213,38 @@ pfnStudioEntityLight
 
 ===============
 */
+// the live entity lights, collected once per frame: walking all MAX_ELIGHTS
+// for every model costs ~130 us each on the PSP (cache misses, and comparing
+// with the double g_studio.time is done in software). One allocated while
+// models are drawn (muzzle flash event) is picked up the frame after.
+static struct
+{
+	int	frame;
+	double	time;
+	float	ftime;	// dlight_t::die is a float anyway
+	int	count;
+	byte	index[MAX_ELIGHTS];
+} r_live_elights = { -1 };
+
+static void R_StudioCollectElights( void )
+{
+	if( r_live_elights.frame == tr.realframecount && r_live_elights.time == g_studio.time )
+		return;
+
+	r_live_elights.frame = tr.realframecount;
+	r_live_elights.time = g_studio.time;
+	r_live_elights.ftime = g_studio.time;
+	r_live_elights.count = 0;
+
+	for( int lnum = 0; lnum < MAX_ELIGHTS; lnum++ )
+	{
+		const dlight_t *el = &tr.elights[lnum];
+
+		if( el->die >= r_live_elights.ftime && el->radius > 0.0f )
+			r_live_elights.index[r_live_elights.count++] = lnum;
+	}
+}
+
 static void R_StudioEntityLight( alight_t *lightinfo )
 {
 	float		lstrength[MAX_LOCALLIGHTS];
@@ -1231,11 +1263,13 @@ static void R_StudioEntityLight( alight_t *lightinfo )
 	float dist2 = 1000000.0f;
 	int k = 0;
 
-	for( int lnum = 0; lnum < MAX_ELIGHTS; lnum++ )
-	{
-		dlight_t *el = &tr.elights[lnum];
+	R_StudioCollectElights();
 
-		if( el->die < g_studio.time || el->radius <= 0.0f )
+	for( int i = 0; i < r_live_elights.count; i++ )
+	{
+		dlight_t *el = &tr.elights[r_live_elights.index[i]];
+
+		if( el->die < r_live_elights.ftime || el->radius <= 0.0f )
 			continue;
 
 		if(( el->key & 0xFFF ) == ent->index )
