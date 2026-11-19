@@ -296,6 +296,31 @@ Mod_LoadModel
 Loads a model into the cache
 ==================
 */
+#if XASH_PSP
+// a map or a model too big for the PSP's memory: drop it and go back to the
+// menu (Host_Error), not out of the game. Called by Mem_OutOfMemory.
+static model_t *mod_loading;
+static byte *mod_loading_buf;
+
+void Mod_LoadOutOfMemory( const char *func, size_t size, const char *filename, int fileline )
+{
+	model_t *mod = mod_loading;
+	char name[MAX_QPATH];
+
+	if( !mod )
+		return;
+
+	mod_loading = NULL;
+	Q_strncpy( name, mod->name, sizeof( name ));
+	Con_Printf( S_ERROR "%s: out of memory (alloc size %s at %s:%i) loading %s\n", func, Q_memprint( size ), filename, fileline, name );
+
+	Mod_AbortBmodelLoad();
+	Mod_FreeModel( mod );
+	Mem_Free( mod_loading_buf );
+	Host_Error( "Not enough memory to load %s\n", name );
+}
+#endif
+
 static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 {
 	char		tempname[MAX_QPATH];
@@ -346,6 +371,11 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 	mod->needload = NL_PRESENT;
 	mod->type = mod_bad;
 
+#if XASH_PSP
+	mod_loading = mod;
+	mod_loading_buf = buf;
+#endif
+
 	// call the apropriate loader
 	switch( *(uint *)buf )
 	{
@@ -364,6 +394,9 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		Mod_LoadBrushModel( mod, buf, length, &loaded );
 		break;
 	default:
+#if XASH_PSP
+		mod_loading = NULL;
+#endif
 		Mem_Free( buf );
 		if( crash ) Host_Error( "%s has unknown format\n", tempname );
 		else Con_Printf( S_ERROR "%s has unknown format\n", tempname );
@@ -391,6 +424,10 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		}
 #endif
 	}
+
+#if XASH_PSP
+	mod_loading = NULL;
+#endif
 
 	if( mod->type == mod_alias )
 	{

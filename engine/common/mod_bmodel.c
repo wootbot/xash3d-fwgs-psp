@@ -4200,13 +4200,42 @@ static fs_offset_t Mod_FindBSPX( byte *mod_base, size_t bufferlen )
 	return max_offset;
 }
 
+#if MOD_STRICT_ALIGNMENT
+// the one being loaded, see Mod_AbortBmodelLoad
+static dbspmodel_t *mod_loading_bmod;
+#endif
+
 static void Mod_FreeBmodel( dbspmodel_t *bmod )
 {
 #if MOD_STRICT_ALIGNMENT
 	for( int i = 0; i < bmod->num_aligned_lumps; i++ )
 		Mem_Free( bmod->aligned_lumps[i] );
+	mod_loading_bmod = NULL;
 #endif
 	Mem_Free( bmod );
+}
+
+/*
+=================
+Mod_AbortBmodelLoad
+
+the load is abandoned with a Host_Error (out of memory): the aligned lump
+copies aren't in the model's pool, free them. bmod itself goes with the pool.
+=================
+*/
+void Mod_AbortBmodelLoad( void )
+{
+#if MOD_STRICT_ALIGNMENT
+	dbspmodel_t *bmod = mod_loading_bmod;
+
+	if( !bmod )
+		return;
+
+	for( int i = 0; i < bmod->num_aligned_lumps; i++ )
+		Mem_Free( bmod->aligned_lumps[i] );
+	bmod->num_aligned_lumps = 0;
+	mod_loading_bmod = NULL;
+#endif
 }
 
 /*
@@ -4260,6 +4289,9 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	}
 
 	dbspmodel_t *bmod = Mem_Calloc( mod->mempool, sizeof( *bmod ));
+#if MOD_STRICT_ALIGNMENT
+	mod_loading_bmod = bmod;
+#endif
 	bmod->version = header->version;	// share up global
 	if( isworld )
 	{

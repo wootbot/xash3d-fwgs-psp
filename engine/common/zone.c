@@ -269,8 +269,62 @@ static qboolean Mem_CheckAllocHeaderSmall( const char *func, const memheader_sma
 	return true;
 }
 
-static void Mem_OutOfMemory( const char *func, size_t size, const char *filename, int fileline )
+#if XASH_PSP
+#include <pspthreadman.h>
+
+#define MEM_SOFT_FAIL_MIN ( 4 * 1024 )
+
+// see Mem_SetSoftFail
+static int mem_soft_fail_thread = -1;
+static qboolean mem_soft_failed;
+static int mem_main_thread = -1;
+
+qboolean Mem_SetSoftFail( qboolean enable )
 {
+	qboolean failed = mem_soft_failed;
+
+	mem_soft_fail_thread = enable ? sceKernelGetThreadId() : -1;
+	mem_soft_failed = false;
+
+	return failed;
+}
+#endif
+
+// returns true if the caller should return NULL instead of stopping the engine
+static qboolean Mem_OutOfMemory( const char *func, size_t size, const char *filename, int fileline )
+{
+#if XASH_PSP
+	// only the thread that asked for it and only for big blocks:
+	// small allocations are rarely checked for NULL
+	if( size >= MEM_SOFT_FAIL_MIN && mem_soft_fail_thread == sceKernelGetThreadId( ))
+	{
+		Con_Printf( S_ERROR "%s: out of memory (alloc size %s at %s:%i), skipped\n", func, Q_memprint( size ), filename, fileline );
+		mem_soft_failed = true;
+		return true;
+	}
+#endif
+
+#if XASH_PSP
+	if( sceKernelGetThreadId() == mem_main_thread )
+	{
+		static int oom_frame = -1;
+
+		// loading a model: give up on that model only (doesn't return then)
+		Mod_LoadOutOfMemory( func, size, filename, fileline );
+
+		// anything else in a running game (a map's textures, a sky...): back
+		// to the menu instead of out of the game. Not twice in a frame, in
+		// case Host_Error itself runs out
+		if(( host.status == HOST_FRAME || host.status == HOST_NOFOCUS ) && oom_frame != host.framecount )
+		{
+			oom_frame = host.framecount;
+			Con_Printf( S_ERROR "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
+			Mem_PrintStats();
+			Host_Error( "Not enough memory (%s at %s:%i)\n", Q_memprint( size ), filename, fileline );
+		}
+	}
+#endif
+
 	// print where the memory went before giving up
 	Con_Printf( S_ERROR "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
 	Mem_PrintList( 256 * 1024 );
@@ -279,6 +333,7 @@ static void Mem_OutOfMemory( const char *func, size_t size, const char *filename
 	PSP_PrintMemInfo();
 #endif
 	Sys_Error( "%s: out of memory (alloc size %s at %s:%i)\n", func, Q_memprint( size ), filename, fileline );
+	return false;
 }
 
 void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char *filename, int fileline )
@@ -778,6 +833,10 @@ Memory_Init
 */
 void Memory_Init( void )
 {
+#if XASH_PSP
+	mem_main_thread = sceKernelGetThreadId();
+#endif
+
 	if( poolchain )
 		Q_free( poolchain );
 

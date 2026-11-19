@@ -402,6 +402,14 @@ qboolean Mem_IsAllocatedExt( poolhandle_t poolptr, void *data );
 void Mem_PrintStats( void );
 void Mem_Stats_f( void );
 
+#if XASH_PSP
+// while enabled, big allocations on the calling thread return NULL when the heap
+// is full instead of stopping the engine: for loads that can be skipped in game.
+// Returns true if an allocation was skipped since the last call
+qboolean Mem_SetSoftFail( qboolean enable );
+void Mod_LoadOutOfMemory( const char *func, size_t size, const char *filename, int fileline );
+void Mod_AbortBmodelLoad( void );
+#endif
 #define Mem_Malloc( pool, size ) _Mem_Alloc( pool, size, false, __FILE__, __LINE__ )
 #define Mem_Calloc( pool, size ) _Mem_Alloc( pool, size, true, __FILE__, __LINE__ )
 #define Mem_Realloc( pool, ptr, size ) _Mem_Realloc( pool, ptr, size, true, __FILE__, __LINE__ )

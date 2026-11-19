@@ -119,10 +119,20 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		if( s_warn_late_precache.value > 0 && cls.state == ca_active )
 			Con_Printf( S_WARN "%s: late precache of %s\n", __func__, sfx->name );
 
+#if XASH_PSP
+		// sounds load on first use (see S_EndRegistration), when the heap may
+		// be full: skip the sound then instead of stopping the game, it's
+		// tried again next time it plays
+		Mem_SetSoftFail( true );
+#endif
 		if( sfx->name[0] == '*' )
 			sc = FS_LoadSound( sfx->name + 1, NULL, 0 );
 		else
 			sc = FS_LoadSound( sfx->name, NULL, 0 );
+#if XASH_PSP
+		if( Mem_SetSoftFail( false ) && !sc )
+			return NULL;
+#endif
 	}
 
 	if( !sc ) sc = S_CreateDefaultSound();
@@ -291,13 +301,17 @@ void S_EndRegistration( void )
 	vox_kept_bytes = 0; // the sentence words kept by VOX_FreeWord went with the old map's sounds
 #endif
 
+#if !XASH_PSP
 	// load everything in
+	// (not on the PSP: big co-op maps precache hundreds of sounds, many never play,
+	// they're loaded on first use instead)
 	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
 	{
 		if( !sfx->name[0] )
 			continue;
 		S_LoadSound( sfx );
 	}
+#endif
 	s_registering = false;
 }
 
