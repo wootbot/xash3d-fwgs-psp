@@ -2572,7 +2572,8 @@ static const uint *ge_last_skinblock; // state to restore after GE meshes
 the skin pass state of each texture (bind, texture scale, depth and blend
 state) as a persistent call block: building it costs ~10 us, and with ~70
 textures in a firefight that was 0.7 ms per frame. Checked against what it
-was built from on every use, rebuilt when a texture or a cvar changed.
+was built from on its first use in a frame, rebuilt when a texture or a cvar
+changed (~220 meshes a frame share ~40 textures).
 */
 typedef struct
 {
@@ -2583,6 +2584,7 @@ typedef struct
 	int		skinw, skinh;	// mstudiotexture_t size for the texture scale
 	int		chrome;
 	float		cvars[5];
+	uint		frame;	// guRender.vert_frame it was last checked in
 } geskin_t;
 
 static geskin_t	*ge_skins; // MAX_TEXTURES, allocated on first use
@@ -2657,10 +2659,17 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 	geskin_t *s = &ge_skins[texnum];
 	geskin_t key;
 
+	if( s->block && s->frame == guRender.vert_frame )
+	{
+		glState.currentTexture = texnum; // what the block binds
+		return s->block;
+	}
+
 	R_StudioGESkinKey( R_GetTexture( texnum ), ptex, &key );
 	if( s->block && R_StudioGESkinMatches( s, &key ))
 	{
 		glState.currentTexture = texnum; // what the block binds
+		s->frame = guRender.vert_frame;
 		return s->block;
 	}
 
@@ -2685,6 +2694,7 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 	key.words = s->words;
 	key.capacity = s->capacity;
 	*s = key;
+	s->frame = guRender.vert_frame;
 	return frame_block;
 }
 
