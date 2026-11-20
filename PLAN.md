@@ -12,6 +12,63 @@ verified **on the PSP**, not just compiled.
 
 ---
 
+## Performance target (set by the user, 2026-11-20)
+
+**A frame under 60 fps is a bug.** The ceiling scene that must hold 60 fps: **32 players and 32
+monsters on screen in heavy combat, in a ~1000 world polygon area**. The current benchmark scene
+(the `blastcorpse1` firefight, demo `fight1`: ~10 grunts, a few dozen shells and gibs) is much
+lighter and must reach **~100 fps**, which is the headroom for the ceiling scene. 30 fps is not an
+acceptable goal.
+
+**Anything goes to get there.** Readability matters, fidelity does not:
+- Decimate models (even to ~20 polygons), cut bones, shrink textures (even to 16x16).
+- Cheaper or approximate lighting, effects and sounds. Caps on temp entities.
+- Bypassing the client DLL's per-model studio rendering.
+
+What still has to hold: GoldSrc protocol and prediction/delta math stay exact (see CLAUDE.md),
+multiplayer works on official servers, and the screen stays readable (who is where, who shoots).
+
+Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
+
+| Part | Budget | Measured 2026-11-20 (fight1) |
+|---|---|---|
+| Net parsing, prediction, HUD, client frame, sound | <= 4 ms | ~7-8 ms |
+| World, ~1000 polygons | <= 2.5 ms | ~3-4 ms |
+| 64 animated models | <= 6 ms (~90 us each with animation) | grunt ~550 us, MP5 shell ~200 us |
+| Effects, temp entities, sprites, decals | <= 2 ms | ~3-9 ms in a firefight |
+| Slack | ~2 ms | |
+
+**What the numbers say so far** (details in the progress log):
+- Per-model cost is mostly **fixed overhead and bone work, not geometry**: `shell.mdl` is 20
+  triangles and 2 bones and still costs ~200 us; a 790 triangle, 30 bone grunt ~550 us.
+  Decimating meshes alone won't get there. `scripts/psp/mdlstat.py` prints bones, triangles and
+  textures of models.
+- The profile is flat: no single stage is above ~5% of the frame. Removing one small cost
+  (light traces, a few draw calls) usually doesn't show at all. Only structural changes that
+  remove whole stages for many models at once have moved the number.
+- Engine built-in studio renderer vs the client DLL's: same speed overall (props and shells
+  ~15% cheaper, grunts slower without the client's bone cache).
+- GE skinned models save ~130 us each over the CPU path; muzzle flash entity lights used to
+  push ~20 models a frame in a live firefight back to the CPU path.
+
+**Plan, by expected gain:**
+- [~] Benchmark that measures what matters: `timedemo` now also prints the in-game frames only
+      (no level load), the 1% low, the minimum and how many frames were under 60 / 100 fps.
+      Still to do: a stress scene with many bots and monsters on the test server.
+- [ ] Batched studio renderer in the engine: run each phase (transform + cull, bones,
+      lighting, GE output) for all models in a row instead of the whole pipeline per model.
+      First check with the TEMP `r_abl 8192` experiment whether warm repeats of bone setup and
+      lighting are much cheaper than cold ones (I-cache/D-cache misses), which is what batching
+      would buy.
+- [ ] Animation: decode only the bones that matter (reduced skeletons), cache decoded frames.
+- [ ] PSP model variants generated offline (fewer bones, decimated meshes, small textures),
+      loaded by the renderer only, so server consistency checks still see the original files.
+- [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
+- [ ] World: prebuilt GE display lists per visible area, fewer state changes.
+- [ ] The non-render floor: engine-side traces, delta parsing, HUD and client frame (same math).
+
+---
+
 ## Phase 0 — Setup
 
 - [x] Add `reference/`, `tools/psplink/` to `.gitignore` (build output: `build-*` already ignored).
@@ -433,3 +490,14 @@ music), launched from the XMB.
   during the first timedemo after adding per-bone and mixer stage marks (watchdog silent, then
   no ping): cause not found, the stage stack writes are now bounds checked against negative
   depths as well.
+- 2026-11-20 (night): **Performance target set** (see the section at the top: under 60 fps is a
+  bug, ~100 fps in the fight1 scene). The two PSP power-offs during timedemos were most likely
+  the battery (15 years old, loose charger, found at 30% after the second), not the code.
+  `r_studio_precull` (commit `054d4177`) culls studio models before the client renderer: client
+  bbox calls 60-96 -> ~40 a frame, fps within noise. Tried and reverted: a cache of the floor
+  light trace per model position (traces 15-22 -> 1-7 a frame, no fps change). Floor of the
+  timedemo with all 3D work skipped (`r_abl 252`): 37.6 fps, but ~6 s of the 14 s are the level
+  load, so ~15 ms a frame, of which ~7.5 ms are timedemo/debug artifacts (other threads: the
+  debug console ~3.7 ms, demo reads from the stick ~2.4 ms, the menu under the demo ~1.5 ms).
+  The network yield length (20 vs 200 us) changes nothing. CPU path for all studio models
+  (`r_studio_ge 0`): 4.5 ms a frame slower. Water: 328 polygons, 1330 vertices a frame.
