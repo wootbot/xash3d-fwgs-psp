@@ -388,3 +388,10 @@ music), launched from the XMB.
   against the old path (0 differences). Measured and left alone: func_water is ~330 visible
   64-unit polygons (~1.7 us warp + ~2.4 us copy to the list each; none culled), studio bbox
   culling ~5-8 us a model, the mixer loops are ~25 cycles per sample and channel already.
+  **Sound**: CL_ExtraUpdate topped the mix up three times a frame, ~5 paint calls a frame with a
+  ~70 us setup per channel and call; extra updates are skipped while half the mixahead is left
+  (1.3 calls a frame, mixing ~4.5 -> ~3 ms). With the profiler timers compiled out the firefight
+  now runs at **25-30 fps** (~37 ms a frame; the timers add ~15%). World in the fight: BSP walk
+  1.4, texture chains 1.9, lightmaps 0.9 ms. Tried and dropped: the child bone matrices on the
+  VFPU (the whole bone loop is ~0.7 ms a frame, saved ~0.15). Uncached display list stores are
+  faster than cached ones (306 vs 488 us per 64 KB, line fills), so the list stays uncached.
