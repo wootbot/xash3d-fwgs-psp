@@ -1090,6 +1090,10 @@ void R_EndFrame( void )
 
 	gEngfuncs.GL_SwapBuffers(); // vsync
 
+	// the GE is done with this frame's vertex memory
+	guRender.vert_vram_used = 0;
+	guRender.vert_frame++;
+
 	// swap the buffers.
 	sceGuSwapBuffers();
 

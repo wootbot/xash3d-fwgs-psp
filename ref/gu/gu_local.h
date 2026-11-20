@@ -644,11 +644,17 @@ typedef struct
 	void		*depth_buffer;
 	void		*context_list;
 	size_t		context_list_size;
+	byte		*vert_vram;	// per-frame vertex memory in VRAM (uncached alias)
+	size_t		vert_vram_size;
+	size_t		vert_vram_used;
+	uint		vert_frame;	// bumped when the per-frame memory is reused
 } gurender_t;
 
 extern glconfig_t	glConfig;
 extern glstate_t	glState;
 extern gurender_t	guRender;
+
+void *GU_GetVertexMemory( unsigned int size );
 // move to engine
 extern glwstate_t	glw_state;
 
@@ -714,6 +720,7 @@ extern convar_t	gl_keeptjunctions;
 extern convar_t	gl_round_down;
 extern convar_t	gu_texture_maxsize;
 extern convar_t	gu_texture_vram;
+extern convar_t	r_studio_ge;
 extern convar_t	gl_wireframe;
 extern convar_t	gl_depthoffset;
 extern convar_t	gl_polyoffset;

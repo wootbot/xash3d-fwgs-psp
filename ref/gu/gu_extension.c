@@ -116,3 +116,39 @@ void extGuEndPacket( void *eaddr )
 			sceGeListUpdateStallAddr( ge_list_executed[0], new_ptr );
 	}
 }
+
+/* raw GE commands: write words at the returned pointer, then pass the end to extGuCmdEnd */
+unsigned int *extGuCmdBegin( void )
+{
+	return gu_list->current;
+}
+
+void extGuCmdEnd( unsigned int *p )
+{
+	gu_list->current = p;
+}
+
+/*
+a block of commands for CALL: the list jumps over it. sceGu* calls between
+extGuBlockBegin and extGuBlockEnd go into the block; returns its address
+*/
+unsigned int *extGuBlockBegin( void )
+{
+	unsigned int *start = gu_list->current;
+
+	gu_list->current = start + 2;
+	return start;
+}
+
+unsigned int *extGuBlockEnd( unsigned int *start )
+{
+	unsigned int *p = gu_list->current;
+	unsigned int next;
+
+	*p++ = 11 << 24; /* RET */
+	next = ( unsigned int )p;
+	start[0] = ( 16 << 24 ) | (( next >> 8 ) & 0xf0000 );
+	start[1] = ( 8 << 24 ) | ( next & 0xffffff );
+	gu_list->current = p;
+	return start + 2;
+}

@@ -22,5 +22,9 @@ void extGuEndPacket( void *eaddr );
 void *extGuGetMemoryNoStall( unsigned int size );
 void extGuDrawArrayNoStall( int prim, int vtype, int count, const void *vertices );
 void extGuUpdateStall( void );
+unsigned int *extGuCmdBegin( void );
+void extGuCmdEnd( unsigned int *p );
+unsigned int *extGuBlockBegin( void );
+unsigned int *extGuBlockEnd( unsigned int *start );
 
 #endif//GU_EXTENSION_H

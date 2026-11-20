@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #include "studio.h"
 #include "pm_local.h"
 #include "gu_extension.h"
+#include <malloc.h>
 
 #define EVENT_CLIENT	5000	// less than this value it's a server-side studio events
 #define MAX_LOCALLIGHTS	4
@@ -1715,7 +1716,7 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 	const qboolean fastlight = !g_studio.numlocallights;
 	const uint alpha = GUCOLOR4UB( 0, 0, 0, (byte)( tr.blend * 255 ));
 
-	gu_vert_ftcv_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
+	gu_vert_ftcv_t *out = GU_GetVertexMemory( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
 
 	while(( i = *( ptricmds++ )))
 	{
@@ -1764,7 +1765,7 @@ static void R_StudioDrawFloatMesh( short *ptricmds, vec3_t *pstudionorms )
 	const qboolean fastlight = !g_studio.numlocallights;
 	const uint alpha = GUCOLOR4UB( 0, 0, 0, (byte)( tr.blend * 255 ));
 
-	gu_vert_ftcv_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
+	gu_vert_ftcv_t *out = GU_GetVertexMemory( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
 
 	while(( i = *( ptricmds++ )))
 	{
@@ -1812,7 +1813,7 @@ static void R_StudioDrawChromeMesh( short *ptricmds, vec3_t *pstudionorms, float
 	int	i;
 	qboolean	glowShell = (scale > 0.0f) ? true : false;
 
-	gu_vert_ftcv_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
+	gu_vert_ftcv_t *out = GU_GetVertexMemory( sizeof( gu_vert_ftcv_t ) * R_StudioCountMeshVerts( ptricmds ));
 
 	while(( i = *( ptricmds++ )))
 	{
@@ -1893,6 +1894,752 @@ generic path
 
 
 /*
+=============================================================================
+
+GE SKINNING
+
+The CPU path transforms every vertex, lights every normal and writes ~24 bytes
+per strip vertex into the display list each frame. Here each mesh is stored
+once per model with its bone slot and normal, the GE skins it with up to 8
+bone matrices per draw (CALLed sub-lists, only changed slots are uploaded),
+and the lighting comes from a second pass: the GE generates a texture
+coordinate from the skinned normal (u = 0.5 + 0.5 * dot( normal, lightvec ))
+into a small ramp texture that holds what R_StudioLighting gives for that dot
+product (wrap lambert, light gamma, light color), multiplied into the frame
+buffer where the depth matches. Same result as the CPU path up to the ramp
+resolution and one more 565 rounding.
+
+Only for the common case: normal render mode, no local lights, no fog, no
+glow shell, no bone weights, and meshes without chrome/fullbright/flatshade/
+additive/float UVs; everything else takes the CPU path.
+
+=============================================================================
+*/
+CVAR_DEFINE_AUTO( r_studio_ge, "1", 0, "draw studio models with GE skinning and lighting where possible" );
+
+#define GE_MAXBONES		8
+#define GE_RAMP_SIZE	32
+#define GE_CACHE_SIZE	512	// submodels
+
+#define GE_CMD( cmd, arg )	((( cmd ) << 24 ) | (( arg ) & 0xffffff ))
+#define GE_UNSUPPORTED_FLAGS	( STUDIO_NF_CHROME|STUDIO_NF_FULLBRIGHT|STUDIO_NF_FLATSHADE|STUDIO_NF_ADDITIVE|STUDIO_NF_UV_COORDS )
+
+typedef struct
+{
+	uint		*cmds;		// VTYPE BASE VADDR PRIM... RET, called from the display list
+	byte		numbones;
+	byte		bones[GE_MAXBONES];
+} gebatch_t;
+
+typedef struct
+{
+	int		numbatches;	// 0: drawn by the CPU path
+	gebatch_t		*batches;
+} gemesh_t;
+
+typedef struct
+{
+	const studiohdr_t	*hdr;
+	const mstudiomodel_t *submodel;
+	qboolean		cpumeshes;	// some meshes still need the CPU path
+	int		nummesh;
+	gemesh_t		*meshes;
+	void		**blocks;		// batch memory, freed with the model
+	int		numblocks;
+} gemodel_t;
+
+static gemodel_t	*ge_cache[GE_CACHE_SIZE];
+static size_t	ge_cache_bytes;
+
+static inline uint GE_Float( float f )
+{
+	union { float f; uint u; } x = { f };
+	return x.u >> 8;
+}
+
+static uint R_StudioGEHash( const void *p )
+{
+	return (((uint)p ) >> 4 ) % GE_CACHE_SIZE;
+}
+
+static void R_StudioGEFreeModel( gemodel_t *gm )
+{
+	for( int i = 0; i < gm->numblocks; i++ )
+		free( gm->blocks[i] );
+	for( int i = 0; i < gm->nummesh; i++ )
+		free( gm->meshes[i].batches );
+	free( gm->blocks );
+	free( gm->meshes );
+	free( gm );
+}
+
+// Mod_StudioUnloadTextures: the header memory can be reused by another model
+static void R_StudioGEUnload( const studiohdr_t *hdr )
+{
+	for( int i = 0; i < GE_CACHE_SIZE; i++ )
+	{
+		if( ge_cache[i] && ge_cache[i]->hdr == hdr )
+		{
+			R_StudioGEFreeModel( ge_cache[i] );
+			ge_cache[i] = NULL;
+		}
+	}
+
+	// reinsert what came after a freed slot, open addressing
+	for( int i = 0; i < GE_CACHE_SIZE; i++ )
+	{
+		gemodel_t *gm = ge_cache[i];
+		if( !gm ) continue;
+		ge_cache[i] = NULL;
+		uint h = R_StudioGEHash( gm->submodel );
+		while( ge_cache[h] ) h = ( h + 1 ) % GE_CACHE_SIZE;
+		ge_cache[h] = gm;
+	}
+}
+
+typedef struct
+{
+	int		prim;		// GU_TRIANGLE_STRIP, GU_TRIANGLE_FAN or GU_TRIANGLES
+	int		count;
+	const short	*verts[3];	// GU_TRIANGLES: one triangle, else NULL
+	const short	*first;	// strips and fans: first tricmd record
+} geunit_t;
+
+static int R_StudioGEUnitBones( const geunit_t *u, const byte *pvertbone, byte *bones )
+{
+	int n = 0;
+
+	for( int i = 0; i < u->count; i++ )
+	{
+		const short *t = u->first ? u->first + i * 4 : u->verts[i];
+		byte b = pvertbone[t[0]];
+		int j;
+
+		for( j = 0; j < n; j++ )
+			if( bones[j] == b ) break;
+		if( j == n )
+		{
+			if( n >= MAXSTUDIOBONES ) break;
+			bones[n++] = b;
+		}
+	}
+	return n;
+}
+
+/*
+===============
+R_StudioGEBuildBatch
+
+vertices + call list for the units [first, last)
+===============
+*/
+static qboolean R_StudioGEBuildBatch( gemodel_t *gm, gebatch_t *batch, const geunit_t *units, int first, int last, const byte *pvertbone, const vec3_t *pstudioverts, const vec3_t *pstudionorms )
+{
+	const int nb = batch->numbones;
+	const int off_t = ( nb + 1 ) & ~1;
+	const int off_n = off_t + 4;
+	const int off_p = ( off_n + 3 + 3 ) & ~3;
+	const int vsize = off_p + 12;
+	int numverts = 0, numprims = 0;
+
+	for( int i = first; i < last; i++ )
+	{
+		// consecutive triangles go into one GU_TRIANGLES draw
+		if( units[i].prim != GU_TRIANGLES || i == first || units[i - 1].prim != GU_TRIANGLES )
+			numprims++;
+		numverts += units[i].count;
+	}
+
+	const size_t vbytes = ( numverts * vsize + 15 ) & ~15;
+	const size_t size = vbytes + ( 3 + numprims + 1 ) * 4;
+	byte *mem = memalign( 16, size );
+
+	if( !mem )
+		return false;
+
+	void **blocks = realloc( gm->blocks, sizeof( *blocks ) * ( gm->numblocks + 1 ));
+	if( !blocks )
+	{
+		free( mem );
+		return false;
+	}
+	gm->blocks = blocks;
+	gm->blocks[gm->numblocks++] = mem;
+	ge_cache_bytes += size;
+
+	byte *v = mem;
+	uint *cmd = (uint *)( mem + vbytes );
+	const uint vtype = GU_WEIGHT_8BIT | GU_WEIGHTS( nb ) | GU_TEXTURE_16BIT | GU_NORMAL_8BIT | GU_VERTEX_32BITF | GU_TRANSFORM_3D;
+
+	batch->cmds = cmd;
+	*cmd++ = GE_CMD( 0x12, vtype );	// VTYPE
+	*cmd++ = GE_CMD( 0x10, ((uint)mem >> 8 ) & 0xf0000 );	// BASE
+	*cmd++ = GE_CMD( 0x01, (uint)mem );	// VADDR
+
+	uint *prim = NULL;
+	for( int i = first; i < last; i++ )
+	{
+		const geunit_t *u = &units[i];
+
+		if( u->prim != GU_TRIANGLES || i == first || units[i - 1].prim != GU_TRIANGLES )
+		{
+			prim = cmd++;
+			*prim = GE_CMD( 0x04, ( u->prim << 16 ));
+		}
+		*prim += u->count;
+
+		for( int k = 0; k < u->count; k++, v += vsize )
+		{
+			const short *t = u->first ? u->first + k * 4 : u->verts[k];
+			const byte bone = pvertbone[t[0]];
+			int slot;
+
+			for( slot = 0; slot < nb; slot++ )
+				if( batch->bones[slot] == bone ) break;
+
+			memset( v, 0, vsize );
+			v[slot] = 128; // 1.0
+			((short *)( v + off_t ))[0] = t[2];
+			((short *)( v + off_t ))[1] = t[3];
+			for( int c = 0; c < 3; c++ )
+				((signed char *)( v + off_n ))[c] = (signed char)bound( -127, (int)roundf( pstudionorms[t[1]][c] * 127.0f ), 127 );
+			memcpy( v + off_p, pstudioverts[t[0]], 12 );
+		}
+	}
+	*cmd++ = GE_CMD( 0x0B, 0 ); // RET
+
+	sceKernelDcacheWritebackRange( mem, size );
+	return true;
+}
+
+/*
+===============
+R_StudioGEBuildMesh
+
+split the strips into batches of at most 8 bones; strips touching more
+bones are drawn as single triangles
+===============
+*/
+// bones of the last batch built: the next one keeps shared bones in the same
+// slots, so fewer matrices are uploaded between draws
+static byte	ge_build_prev[GE_MAXBONES];
+static int	ge_build_prevn;
+
+static void R_StudioGEOrderSlots( gebatch_t *b )
+{
+	byte order[GE_MAXBONES];
+	qboolean used[GE_MAXBONES] = { 0 }, placed[GE_MAXBONES] = { 0 };
+	const int n = b->numbones;
+
+	for( int s = 0; s < n && s < ge_build_prevn; s++ )
+	{
+		for( int k = 0; k < n; k++ )
+		{
+			if( !used[k] && b->bones[k] == ge_build_prev[s] )
+			{
+				order[s] = b->bones[k];
+				used[k] = placed[s] = true;
+				break;
+			}
+		}
+	}
+
+	for( int s = 0, k = 0; s < n; s++ )
+	{
+		if( placed[s] ) continue;
+		while( used[k] ) k++;
+		order[s] = b->bones[k];
+		used[k] = true;
+	}
+
+	memcpy( b->bones, order, n );
+	memcpy( ge_build_prev, order, n );
+	ge_build_prevn = n;
+}
+
+static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short *ptricmds, const byte *pvertbone, const byte *pnormbone, const vec3_t *pstudioverts, const vec3_t *pstudionorms )
+{
+	int numunits = 0, i;
+	const short *p = ptricmds;
+
+	// the GE moves a normal with its vertex's bone
+	while(( i = *( p++ )))
+	{
+		if( i < 0 ) i = -i;
+		for( int k = 0; k < i; k++, p += 4 )
+			if( pvertbone[p[0]] != pnormbone[p[1]] )
+				return false;
+		numunits += i; // upper bound: one unit per triangle
+	}
+
+	geunit_t *units = malloc( sizeof( *units ) * ( numunits + 1 ));
+	gebatch_t *batches = NULL;
+	int nunits = 0, nbatches = 0;
+	byte bones[MAXSTUDIOBONES];
+
+	if( !units )
+		return false;
+
+	p = ptricmds;
+	while(( i = *( p++ )))
+	{
+		geunit_t u = { 0 };
+
+		u.prim = GU_TRIANGLE_STRIP;
+		if( i < 0 )
+		{
+			u.prim = GU_TRIANGLE_FAN;
+			i = -i;
+		}
+		u.count = i;
+		u.first = p;
+
+		if( R_StudioGEUnitBones( &u, pvertbone, bones ) <= GE_MAXBONES )
+			units[nunits++] = u;
+		else
+		{
+			for( int k = 0; k + 2 < i; k++ )
+			{
+				geunit_t *t = &units[nunits++];
+				const short *a, *b, *c;
+
+				if( u.prim == GU_TRIANGLE_FAN )
+				{
+					a = p; b = p + ( k + 1 ) * 4; c = p + ( k + 2 ) * 4;
+				}
+				else if( k & 1 )
+				{
+					a = p + ( k + 1 ) * 4; b = p + k * 4; c = p + ( k + 2 ) * 4;
+				}
+				else
+				{
+					a = p + k * 4; b = p + ( k + 1 ) * 4; c = p + ( k + 2 ) * 4;
+				}
+
+				memset( t, 0, sizeof( *t ));
+				t->prim = GU_TRIANGLES;
+				t->count = 3;
+				t->verts[0] = a; t->verts[1] = b; t->verts[2] = c;
+			}
+		}
+		p += i * 4;
+	}
+
+	// greedy batches
+	int first = 0;
+	gebatch_t cur;
+	memset( &cur, 0, sizeof( cur ));
+
+	for( int u = 0; u <= nunits; u++ )
+	{
+		byte ub[MAXSTUDIOBONES];
+		int nub = 0, merged = cur.numbones;
+		byte mb[MAXSTUDIOBONES];
+
+		if( u < nunits )
+		{
+			nub = R_StudioGEUnitBones( &units[u], pvertbone, ub );
+			memcpy( mb, cur.bones, cur.numbones );
+			for( int k = 0; k < nub; k++ )
+			{
+				int j;
+				for( j = 0; j < merged; j++ )
+					if( mb[j] == ub[k] ) break;
+				if( j == merged )
+				{
+					if( merged >= GE_MAXBONES ) { merged = GE_MAXBONES + 1; break; }
+					mb[merged++] = ub[k];
+				}
+			}
+		}
+
+		if( u == nunits || merged > GE_MAXBONES )
+		{
+			if( u > first )
+			{
+				R_StudioGEOrderSlots( &cur );
+				gebatch_t *nb = realloc( batches, sizeof( *batches ) * ( nbatches + 1 ));
+				if( !nb || !R_StudioGEBuildBatch( gm, &cur, units, first, u, pvertbone, pstudioverts, pstudionorms ))
+				{
+					free( nb ? nb : batches );
+					free( units );
+					return false;
+				}
+				batches = nb;
+				batches[nbatches++] = cur;
+			}
+			if( u == nunits )
+				break;
+
+			// start a new batch with this unit
+			first = u;
+			memset( &cur, 0, sizeof( cur ));
+			memcpy( cur.bones, ub, nub );
+			cur.numbones = nub;
+		}
+		else
+		{
+			memcpy( cur.bones, mb, merged );
+			cur.numbones = merged;
+		}
+	}
+
+	free( units );
+	gmesh->batches = batches;
+	gmesh->numbatches = nbatches;
+	ge_cache_bytes += sizeof( *batches ) * nbatches;
+	return nbatches > 0;
+}
+
+/*
+===============
+R_StudioGEGetModel
+
+GE data for the current submodel, built on first use; NULL: CPU path only
+===============
+*/
+static gemodel_t *R_StudioGEGetModel( void )
+{
+	uint h = R_StudioGEHash( m_pSubModel );
+
+	for( int n = 0; n < GE_CACHE_SIZE; n++, h = ( h + 1 ) % GE_CACHE_SIZE )
+	{
+		gemodel_t *gm = ge_cache[h];
+
+		if( !gm )
+			break;
+		if( gm->submodel == m_pSubModel && gm->hdr == m_pStudioHeader )
+			return gm->nummesh ? gm : NULL;
+	}
+
+	if( ge_cache[h] ) // full
+		return NULL;
+
+	gemodel_t *gm = calloc( 1, sizeof( *gm ));
+	if( !gm )
+		return NULL;
+
+	gm->hdr = m_pStudioHeader;
+	gm->submodel = m_pSubModel;
+	ge_cache[h] = gm;
+
+	// bone weighted models: not yet
+	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) || m_pSubModel->nummesh <= 0 )
+		return NULL;
+
+	gm->meshes = calloc( m_pSubModel->nummesh, sizeof( *gm->meshes ));
+	if( !gm->meshes )
+		return NULL;
+
+	const byte *pvertbone = (const byte *)m_pStudioHeader + m_pSubModel->vertinfoindex;
+	const byte *pnormbone = (const byte *)m_pStudioHeader + m_pSubModel->norminfoindex;
+	const vec3_t *pstudioverts = (const vec3_t *)((const byte *)m_pStudioHeader + m_pSubModel->vertindex);
+	const vec3_t *pstudionorms = (const vec3_t *)((const byte *)m_pStudioHeader + m_pSubModel->normindex);
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	int numge = 0;
+
+	ge_build_prevn = 0;
+	for( int j = 0; j < m_pSubModel->nummesh; j++ )
+	{
+		const short *ptricmds = (const short *)((const byte *)m_pStudioHeader + pmesh[j].triindex);
+
+		if( R_StudioGEBuildMesh( gm, &gm->meshes[j], ptricmds, pvertbone, pnormbone, pstudioverts, pstudionorms ))
+			numge++;
+		else
+		{
+			gm->meshes[j].numbatches = 0;
+			gm->cpumeshes = true;
+		}
+	}
+
+	gm->nummesh = m_pSubModel->nummesh;
+	gEngfuncs.Con_DPrintf( "GE studio: %s %d/%d meshes, %u KB cached\n", m_pSubModel->name, numge, gm->nummesh, (uint)( ge_cache_bytes >> 10 ));
+
+	return numge ? gm : NULL;
+}
+
+/*
+===============
+R_StudioGERamp
+
+R_StudioLightMeshFast as a function of dot( normal, lightvec ), as a texture
+===============
+*/
+static uint *R_StudioGERamp( void )
+{
+	static float last[6];
+	static uint *lastramp;
+	static uint lastframe;
+	const float params[6] = { g_studio.ambientlight, g_studio.shadelight, g_studio.lightcolor[0], g_studio.lightcolor[1], g_studio.lightcolor[2], 0.0f };
+
+	if( lastramp && lastframe == guRender.vert_frame && !memcmp( params, last, sizeof( params )) )
+		return lastramp;
+
+	byte *mem = GU_GetVertexMemory( GE_RAMP_SIZE * 4 + 16 );
+	uint *ramp = (uint *)((((uint)mem ) + 15 ) & ~15u );
+
+	const float base = g_studio.ambientlight + g_studio.shadelight;
+	const float k = g_studio.shadelight * ( 1.0f / SHADE_LAMBERT );
+	const float off = SHADE_LAMBERT - 1.0f;
+	const uint16_t *gamma = FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ) ? NULL : tr.lightgammatable;
+	const float cr = g_studio.lightcolor[0] * ( 255.0f / 1023.0f );
+	const float cg = g_studio.lightcolor[1] * ( 255.0f / 1023.0f );
+	const float cb = g_studio.lightcolor[2] * ( 255.0f / 1023.0f );
+
+	for( int i = 0; i < GE_RAMP_SIZE; i++ )
+	{
+		float d = ( i + 0.5f ) * ( 2.0f / GE_RAMP_SIZE ) - 1.0f;
+		float illum = base;
+
+		d += off;
+		if( d > 0.0f )
+			illum -= k * d;
+		if( illum < 0.0f )
+			illum = 0.0f;
+		else if( illum > 255.0f )
+			illum = 255.0f;
+
+		const int b = (int)( illum * 4.0f );
+		const float g = gamma ? gamma[b] : b;
+
+		ramp[i] = GUCOLOR4UB( (byte)( cr * g ), (byte)( cg * g ), (byte)( cb * g ), 255 );
+	}
+
+	memcpy( last, params, sizeof( last ));
+	lastramp = ramp;
+	lastframe = guRender.vert_frame;
+	return ramp;
+}
+
+// bone of each GE matrix slot, valid for the current entity only
+static byte	ge_slot_bone[GE_MAXBONES];
+static uint	ge_slots_valid;
+
+static uint *R_StudioGEBones( uint *p, const gebatch_t *b )
+{
+	const float *eye = RI.rvp.vieworigin;
+	int next = -1; // slot the GE writes next without a BOFS
+
+	for( int i = 0; i < b->numbones; i++ )
+	{
+		if( FBitSet( ge_slots_valid, BIT( i )) && ge_slot_bone[i] == b->bones[i] )
+			continue;
+
+		const float (*m)[4] = (const float (*)[4])g_studio.bonestransform[b->bones[i]];
+
+		if( next != i )
+			*p++ = GE_CMD( 0x2A, i * 12 ); // BOFS
+		*p++ = GE_CMD( 0x2B, GE_Float( m[0][0] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[1][0] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[2][0] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[0][1] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[1][1] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[2][1] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[0][2] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[1][2] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[2][2] ));
+		// relative to the eye: the GE's 24-bit floats lose too much at map coordinates
+		*p++ = GE_CMD( 0x2B, GE_Float( m[0][3] - eye[0] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[1][3] - eye[1] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[2][3] - eye[2] ));
+		next = i + 1;
+
+		ge_slot_bone[i] = b->bones[i];
+		SetBits( ge_slots_valid, BIT( i ));
+	}
+	return p;
+}
+
+static inline uint *R_StudioGECall( uint *p, const uint *addr )
+{
+	*p++ = GE_CMD( 0x10, ((uint)addr >> 8 ) & 0xf0000 );	// BASE
+	*p++ = GE_CMD( 0x0A, (uint)addr );	// CALL
+	return p;
+}
+
+/*
+===============
+R_StudioGEViewMatrix
+
+the view matrix without the translation (the bones are relative to the eye)
+===============
+*/
+static void R_StudioGEViewMatrix( qboolean eye_relative )
+{
+	// both matrices as call blocks, rebuilt when the view changes
+	static matrix4x4 view;
+	static uint frame = ~0u;
+	static const uint *blocks[2];
+
+	if( frame != guRender.vert_frame || memcmp( view, RI.worldviewMatrix, sizeof( view )))
+	{
+		ScePspFMatrix4 m;
+
+		Matrix4x4_ToFMatrix4( RI.worldviewMatrix, &m );
+		for( int i = 0; i < 2; i++ )
+		{
+			uint *start = extGuBlockBegin();
+			if( i ) m.w.x = m.w.y = m.w.z = 0.0f;
+			sceGuSetMatrix( GU_VIEW, &m );
+			blocks[i] = extGuBlockEnd( start );
+		}
+		memcpy( view, RI.worldviewMatrix, sizeof( view ));
+		frame = guRender.vert_frame;
+	}
+
+	uint *p = R_StudioGECall( extGuCmdBegin(), blocks[eye_relative ? 1 : 0] );
+	extGuCmdEnd( p );
+}
+
+/*
+===============
+R_StudioGELightBlock
+
+GE state for the lighting pass, called before each batch's second draw:
+the ramp texture with u = 0.5 + 0.5 * dot( normal, lightvec ), multiplied
+into the frame buffer where the depth matches
+===============
+*/
+static const uint *R_StudioGELightBlock( const uint *ramp )
+{
+	static const uint *last, *lastramp;
+	static vec3_t lastvec;
+	static uint frame = ~0u;
+
+	if( frame == guRender.vert_frame && ramp == lastramp && VectorCompare( lastvec, g_studio.lightvec ))
+		return last;
+
+	uint *start = extGuBlockBegin();
+	ScePspFMatrix4 tm;
+
+	sceGuTexScale( 1.0f, 1.0f );
+	sceGuTexMode( GU_PSM_8888, 0, 0, GU_FALSE );
+	sceGuTexFilter( GU_LINEAR, GU_LINEAR );
+	sceGuTexWrap( GU_CLAMP, GU_CLAMP );
+	sceGuTexImage( 0, GE_RAMP_SIZE, 1, GE_RAMP_SIZE, ramp );
+	sceGuTexFunc( GU_TFX_REPLACE, GU_TCC_RGB );
+
+	memset( &tm, 0, sizeof( tm ));
+	tm.x.x = 0.5f * g_studio.lightvec[0];
+	tm.y.x = 0.5f * g_studio.lightvec[1];
+	tm.z.x = 0.5f * g_studio.lightvec[2];
+	tm.w.x = 0.5f;
+	tm.w.y = 0.5f;
+	tm.w.z = 1.0f;
+	sceGuSetMatrix( GU_TEXTURE, &tm );
+	sceGuTexMapMode( GU_TEXTURE_MATRIX, 0, 0 );
+	sceGuTexProjMapMode( GU_NORMALIZED_NORMAL );
+
+	sceGuDepthFunc( GU_EQUAL );
+	sceGuDepthMask( GU_TRUE );
+	sceGuBlendFunc( GU_ADD, GU_FIX, GU_SRC_COLOR, 0, 0 );
+	sceGuEnable( GU_BLEND );
+
+	glState.texIdentityMatrix = false;
+	last = extGuBlockEnd( start );
+	lastramp = ramp;
+	VectorCopy( g_studio.lightvec, lastvec );
+	frame = guRender.vert_frame;
+	return last;
+}
+
+/*
+===============
+R_StudioGEDrawMesh
+
+per batch: its bones, the skin pass (writes depth), the lighting pass
+===============
+*/
+static const uint *ge_last_skinblock; // state to restore after GE meshes
+
+static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *ptex, int skinindex, const uint *lightblock )
+{
+	// skin pass state, one block per texture and frame
+	static struct { const mstudiotexture_t *tex; const uint *block; uint frame; } skincache[256];
+	const uint slot = ((uint)ptex / sizeof( *ptex )) & 255;
+	const uint *skinblock;
+	const qboolean cacheable = !m_fDoRemap && !r_lightmap->value; // remapped player skins differ per entity
+
+	if( cacheable && skincache[slot].tex == ptex && skincache[slot].frame == guRender.vert_frame )
+		skinblock = skincache[slot].block;
+	else
+	{
+		uint *start = extGuBlockBegin();
+
+		glState.currentTexture = 0; // force GL_Bind to emit everything
+		R_StudioSetupSkin( m_pStudioHeader, skinindex );
+		// texcoords are the raw texel shorts: u = s / 32768 * scale
+		sceGuTexScale( 32768.0f / ptex->width, 32768.0f / ptex->height );
+		sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
+		sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 );
+		sceGuDepthFunc( GU_LEQUAL );
+		sceGuDepthMask( GU_FALSE );
+		sceGuDisable( GU_BLEND );
+		skinblock = extGuBlockEnd( start );
+		if( cacheable )
+		{
+			skincache[slot].tex = ptex;
+			skincache[slot].block = skinblock;
+			skincache[slot].frame = guRender.vert_frame;
+		}
+	}
+
+	uint *p = extGuCmdBegin();
+	for( int i = 0; i < gmesh->numbatches; i++ )
+	{
+		const gebatch_t *b = &gmesh->batches[i];
+
+		p = R_StudioGEBones( p, b );
+		p = R_StudioGECall( p, skinblock );
+		p = R_StudioGECall( p, b->cmds );
+		p = R_StudioGECall( p, lightblock );
+		p = R_StudioGECall( p, b->cmds );
+	}
+	extGuCmdEnd( p );
+	ge_last_skinblock = skinblock;
+}
+
+/*
+===============
+R_StudioGERestore
+
+back to the skin pass state (no texture matrix, depth writes, no blending),
+which the rest of the renderer expects
+===============
+*/
+static void R_StudioGERestore( void )
+{
+	if( !ge_last_skinblock )
+		return;
+
+	uint *p = R_StudioGECall( extGuCmdBegin(), ge_last_skinblock );
+	extGuCmdEnd( p );
+	sceGuTexScale( 1.0f, 1.0f );
+	glState.currentTexture = 0;
+	ge_last_skinblock = NULL;
+}
+
+/*
+===============
+R_StudioGEAllowed
+
+entity state that the GE path can draw
+===============
+*/
+static qboolean R_StudioGEAllowed( void )
+{
+	if( !r_studio_ge.value || g_studio.numlocallights || g_nForceFaceFlags )
+		return false;
+	if( g_studio.rendermode != kRenderNormal || RI.currententity->curstate.renderfx == kRenderFxGlowShell )
+		return false;
+	if( glState.isFogEnabled || r_lightmap->value || r_fullbright->value )
+		return false;
+	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ))
+		return false;
+	return true;
+}
+
+/*
 ===============
 R_StudioSubmitMesh
 
@@ -1948,7 +2695,21 @@ static void R_StudioDrawPoints( void )
 	const int numverts = m_pSubModel->numverts;
 	const int numnorms = m_pSubModel->numnorms;
 
-	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) && m_pSubModel->blendvertinfoindex != 0 && m_pSubModel->blendnorminfoindex != 0 )
+	gemodel_t *gm = R_StudioGEAllowed() ? R_StudioGEGetModel() : NULL;
+	qboolean cpumeshes = !gm || gm->cpumeshes;
+
+	// the skin family decides the flags
+	for( int j = 0; gm && !cpumeshes && j < m_pSubModel->nummesh; j++ )
+	{
+		if( FBitSet( ptexture[pskinref[pmesh[j].skinref]].flags, GE_UNSUPPORTED_FLAGS ))
+			cpumeshes = true;
+	}
+
+	if( !cpumeshes )
+	{
+		// the GE draws everything
+	}
+	else if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) && m_pSubModel->blendvertinfoindex != 0 && m_pSubModel->blendnorminfoindex != 0 )
 	{
 		mstudioboneweight_t	*pvertweight = (mstudioboneweight_t *)((byte *)m_pStudioHeader + m_pSubModel->blendvertinfoindex);
 		mstudioboneweight_t	*pnormweight = (mstudioboneweight_t *)((byte *)m_pStudioHeader + m_pSubModel->blendnorminfoindex);
@@ -2001,7 +2762,15 @@ static void R_StudioDrawPoints( void )
 		if( FBitSet( g_nFaceFlags, STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
 			need_sort = true;
 
-		if( RI.currententity->curstate.rendermode == kRenderTransAdd )
+		if( gm && gm->meshes[j].numbatches && !FBitSet( g_nFaceFlags, GE_UNSUPPORTED_FLAGS ))
+		{
+			// lit by the GE
+			const int n = pmesh[j].numnorms;
+			k += n;
+			pstudionorms += n;
+			pnormbone += n;
+		}
+		else if( RI.currententity->curstate.rendermode == kRenderTransAdd )
 		{
 			for( int i = 0; i < pmesh[j].numnorms; i++, k++, pstudionorms++, pnormbone++ )
 			{
@@ -2068,11 +2837,30 @@ static void R_StudioDrawPoints( void )
 		}
 	}
 
+	const mstudiomesh_t *pmeshbase = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	qboolean eye_view = false;
+	const uint *lightblock = NULL;
+
+	ge_slots_valid = 0;
+
 	for( int j = 0; j < m_pSubModel->nummesh; j++ )
 	{
 		float	oldblend = tr.blend;
 
 		pmesh = g_studio.meshes[j].mesh;
+		const gemesh_t *gmesh = gm ? &gm->meshes[pmesh - pmeshbase] : NULL;
+		if( gmesh && ( !gmesh->numbatches || FBitSet( ptexture[pskinref[pmesh->skinref]].flags | g_nForceFaceFlags, GE_UNSUPPORTED_FLAGS )))
+			gmesh = NULL;
+
+		if( !!gmesh != eye_view )
+		{
+			if( !gmesh )
+				R_StudioGERestore();
+			eye_view = !!gmesh;
+			R_StudioGEViewMatrix( eye_view );
+		}
+		if( gmesh && !lightblock )
+			lightblock = R_StudioGELightBlock( R_StudioGERamp( ));
 		short *ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex);
 
 		g_nFaceFlags = ptexture[pskinref[pmesh->skinref]].flags | g_nForceFaceFlags;
@@ -2100,9 +2888,13 @@ static void R_StudioDrawPoints( void )
 			else sceGuBlendFunc( GU_ADD, GU_SRC_ALPHA, GU_FIX, 0, GUBLEND1 );
 		}
 
-		R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
-
-		R_StudioSubmitMesh( ptricmds, pstudionorms, s, t, shellscale, 0 );
+		if( gmesh )
+			R_StudioGEDrawMesh( gmesh, &ptexture[pskinref[pmesh->skinref]], pskinref[pmesh->skinref], lightblock );
+		else
+		{
+			R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
+			R_StudioSubmitMesh( ptricmds, pstudionorms, s, t, shellscale, 0 );
+		}
 
 		if( FBitSet( g_nFaceFlags, STUDIO_NF_MASKED ))
 		{
@@ -2118,6 +2910,13 @@ static void R_StudioDrawPoints( void )
 
 		r_stats.c_studio_polys += pmesh->numtris;
 		tr.blend = oldblend;
+	}
+
+	if( eye_view )
+	{
+		R_StudioGERestore();
+		R_StudioGEViewMatrix( false );
+		extGuUpdateStall();
 	}
 }
 
@@ -3451,6 +4250,8 @@ void Mod_StudioUnloadTextures( void *data )
 
 	if( !phdr )
 		return;
+
+	R_StudioGEUnload( phdr );
 
 	mstudiotexture_t *ptexture = (mstudiotexture_t *)(((byte *)phdr) + phdr->textureindex);
 

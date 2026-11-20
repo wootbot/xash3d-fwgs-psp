@@ -14,6 +14,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 */
 #include "gu_local.h"
+#include "gu_extension.h"
 
 CVAR_DEFINE_AUTO( gl_texture_lodfunc, "2", FCVAR_GLCONFIG, "LOD func for mipmapped textures" );
 CVAR_DEFINE_AUTO( gl_texture_lodbias, "-6.0", FCVAR_GLCONFIG, "LOD bias for mipmapped textures (perfomance|quality)" );
@@ -99,6 +100,14 @@ static qboolean GU_Init( void )
 
 	guRender.context_list = context_list;
 	guRender.context_list_size = sizeof( context_list );
+
+	// per-frame vertices and lighting ramps: CPU writes to VRAM are cheaper than to
+	// RAM while the GE reads its display list from RAM
+	guRender.vert_vram_size = 512 * 1024;
+	guRender.vert_vram = valloc( guRender.vert_vram_size );
+	if( guRender.vert_vram )
+		guRender.vert_vram = (byte *)((uint)guRender.vert_vram | 0x40000000 );
+	else guRender.vert_vram_size = 0;
 
 	// Initialise the GU.
 	sceGuInit();
@@ -268,6 +277,26 @@ void GL_ClearExtensions( void )
 GL_InitCommands
 =================
 */
+/*
+===============
+GU_GetVertexMemory
+
+per-frame memory for the GE: VRAM while there is room left, else the display
+list. No stall update: callers batch draws and call extGuUpdateStall
+===============
+*/
+void *GU_GetVertexMemory( unsigned int size )
+{
+	size = ( size + 15 ) & ~15u;
+	if( guRender.vert_vram_used + size <= guRender.vert_vram_size )
+	{
+		void *p = guRender.vert_vram + guRender.vert_vram_used;
+		guRender.vert_vram_used += size;
+		return p;
+	}
+	return extGuGetMemoryNoStall( size );
+}
+
 static void GL_InitCommands( void )
 {
 	gEngfuncs.Cvar_RegisterVariable( &r_lighting_ambient );
@@ -279,6 +308,7 @@ static void GL_InitCommands( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_traceglow );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_sort_textures );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_builtin_renderer );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge );
 	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
 	gEngfuncs.Cvar_RegisterVariable( &r_fast_particles );
 
