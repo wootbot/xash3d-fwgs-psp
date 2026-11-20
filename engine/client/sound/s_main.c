@@ -1580,6 +1580,13 @@ Don't let sound skip if going slow
 void S_ExtraUpdate( void )
 {
 	if( !snd.initialized ) return;
+#if XASH_PSP
+	// S_Update mixed s_mixahead ahead: while more than half of it is still left,
+	// topping it up mid-frame only splits the same mixing into more calls, each
+	// with its own per-channel setup
+	if( snd.buffer && (int)( snd.paintedtime - S_GetSoundtime( )) > s_mixahead.value * SOUND_DMA_SPEED * 0.5f )
+		return;
+#endif
 	S_UpdateChannels ();
 }
 
