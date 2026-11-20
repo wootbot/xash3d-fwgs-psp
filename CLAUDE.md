@@ -44,6 +44,13 @@ The step-by-step plan and progress tracking live in **[PLAN.md](PLAN.md)** — k
 - **Commit as you make progress** — small, focused commits whenever a piece of work builds or a
   step in PLAN.md is done; don't wait until the end of a session. Update PLAN.md (checkboxes,
   progress log, measured numbers) in the same or a following commit. Don't push unless asked.
+- **Keep personal info out of tracked files, commits and PR text.** This repo is public-bound. Local
+  IP addresses, Wi-Fi SSIDs, passwords (rcon etc.), account or Windows user names, absolute paths that
+  contain them, SteamIDs and similar details go **only** into the untracked, git-ignored
+  **`tools/dbg/README.md`**. Read it before testing (it has the PC's address, the HLDS command line,
+  the Wi-Fi setup and the rcon password). In tracked files use placeholders (`<pc ip>`, `<home>`,
+  `<ssid>`, `<see README>`). When you learn a new personal detail that future agents need for testing,
+  add it to that README, not to CLAUDE.md/PLAN.md. Before every commit, check the diff for such details.
 - `3rdparty/*` are submodules (mainui, library_suffix, ...). Changes there need a fork of that
   submodule — avoid if possible and note it in PLAN.md when unavoidable.
 
@@ -147,9 +154,8 @@ Docker Desktop must be in **Linux containers** mode.
     (default `blastcorpse1`). The user works on this PC: the server window must open minimized
     without taking the focus. The script does it with `WScript.Shell.Run(cmdline, 7, $false)`
     (7 = SW_SHOWMINNOACTIVE); never use `Start-Process` for it, that pops the window up in front.
-    Command line: `hlds.exe -console -condebug -game valve -dll dlls/server.dll -num_edicts 2047
-    -port 27015 +ip <pc ip> +sv_lan 1 +sv_steam_auth 0 +maxplayers 4 +servercfgfile psptest.cfg
-    +developer 1 +sv_cheats 1 +map <map>`, working directory `C:\Games\hlds\steamapps\common\Half-Life`.
+    The full command line, the HLDS folder and the PC's address are in `tools/dbg/README.md`
+    (untracked, see Conventions).
   - Test scripts (ignored, in `tools/dbg/`): `deploy.sh` (disconnect, push `build-psp/EBOOT.PBP`,
     wait until the game is back), `combat_test.sh` (restarts HLDS on `MAP`, default `blastcorpse1`,
     connects, walks forward into the fight trigger, prints PROF/SVCPROF lines; `FIRE=1` fires the
@@ -157,7 +163,7 @@ Docker Desktop must be in **Linux containers** mode.
     `verify_staged.sh` (builds the staged tree in the container before a commit),
     `ab.sh "<setup A>" "<setup B>"`. **`blastcorpse1` is the combat benchmark**: the user set it up
     so walking a few units forward from the spawn starts a big firefight.
-  - HLDS test server: `valve/psptest.cfg` (cheats, AFK kick off, `rcon_password <see README>`, no map
-    rotation); `tools/psplink/rcon.ps1` is an rcon client
+  - HLDS test server: `valve/psptest.cfg` (cheats, AFK kick off, no map rotation, rcon password in
+    `tools/dbg/README.md`); `tools/psplink/rcon.ps1` is an rcon client
     (`powershell -ExecutionPolicy Bypass -File rcon.ps1 status`).
 - Still avoid restarting HLDS while the PSP is connected; send `disconnect` first.
