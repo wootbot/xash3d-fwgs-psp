@@ -374,3 +374,17 @@ music), launched from the XMB.
   submodel per frame takes the CPU path for local lights. Left in the fight: studio ~13-15
   (engine draws ~6, light sampling ~1.5, client DLL ~5), world 4, brush 3.8, temp entities ~4.5,
   prediction ~4, sound ~4.
+- 2026-11-19 (night): **Chrome on the GE**: one chrome mesh (gun parts, gloves, grunt goggles;
+  chrome textures are also flat shaded) sent its whole submodel through the CPU path, 7-19
+  submodels a frame in the fight including the view model. The skin pass now generates chrome
+  texcoords from the skinned normals (texture matrix per batch, one view direction per batch) and
+  flat shading reads the light ramp at a fixed point: view model 1.4 -> 0.5 ms, StudioDrawPoints
+  ~6.5 -> ~4.5 ms. **Player traces cull brush entities** by the box HLDS links them with (origin +
+  mins/maxs): a trace ~100 -> ~50 us, prediction ~2.5 -> ~1.9 ms per frame. **Temp entity PVS
+  clusters are kept** while the box doesn't move (~70% of shells/gibs lie still): ~6 us -> ~1 us a
+  test on a hit. Client DLL (hlsdk `psp-hl`, commit `psp: client: reuse the bones of unchanged
+  models`): bone setups with the same inputs as the entity's last one (~20%, corpses) copy the
+  cached bones, ~101 -> ~83 us per model. Each change was checked with a temporary recompute
+  against the old path (0 differences). Measured and left alone: func_water is ~330 visible
+  64-unit polygons (~1.7 us warp + ~2.4 us copy to the list each; none culled), studio bbox
+  culling ~5-8 us a model, the mixer loops are ~25 cycles per sample and channel already.
