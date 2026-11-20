@@ -395,3 +395,8 @@ music), launched from the XMB.
   1.4, texture chains 1.9, lightmaps 0.9 ms. Tried and dropped: the child bone matrices on the
   VFPU (the whole bone loop is ~0.7 ms a frame, saved ~0.15). Uncached display list stores are
   faster than cached ones (306 vs 488 us per 64 KB, line fills), so the list stays uncached.
+- 2026-11-20: **Network yield** 1 ms -> 200 us a frame: the stack's threads need ~0.6 ms of it in
+  a firefight, the rest was idle (same packets per frame). Host frame outside the client: events
+  (net yield, debug console, pad) ~0.8 ms, everything else < 0.1 ms. Note: a push with
+  `dbgcon.py update` once came back at the menu without the debug console answering;
+  relaunching from the XMB fixed it.
