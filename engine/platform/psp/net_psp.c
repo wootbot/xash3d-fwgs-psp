@@ -196,13 +196,15 @@ PSP_NetFrame
 
 the network stack's threads receive packets and answer ARP, but they have
 a lower priority than the main thread, which rarely blocks: without this the
-PSP can send but hardly ever receives anything
+PSP can send but hardly ever receives anything. They run while the main
+thread sleeps, ~0.6 ms a frame in a firefight: a short sleep is enough, a
+1 ms one left the CPU idle for the rest of it.
 ==================
 */
 void PSP_NetFrame( void )
 {
 	if( psp_net.stack )
-		sceKernelDelayThread( 1000 );
+		sceKernelDelayThread( 200 );
 }
 
 qboolean PSP_NetIsConnected( void )
