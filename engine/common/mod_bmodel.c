@@ -1350,6 +1350,35 @@ qboolean Mod_BoxVisible( const vec3_t mins, const vec3_t maxs, const byte *visbi
 	return false;
 }
 
+#if XASH_PSP
+/*
+=============
+Mod_BoxClusters
+
+the clusters of the leaves a box touches,
+-1 when there are more than listsize
+=============
+*/
+int Mod_BoxClusters( const vec3_t mins, const vec3_t maxs, int *list, int listsize )
+{
+	if( !worldmodel ) return -1;
+
+	leaflist_t	ll;
+	VectorCopy( mins, ll.mins );
+	VectorCopy( maxs, ll.maxs );
+
+	ll.maxcount = listsize;
+	ll.overflowed = false;
+	ll.topnode = -1;
+	ll.list = list;
+	ll.count = 0;
+
+	Mod_BoxLeafnums_r( &ll, worldmodel->nodes );
+
+	return ll.overflowed ? -1 : ll.count;
+}
+#endif
+
 /*
 =================
 Mod_FindModelOrigin

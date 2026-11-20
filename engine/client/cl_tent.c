@@ -38,6 +38,20 @@ TEMPENTS MANAGEMENT
 static TEMPENTITY *cl_active_tents;
 static TEMPENTITY *cl_free_tents;
 static TEMPENTITY *cl_tempents = NULL;		// entities pool
+#if XASH_PSP
+// the clusters each temp entity's box touches, kept while the box doesn't move:
+// most temp entities are shells and gibs lying still, and walking the BSP for
+// their visibility every frame was ~1.5 ms in a firefight
+typedef struct
+{
+	vec3_t	mins, maxs;
+	model_t	*world;
+	int	count; // 0: not cached
+	int	clusters[4];
+} tentvis_t;
+
+static tentvis_t *cl_tentvis;
+#endif
 
 static model_t *cl_sprite_muzzleflash[MAX_MUZZLEFLASH];	// muzzle flashes
 static model_t *cl_sprite_ricochet = NULL;
@@ -187,6 +201,10 @@ static void CL_ClearTempEnts( void )
 	cl_tempents[GI->max_tents-1].next = NULL;
 	cl_free_tents = cl_tempents;
 	cl_active_tents = NULL;
+#if XASH_PSP
+	if( cl_tentvis )
+		memset( cl_tentvis, 0, sizeof( *cl_tentvis ) * GI->max_tents );
+#endif
 }
 
 /*
@@ -198,6 +216,9 @@ CL_InitTempents
 void CL_InitTempEnts( void )
 {
 	cl_tempents = Mem_Calloc( cls.mempool, sizeof( TEMPENTITY ) * GI->max_tents );
+#if XASH_PSP
+	cl_tentvis = Mem_Calloc( cls.mempool, sizeof( *cl_tentvis ) * GI->max_tents );
+#endif
 	CL_ClearTempEnts();
 
 	// load tempent sprites (glowshell, muzzleflashes etc)
@@ -215,6 +236,11 @@ void CL_FreeTempEnts( void )
 	if( cl_tempents )
 		Mem_Free( cl_tempents );
 	cl_tempents = NULL;
+#if XASH_PSP
+	if( cl_tentvis )
+		Mem_Free( cl_tentvis );
+	cl_tentvis = NULL;
+#endif
 }
 
 /*
@@ -342,6 +368,47 @@ static void CL_TempEntPlaySound( TEMPENTITY *pTemp, float damp )
 	}
 }
 
+#if XASH_PSP
+/*
+==============
+CL_TempEntInPVS
+
+TriBoxInPVS with the clusters of the box kept from the last frame
+==============
+*/
+static qboolean CL_TempEntInPVS( cl_entity_t *pEntity, const vec3_t mins, const vec3_t maxs )
+{
+	const byte *visbits = ref.dllFuncs.Mod_GetCurrentVis( );
+	const TEMPENTITY *pTemp = (const TEMPENTITY *)((byte *)pEntity - offsetof( TEMPENTITY, entity ));
+	const ptrdiff_t i = pTemp - cl_tempents;
+
+	if( !visbits || !cl_tentvis || i < 0 || i >= GI->max_tents )
+		return Mod_BoxVisible( mins, maxs, visbits );
+
+	tentvis_t *v = &cl_tentvis[i];
+
+	if( v->count <= 0 || v->world != cl.worldmodel || !VectorCompare( v->mins, mins ) || !VectorCompare( v->maxs, maxs ))
+	{
+		v->count = Mod_BoxClusters( mins, maxs, v->clusters, ARRAYSIZE( v->clusters ));
+		if( v->count < 0 )
+		{
+			v->count = 0;
+			return Mod_BoxVisible( mins, maxs, visbits );
+		}
+		VectorCopy( mins, v->mins );
+		VectorCopy( maxs, v->maxs );
+		v->world = cl.worldmodel;
+	}
+
+	for( int j = 0; j < v->count; j++ )
+	{
+		if( CHECKVISBIT( visbits, v->clusters[j] ))
+			return true;
+	}
+	return false;
+}
+#endif
+
 /*
 ==============
 CL_TEntAddEntity
@@ -362,7 +429,11 @@ static int CL_TempEntAddEntity( cl_entity_t *pEntity )
 	VectorAdd( pEntity->origin, pEntity->model->maxs, maxs );
 
 	// g-cont. just use PVS from previous frame
+#if XASH_PSP
+	if( CL_TempEntInPVS( pEntity, mins, maxs ))
+#else
 	if( TriBoxInPVS( mins, maxs ))
+#endif
 	{
 		VectorCopy( pEntity->angles, pEntity->curstate.angles );
 		VectorCopy( pEntity->origin, pEntity->curstate.origin );

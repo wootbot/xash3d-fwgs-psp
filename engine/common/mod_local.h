@@ -173,6 +173,9 @@ void Mod_LoadBrushModel( model_t *mod, void *buffer, size_t buffersize, qboolean
 qboolean Mod_TestBmodelLumps( file_t *f, const char *name, byte *mod_base, size_t buffersize, qboolean silent, dlump_t *entities );
 int Mod_FatPVS( const vec3_t org, float radius, byte *visbuffer, int visbytes, qboolean merge, qboolean fullvis, qboolean phs );
 qboolean Mod_BoxVisible( const vec3_t mins, const vec3_t maxs, const byte *visbits );
+#if XASH_PSP
+int Mod_BoxClusters( const vec3_t mins, const vec3_t maxs, int *list, int listsize );
+#endif
 int Mod_CheckLump( const char *filename, const int lump, int *lumpsize );
 int Mod_ReadLump( const char *filename, const int lump, void **lumpdata, int *lumpsize );
 int Mod_SaveLump( const char *filename, const int lump, void *lumpdata, int lumpsize );
