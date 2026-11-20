@@ -207,7 +207,7 @@ extern qboolean psp_nostdout;
 #define PSP_STAGE_MAX 10
 extern const char * volatile psp_stage[PSP_STAGE_MAX];
 extern volatile int psp_stage_depth;
-#define PSP_STAGE_PUSH( name ) do { if( psp_stage_depth < PSP_STAGE_MAX ) psp_stage[psp_stage_depth] = name; psp_stage_depth++; } while( 0 )
+#define PSP_STAGE_PUSH( name ) do { if( (unsigned)psp_stage_depth < PSP_STAGE_MAX ) psp_stage[psp_stage_depth] = name; psp_stage_depth++; } while( 0 )
 #define PSP_STAGE_POP() do { psp_stage_depth--; } while( 0 )
 #define PSP_STAGE( name, x ) do { PSP_STAGE_PUSH( name ); x; PSP_STAGE_POP(); } while( 0 )
 void PSP_NetRegisterCommands( void );
