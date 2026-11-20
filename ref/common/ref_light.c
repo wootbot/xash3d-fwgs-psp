@@ -498,7 +498,8 @@ R_EntitySeesSky
 
 the sky test traces across the whole map, ~45 us per model on the PSP, and
 gives the same answer while the entity stays where it is: remember it per
-entity until the entity moves 8 units (or for a second at most)
+entity until the entity moves 32 units (or for a second at most): a soldier
+running at 15 units per frame missed an 8 unit cache every frame
 ===============
 */
 static qboolean R_EntitySeesSky( const cl_entity_t *ent, const vec3_t origin, const vec3_t skyvec, float time, const vec3_t start, const vec3_t end )
@@ -511,10 +512,11 @@ static qboolean R_EntitySeesSky( const cl_entity_t *ent, const vec3_t origin, co
 		float time;
 		qboolean sky;
 	} cache[256];
-	typeof( cache[0] ) *c = &cache[ent->index & ( ARRAYSIZE( cache ) - 1 )];
+	// by address: temp entities (shells, gibs) all have index 0
+	typeof( cache[0] ) *c = &cache[((uint)(uintptr_t)ent * 2654435761u ) >> 24];
 
 	if( c->ent == ent && c->world == gp_cl->models[1] && VectorCompare( c->skyvec, skyvec )
-		&& VectorDistance2( c->origin, origin ) < 8.0f * 8.0f && time >= c->time && time < c->time + 1.0f )
+		&& VectorDistance2( c->origin, origin ) < 32.0f * 32.0f && time >= c->time && time < c->time + 1.0f )
 		return c->sky;
 
 	const msurface_t *psurf = gEngfuncs.EV_TraceSurface( 0, (float *)start, (float *)end );

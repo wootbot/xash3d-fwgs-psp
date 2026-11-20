@@ -23,6 +23,7 @@ GNU General Public License for more details.
 #include "pm_local.h"
 #include "gu_extension.h"
 #include <malloc.h>
+#include <pspkernel.h>
 
 #define EVENT_CLIENT	5000	// less than this value it's a server-side studio events
 #define MAX_LOCALLIGHTS	4
@@ -2552,37 +2553,114 @@ per batch: its bones, the skin pass (writes depth), the lighting pass
 */
 static const uint *ge_last_skinblock; // state to restore after GE meshes
 
+/*
+the skin pass state of each texture (bind, texture scale, depth and blend
+state) as a persistent call block: building it costs ~10 us, and with ~70
+textures in a firefight that was 0.7 ms per frame. Checked against what it
+was built from on every use, rebuilt when a texture or a cvar changed.
+*/
+typedef struct
+{
+	uint		*block;
+	uint		words, capacity;
+	const void	*data, *palette;	// gl_texture_t the block points to
+	int		format, width, height, numMips, flags;
+	int		skinw, skinh;	// mstudiotexture_t size for the texture scale
+	float		cvars[5];
+} geskin_t;
+
+static geskin_t	*ge_skins; // MAX_TEXTURES, allocated on first use
+
+static void R_StudioGESkinKey( const gl_texture_t *t, const mstudiotexture_t *ptex, geskin_t *k )
+{
+	k->data = t->dstTexture;
+	k->palette = t->dstPalette;
+	k->format = t->format;
+	k->width = t->width;
+	k->height = t->height;
+	k->numMips = t->numMips;
+	k->flags = t->flags;
+	k->skinw = ptex->width;
+	k->skinh = ptex->height;
+	k->cvars[0] = gl_texture_nearest.value;
+	k->cvars[1] = gl_texture_lodfunc.value;
+	k->cvars[2] = gl_texture_lodbias.value;
+	k->cvars[3] = gl_texture_lodslope.value;
+	k->cvars[4] = gl_lightmap_nearest.value;
+}
+
+static qboolean R_StudioGESkinMatches( const geskin_t *a, const geskin_t *b )
+{
+	return a->data == b->data && a->palette == b->palette && a->format == b->format && a->width == b->width
+		&& a->height == b->height && a->numMips == b->numMips && a->flags == b->flags && a->skinw == b->skinw
+		&& a->skinh == b->skinh && !memcmp( a->cvars, b->cvars, sizeof( a->cvars ));
+}
+
+static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int skinindex )
+{
+	uint *start = extGuBlockBegin();
+
+	glState.currentTexture = 0; // force GL_Bind to emit everything
+	R_StudioSetupSkin( m_pStudioHeader, skinindex );
+	// texcoords are the raw texel shorts: u = s / 32768 * scale
+	sceGuTexScale( 32768.0f / ptex->width, 32768.0f / ptex->height );
+	sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
+	sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 );
+	sceGuDepthFunc( GU_LEQUAL );
+	sceGuDepthMask( GU_FALSE );
+	sceGuDisable( GU_BLEND );
+	const uint *block = extGuBlockEnd( start );
+	return block;
+}
+
+static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinindex )
+{
+	const int texnum = ptex->index;
+
+	// remapped player skins differ per entity, r_lightmap binds the white texture
+	if( m_fDoRemap || r_lightmap->value || texnum <= 0 || texnum >= MAX_TEXTURES )
+		return R_StudioGEBuildSkinBlock( ptex, skinindex );
+
+	if( !ge_skins && !( ge_skins = calloc( MAX_TEXTURES, sizeof( *ge_skins ))))
+		return R_StudioGEBuildSkinBlock( ptex, skinindex );
+
+	geskin_t *s = &ge_skins[texnum];
+	geskin_t key;
+
+	R_StudioGESkinKey( R_GetTexture( texnum ), ptex, &key );
+	if( s->block && R_StudioGESkinMatches( s, &key ))
+	{
+		glState.currentTexture = texnum; // what the block binds
+		return s->block;
+	}
+
+	const uint *frame_block = R_StudioGEBuildSkinBlock( ptex, skinindex );
+	const uint words = extGuCmdBegin() - frame_block; // up to and including the RET
+
+	if( words > s->capacity )
+	{
+		// an old block may still be called from the list the GE is drawing:
+		// only happens when a texture or a cvar changed, let it leak
+		uint *mem = memalign( 16, words * sizeof( uint ));
+		if( !mem )
+			return frame_block;
+		s->block = mem;
+		s->capacity = words;
+	}
+
+	memcpy( s->block, frame_block, words * sizeof( uint ));
+	sceKernelDcacheWritebackRange( s->block, words * sizeof( uint ));
+	s->words = words;
+	key.block = s->block;
+	key.words = s->words;
+	key.capacity = s->capacity;
+	*s = key;
+	return frame_block;
+}
+
 static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *ptex, int skinindex, const uint *lightblock )
 {
-	// skin pass state, one block per texture and frame
-	static struct { const mstudiotexture_t *tex; const uint *block; uint frame; } skincache[256];
-	const uint slot = ((uint)ptex / sizeof( *ptex )) & 255;
-	const uint *skinblock;
-	const qboolean cacheable = !m_fDoRemap && !r_lightmap->value; // remapped player skins differ per entity
-
-	if( cacheable && skincache[slot].tex == ptex && skincache[slot].frame == guRender.vert_frame )
-		skinblock = skincache[slot].block;
-	else
-	{
-		uint *start = extGuBlockBegin();
-
-		glState.currentTexture = 0; // force GL_Bind to emit everything
-		R_StudioSetupSkin( m_pStudioHeader, skinindex );
-		// texcoords are the raw texel shorts: u = s / 32768 * scale
-		sceGuTexScale( 32768.0f / ptex->width, 32768.0f / ptex->height );
-		sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
-		sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 );
-		sceGuDepthFunc( GU_LEQUAL );
-		sceGuDepthMask( GU_FALSE );
-		sceGuDisable( GU_BLEND );
-		skinblock = extGuBlockEnd( start );
-		if( cacheable )
-		{
-			skincache[slot].tex = ptex;
-			skincache[slot].block = skinblock;
-			skincache[slot].frame = guRender.vert_frame;
-		}
-	}
+	const uint *skinblock = R_StudioGESkinBlock( ptex, skinindex );
 
 	uint *p = extGuCmdBegin();
 	for( int i = 0; i < gmesh->numbatches; i++ )
