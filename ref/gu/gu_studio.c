@@ -2605,6 +2605,9 @@ static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int s
 	// texcoords are the raw texel shorts: u = s / 32768 * scale
 	sceGuTexScale( 32768.0f / ptex->width, 32768.0f / ptex->height );
 	sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
+	// the batches have no vertex color: the GE modulates with the material
+	// color instead, which is whatever sceGuColor was last (blood sprites, shells)
+	sceGuColor( 0xffffffff );
 	sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 );
 	sceGuDepthFunc( GU_LEQUAL );
 	sceGuDepthMask( GU_FALSE );
