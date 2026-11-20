@@ -326,24 +326,63 @@ loc0:
 PM_PhysEntOutOfReach
 
 broad phase: true when the player box swept from start to end can't touch this physent,
-so tracing against it can't change the result (the server culls by entity bounds the same way)
+so tracing against it can't change the result. The server culls the same way: its traces
+only clip against entities whose link box (SV_LinkEdict: origin + mins/maxs, a cube of
+the radius for rotated brush models, one unit larger) touches the move.
 ==================
 */
 static qboolean PM_PhysEntOutOfReach( const playermove_t *pmove, const physent_t *pe, const vec3_t start, const vec3_t end )
 {
 	const float *pmins = host.player_mins[pmove->usehull];
 	const float *pmaxs = host.player_maxs[pmove->usehull];
+	vec3_t emins, emaxs;
 
-	// brush models can have clip brushes outside their bounds, so only boxes and studio models
-	if( pe->model || pe->solid == SOLID_CUSTOM )
+	if( pe->solid == SOLID_CUSTOM )
 		return false;
+
+	if( pe->model )
+	{
+		// brush models: no bounds sent, nothing to cull by
+		if( VectorIsNull( pe->mins ) && VectorIsNull( pe->maxs ))
+			return false;
+
+		if( !VectorIsNull( pe->angles ))
+		{
+			float r = 0.0f;
+
+			for( int j = 0; j < 3; j++ )
+			{
+				r = Q_max( r, fabsf( pe->mins[j] ));
+				r = Q_max( r, fabsf( pe->maxs[j] ));
+			}
+			VectorSet( emins, -r, -r, -r );
+			VectorSet( emaxs, r, r, r );
+		}
+		else
+		{
+			VectorCopy( pe->mins, emins );
+			VectorCopy( pe->maxs, emaxs );
+		}
+
+		// the link box is one unit larger
+		for( int j = 0; j < 3; j++ )
+		{
+			emins[j] -= 1.0f;
+			emaxs[j] += 1.0f;
+		}
+	}
+	else
+	{
+		VectorCopy( pe->mins, emins );
+		VectorCopy( pe->maxs, emaxs );
+	}
 
 	for( int j = 0; j < 3; j++ )
 	{
 		float lo = Q_min( start[j], end[j] ) + pmins[j] - 1.0f;
 		float hi = Q_max( start[j], end[j] ) + pmaxs[j] + 1.0f;
 
-		if( lo > pe->origin[j] + pe->maxs[j] || hi < pe->origin[j] + pe->mins[j] )
+		if( lo > pe->origin[j] + emaxs[j] || hi < pe->origin[j] + emins[j] )
 			return true;
 	}
 
