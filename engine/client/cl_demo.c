@@ -856,9 +856,6 @@ static qboolean CL_DemoReadMessageQuake( byte *buffer, size_t *length )
 			// so the bogus time on the first frame doesn't count
 			if( host.framecount == cls.td_startframe + 1 )
 				cls.td_starttime = host.realtime;
-#if XASH_PSP
-			CL_TimeDemoFrame();
-#endif
 		}
 		else if( cl.time <= cl.mtime[0] )
 		{
@@ -1030,6 +1027,10 @@ qboolean CL_DemoReadMessage( byte *buffer, size_t *length )
 	}
 
 	tdlastdemoframe = host.framecount;
+#if XASH_PSP
+	if( cls.timedemo && cls.state == ca_active )
+		CL_TimeDemoFrame();
+#endif
 
 	if( !cls.demofile )
 		return false;
