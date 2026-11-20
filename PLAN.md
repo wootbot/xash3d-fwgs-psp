@@ -349,3 +349,14 @@ music), launched from the XMB.
   **Wi-Fi stopped working** after a TEMP-profiling client PRX (+24 KB BSS) was pushed: only
   ~32 KB of user memory were left once Wi-Fi was up, the inet module failed with 0x800208d9.
   Heap threshold 3 MB -> 3.25 MB (290 KB free in the menu now).
+- 2026-11-19 (night): **Studio models skinned and lit on the GE** (`r_studio_ge`, default on):
+  static per-model batches of <= 8 bones, bone matrices relative to the eye, lighting as a second
+  pass from a 32-texel ramp indexed by the GE's texture matrix on the skinned normal (exact GoldSrc
+  wrap lambert + gamma; screenshots match the CPU path to ~2.5%, less than two idle frames differ).
+  Batches and state are CALLed sub-lists. **blastcorpse1 before the fight (25 models): engine studio
+  9.7 -> 4.3 ms, frame 26.4 -> ~23.5 ms.** In the fight the gain is smaller (st_points ~10.5 -> ~7.5)
+  because models lit by muzzle flashes (local lights) take the CPU path: exact local lights need the
+  LinearGamma/ScreenGamma math per vertex; GE point lights would only approximate them. Writing
+  per-frame vertices to VRAM instead of the RAM display list: ~0.5 ms. Left in the GE path: skin
+  state blocks ~0.6 ms (rebuilt per frame), bone uploads ~0.4 ms, ramp + light block ~0.4 ms.
+  `tools/dbg/shots.sh` / `fetch.sh` (with retries) take and fetch screenshots over the debug console.
