@@ -360,3 +360,17 @@ music), launched from the XMB.
   per-frame vertices to VRAM instead of the RAM display list: ~0.5 ms. Left in the GE path: skin
   state blocks ~0.6 ms (rebuilt per frame), bone uploads ~0.4 ms, ramp + light block ~0.4 ms.
   `tools/dbg/shots.sh` / `fetch.sh` (with retries) take and fetch screenshots over the debug console.
+- 2026-11-19 (late): **Syscall per draw removed**: in a GU_DIRECT list every `sceGuGetMemory` and
+  `sceGuDrawArray` moves the GE stall address (a syscall). World/brush polygons, water, sky, sprites,
+  particles, decals, triapi and 2D now use no-stall variants and update the stall every 16 draws:
+  blastcorpse1 fight world 5.5 -> 4.0 ms, func_water 1.9 -> 1.4 ms (~330 polys, ~1,330 vertices),
+  brush solids 0.6 -> 0.4, HUD/sprites ~0.5 less. GE skin state blocks are persistent per texture
+  (were rebuilt ~70 times a frame, ~0.7 ms); the per-entity sky test cache is keyed by address
+  (temp entities all have index 0) with a 32 unit radius. Fight windows now ~41-50 ms per frame
+  (was ~50-55) with 47-62 models. **Bug fixed**: GE-skinned models were modulated by the last
+  `sceGuColor` (the batches have no vertex color): the view model flickered red/gold after blood
+  sprites and shells. Measured and left alone: mixer (fixed-point already; ~25 channels in a
+  fight, ~3.7 ms), temp entity PVS test (~5 us/call, an early-exit walk didn't help), only ~1
+  submodel per frame takes the CPU path for local lights. Left in the fight: studio ~13-15
+  (engine draws ~6, light sampling ~1.5, client DLL ~5), world 4, brush 3.8, temp entities ~4.5,
+  prediction ~4, sound ~4.
