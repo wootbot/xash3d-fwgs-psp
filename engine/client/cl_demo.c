@@ -16,6 +16,9 @@ GNU General Public License for more details.
 #include "common.h"
 #include "client.h"
 #include "net_encode.h"
+#if XASH_PSP
+static void CL_TimeDemoFrame( void );
+#endif
 
 #define dem_unknown		0	// unknown command
 #define dem_norewind	1	// startup message
@@ -853,6 +856,9 @@ static qboolean CL_DemoReadMessageQuake( byte *buffer, size_t *length )
 			// so the bogus time on the first frame doesn't count
 			if( host.framecount == cls.td_startframe + 1 )
 				cls.td_starttime = host.realtime;
+#if XASH_PSP
+			CL_TimeDemoFrame();
+#endif
 		}
 		else if( cl.time <= cl.mtime[0] )
 		{
@@ -1131,6 +1137,69 @@ void CL_DemoInterpolateAngles( void )
 	else VectorCopy( cl.cmd.viewangles, cl.viewangles );
 }
 
+#if XASH_PSP
+/*
+==============
+timedemo frame times
+
+the timedemo result counts the level load (its clock starts on the second
+frame, still in the resource list): ~6 s of a 28 s run of fight1. These
+count only the frames after the client is in game, and the slow ones, which
+is what a frame rate target is about: the average hides the dips.
+==============
+*/
+#define TD_MAXFRAMES 8192
+static struct
+{
+	double	last;
+	int	count;
+	float	dt[TD_MAXFRAMES];
+} td_stats;
+
+static void CL_TimeDemoFrame( void )
+{
+	if( td_stats.last > 0.0 && td_stats.count < TD_MAXFRAMES )
+		td_stats.dt[td_stats.count++] = host.realtime - td_stats.last;
+	td_stats.last = host.realtime;
+}
+
+static int CL_TimeDemoCompare( const void *a, const void *b )
+{
+	const float x = *(const float *)a, y = *(const float *)b;
+	return ( x < y ) - ( x > y ); // slowest first
+}
+
+static void CL_TimeDemoReport( void )
+{
+	const int n = td_stats.count;
+	double total = 0.0;
+	int over16 = 0, over10 = 0;
+
+	td_stats.last = 0.0;
+	td_stats.count = 0;
+	if( n <= 0 )
+		return;
+
+	for( int i = 0; i < n; i++ )
+	{
+		total += td_stats.dt[i];
+		if( td_stats.dt[i] > 1.0f / 60.0f ) over16++;
+		if( td_stats.dt[i] > 1.0f / 100.0f ) over10++;
+	}
+
+	qsort( td_stats.dt, n, sizeof( td_stats.dt[0] ), CL_TimeDemoCompare );
+
+	// average fps of the slowest 1% of the frames
+	const int low = Q_max( 1, n / 100 );
+	double lowtime = 0.0;
+	for( int i = 0; i < low; i++ )
+		lowtime += td_stats.dt[i];
+
+	Con_Printf( "timedemo in game: %i frames %5.3f seconds %5.1f fps, 1%% low %5.1f fps, min %5.1f fps, %i frames under 60 fps, %i under 100\n",
+		n, total, n / total, low / lowtime, 1.0f / td_stats.dt[0], over16, over10 );
+}
+#endif
+
 /*
 ==============
 CL_FinishTimeDemo
@@ -1153,6 +1222,9 @@ static void CL_FinishTimeDemo( void )
 
 	host.allow_console = true;
 	Con_Printf( "timedemo result: %i frames %5.3f seconds %5.3f fps\n", frames, time, frames / time );
+#if XASH_PSP
+	CL_TimeDemoReport();
+#endif
 	host.allow_console = temp;
 
 	if( Sys_CheckParm( "-timedemo" ))
@@ -1613,6 +1685,10 @@ void CL_TimeDemo_f( void )
 	// cls.td_starttime will be grabbed at the second frame of the demo, so
 	// all the loading time doesn't get counted
 	cls.timedemo = true;
+#if XASH_PSP
+	td_stats.last = 0.0;
+	td_stats.count = 0;
+#endif
 	cls.td_starttime = host.realtime;
 	cls.td_startframe = host.framecount;
 	cls.td_lastframe = -1;		// get a new message this frame
