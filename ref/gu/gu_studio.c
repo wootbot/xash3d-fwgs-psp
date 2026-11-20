@@ -148,6 +148,10 @@ R_StudioInit
 
 ====================
 */
+#if XASH_PSP
+static convar_t r_studio_precull;
+#endif
+
 void R_StudioInit( void )
 {
 
@@ -157,6 +161,9 @@ void R_StudioInit( void )
 #endif
 
 	Matrix3x4_LoadIdentity( g_studio.rotationmatrix );
+#if XASH_PSP
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_precull );
+#endif
 
 	g_studio.interpolate = true;
 	g_studio.framecount = 0;
@@ -4155,6 +4162,82 @@ static cl_entity_t *R_FindParentEntity( cl_entity_t *e, cl_entity_t **entities, 
 	return NULL;
 }
 
+#if XASH_PSP
+/*
+=================
+R_StudioPreCull
+
+A frustum test before the client DLL's StudioDrawModel: in a firefight ~60%
+of the studio models in the PVS are off screen (gibs, shells, grunts behind
+the player), and the client only finds that out after its header, transform
+(sines, matrices) and bbox calls. A sphere around everything
+R_StudioComputeBBox could see (model box and the current sequence's box, in
+any rotation), so it only skips what the client would cull too, which also
+skips its events: StudioDrawModel returns before them for culled models.
+=================
+*/
+static CVAR_DEFINE_AUTO( r_studio_precull, "1", FCVAR_ARCHIVE, "cull studio models off screen before the client renderer sees them" );
+
+static qboolean R_StudioPreCull( cl_entity_t *e )
+{
+	const model_t *mod = e->model;
+
+	if( !r_studio_precull.value || r_nocull.value || !mod || mod->type != mod_studio )
+		return false;
+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || e == tr.viewent || e->curstate.renderfx == kRenderFxDeadPlayer )
+		return false;
+
+	const studiohdr_t *hdr = (const studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, (model_t *)mod );
+	if( !hdr || hdr->numseq <= 0 )
+		return false;
+
+	int seq = e->curstate.sequence;
+	if( seq < 0 || seq >= hdr->numseq )
+		seq = 0;
+	const mstudioseqdesc_t *pseqdesc = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex) + seq;
+
+	// the farthest corner of the union box from the origin
+	float r2 = 0.0f;
+	for( int i = 0; i < 3; i++ )
+	{
+		float lo = pseqdesc->bbmin[i], hi = pseqdesc->bbmax[i];
+
+		if( !VectorIsNull( mod->mins ) && !VectorIsNull( mod->maxs ))
+		{
+			lo = Q_min( lo, mod->mins[i] );
+			hi = Q_max( hi, mod->maxs[i] );
+		}
+		const float m = Q_max( fabsf( lo ), fabsf( hi ));
+		r2 += m * m;
+	}
+
+	float r = sqrtf( r2 );
+	if( e->curstate.scale > 1.0f )
+		r *= e->curstate.scale;
+
+	// StudioSetUpTransform moves MOVETYPE_STEP models by ( origin - prevorigin ) * ( f - 1 ),
+	// f = ( time - animtime ) / ( animtime - prevanimtime ) while animtime is less than 1 s old
+	if( e->curstate.movetype == MOVETYPE_STEP )
+	{
+		const float t = gp_cl->time;
+		float f = 0.0f;
+
+		if( t < e->curstate.animtime + 1.0f && e->curstate.animtime != e->latched.prevanimtime )
+			f = ( t - e->curstate.animtime ) / ( e->curstate.animtime - e->latched.prevanimtime );
+
+		vec3_t d;
+		VectorSubtract( e->origin, e->latched.prevorigin, d );
+		r += sqrtf( DotProduct( d, d )) * ( fabsf( f ) + 1.0f );
+	}
+	r += 16.0f;
+
+	const vec3_t mins = { e->origin[0] - r, e->origin[1] - r, e->origin[2] - r };
+	const vec3_t maxs = { e->origin[0] + r, e->origin[1] + r, e->origin[2] + r };
+
+	return R_CullBox( mins, maxs );
+}
+#endif
+
 /*
 =================
 R_DrawStudioModel
@@ -4196,6 +4279,10 @@ void R_DrawStudioModel( cl_entity_t *e )
 	}
 	else
 	{
+#if XASH_PSP
+		if( R_StudioPreCull( e ))
+			return;
+#endif
 		R_StudioDrawModelInternal( e, STUDIO_RENDER|STUDIO_EVENTS );
 	}
 }
