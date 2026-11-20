@@ -861,7 +861,7 @@ float *R_DecalSetupVerts( decal_t *pDecal, msurface_t *surf, int texture, int *o
 
 static void GU_DrawDecalPoly( const float *v, int numVerts, int st )
 {
-	gu_vert_t *const out = sceGuGetMemory( sizeof( gu_vert_t ) * numVerts );
+	gu_vert_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_t ) * numVerts );
 
 	for( int i = 0; i < numVerts; i++, v += VERTEXSIZE )
 	{
@@ -870,7 +870,7 @@ static void GU_DrawDecalPoly( const float *v, int numVerts, int st )
 		VectorCopy( v, out[i].xyz );
 	}
 
-	sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numVerts, 0, out );
+	extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numVerts, out );
 }
 
 void DrawSingleDecal( decal_t *pDecal, msurface_t *fa )

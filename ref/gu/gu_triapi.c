@@ -157,7 +157,7 @@ void TriEnd( void )
 	if( triContext.count > 0 )
 	{
 		extGuEndPacket(( void * )triContext.end );
-		sceGuDrawArray( triContext.prim, triContext.flags, triContext.count, 0, triContext.start );
+		extGuDrawArrayBatched( triContext.prim, triContext.flags, triContext.count, triContext.start );
 	}
 
 	triContext.start = NULL;

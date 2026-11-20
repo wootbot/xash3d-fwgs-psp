@@ -107,7 +107,7 @@ void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float 
 		if( vert_count )
 		{
 			extGuEndPacket( out + vert_count );
-			sceGuDrawArray( GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF, vert_count, 0, out );
+			extGuDrawArrayBatched( GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF, vert_count, out );
 		}
 
 		sceGuEnable( GU_TEXTURE_2D );
@@ -169,7 +169,7 @@ void CL_DrawParticles( double frametime, particle_t *cl_active_particles, float 
 		if( vert_count )
 		{
 			extGuEndPacket( out + vert_count );
-			sceGuDrawArray( GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, vert_count, 0, out );
+			extGuDrawArrayBatched( GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, vert_count, out );
 		}
 	}
 
@@ -301,7 +301,7 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 			color24 color = gTracerColors[p->color];
 			sceGuColor( GUCOLOR4UB( color.r, color.g, color.b, p->unused ));
 
-			gu_vert_ftv_t *const out = sceGuGetMemory( sizeof( gu_vert_ftv_t ) * 4 );
+			gu_vert_ftv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_ftv_t ) * 4 );
 
 			for( int i = 0; i < 4; i++ )
 			{
@@ -311,7 +311,7 @@ void CL_DrawTracers( double frametime, particle_t *cl_active_tracers )
 				out[i].y = verts[order[i]][1];
 				out[i].z = verts[order[i]][2];
 			}
-			sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, 4, 0, out );
+			extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, 4, out );
 		}
 
 		// evaluate position

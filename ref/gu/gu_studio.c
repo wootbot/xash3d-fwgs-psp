@@ -3104,7 +3104,7 @@ static void R_StudioDrawBones( void )
 
 	for( int i = 0; i < m_pStudioHeader->numbones; i++ )
 	{
-		gu_vert_fcv_t *const out = sceGuGetMemory( sizeof( gu_vert_fcv_t ) * 2 );
+		gu_vert_fcv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_fcv_t ) * 2 );
 
 		Matrix3x4_OriginFromMatrix( g_studio.bonestransform[i], point );
 		out[1].c = pbones[i].parent >= 0 ? GU_COLOR( 0.0f, 0.0f, 0.8f, 1.0f ) : GU_COLOR( 0.8f, 0.0f, 0.0f, 1.0f );
@@ -3115,10 +3115,10 @@ static void R_StudioDrawBones( void )
 			Matrix3x4_OriginFromMatrix( g_studio.bonestransform[pbones[i].parent], point );
 			out[0].c = GU_COLOR( 1.0f, 0.7f, 0.0f, 1.0f );
 			VectorCopy( point, &out[0].x );
-			sceGuDrawArray( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 2, 0, out );
+			extGuDrawArrayBatched( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 2, out );
 		}
 
-		sceGuDrawArray( GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF, 1, 0, &out[1] );
+		extGuDrawArrayBatched( GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF, 1, &out[1] );
 	}
 
 	sceGuEnable( GU_TEXTURE_2D );
@@ -3139,7 +3139,7 @@ static void R_StudioDrawAttachments( void )
 		Matrix3x4_VectorTransform( g_studio.bonestransform[pattachments[i].bone], pattachments[i].vectors[1], v[2] );
 		Matrix3x4_VectorTransform( g_studio.bonestransform[pattachments[i].bone], pattachments[i].vectors[2], v[3] );
 
-		gu_vert_fcv_t *const out = sceGuGetMemory( sizeof( gu_vert_fcv_t ) * 6 );
+		gu_vert_fcv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_fcv_t ) * 6 );
 
 		for( int j = 0; j < 3; j++ )
 		{
@@ -3149,7 +3149,7 @@ static void R_StudioDrawAttachments( void )
 			VectorCopy( v[j + 1], &out[j * 2 + 1].x );
 		}
 
-		sceGuDrawArray( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 6, 0, out );
+		extGuDrawArrayBatched( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 6, out );
 	}
 
 	sceGuEnable( GU_TEXTURE_2D );
@@ -3477,7 +3477,7 @@ static void R_StudioDrawPointsShadow( void )
 				i = -i;
 			}
 
-			gu_vert_fv_t *const out = sceGuGetMemory( sizeof( gu_vert_fv_t ) * i );
+			gu_vert_fv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_fv_t ) * i );
 
 			for( int index = 0; index < i; index++, ptricmds += 4 )
 			{
@@ -3487,7 +3487,7 @@ static void R_StudioDrawPointsShadow( void )
 				out[index].z = g_studio.lightspot[2] + 1.0f;
 			}
 
-			sceGuDrawArray( prim, GU_VERTEX_32BITF, i, 0, out );
+			extGuDrawArrayBatched( prim, GU_VERTEX_32BITF, i, out );
 		}
 	}
 
@@ -3619,7 +3619,7 @@ static void R_StudioRenderFinal( void )
 		sceGuDisable( GU_TEXTURE_2D );
 		sceGuDisable( GU_DEPTH_TEST );
 
-		gu_vert_fcv_t *const out = sceGuGetMemory( sizeof( gu_vert_fcv_t ) * 4 );
+		gu_vert_fcv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_fcv_t ) * 4 );
 
 		Matrix3x4_OriginFromMatrix( g_studio.rotationmatrix, origin );
 		out[0].c = out[1].c = GU_COLOR( 1.0f, 0.5f, 0.0f, 1.0f );
@@ -3631,7 +3631,7 @@ static void R_StudioRenderFinal( void )
 		VectorCopy( g_studio.lightspot, &out[2].x );
 		VectorCopy( origin, &out[3].x );
 
-		sceGuDrawArray( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 4, 0, out );
+		extGuDrawArrayBatched( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 4, out );
 
 		sceGuEnable( GU_DEPTH_TEST );
 		sceGuEnable( GU_TEXTURE_2D );

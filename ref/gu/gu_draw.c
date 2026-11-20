@@ -45,7 +45,7 @@ void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, f
 	x += glState.offset2D[0];
 	y += glState.offset2D[1];
 
-	gu_vert_htv_t *const out = sceGuGetMemory( sizeof( gu_vert_htv_t ) * 2 );
+	gu_vert_htv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_htv_t ) * 2 );
 	out[0].u = s1 * glt->width;
 	out[0].v = t1 * glt->height;
 	out[0].x = x;
@@ -56,7 +56,7 @@ void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, f
 	out[1].x = x + w;
 	out[1].y = y + h;
 	out[1].z = 0;
-	sceGuDrawArray( GU_SPRITES, GU_TEXTURE_16BIT | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, out );
+	extGuDrawArrayBatched( GU_SPRITES, GU_TEXTURE_16BIT | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, out );
 }
 
 /*
@@ -80,14 +80,14 @@ void CL_FillRGBA( int rendermode, float x, float y, float w, float h, byte r, by
 	x += glState.offset2D[0];
 	y += glState.offset2D[1];
 
-	gu_vert_hv_t *const out = sceGuGetMemory( sizeof( gu_vert_hv_t ) * 2 );
+	gu_vert_hv_t *const out = extGuGetMemoryNoStall( sizeof( gu_vert_hv_t ) * 2 );
 	out[0].x = x;
 	out[0].y = y;
 	out[0].z = 0;
 	out[1].x = x + w;
 	out[1].y = y + h;
 	out[1].z = 0;
-	sceGuDrawArray( GU_SPRITES, GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, out );
+	extGuDrawArrayBatched( GU_SPRITES, GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, out );
 
 	sceGuColor( 0xffffffff );
 	sceGuEnable( GU_TEXTURE_2D );

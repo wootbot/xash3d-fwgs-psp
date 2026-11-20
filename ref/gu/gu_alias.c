@@ -637,7 +637,7 @@ static void GL_DrawAliasFrame( aliashdr_t *paliashdr )
 			prim = GU_TRIANGLE_STRIP;
 		}
 
-		gu_vert_ftcv_t* const out = ( gu_vert_ftcv_t* )sceGuGetMemory( sizeof( gu_vert_ftcv_t ) * count );
+		gu_vert_ftcv_t* const out = ( gu_vert_ftcv_t* )extGuGetMemoryNoStall( sizeof( gu_vert_ftcv_t ) * count );
 		for( int index = 0; index < count; index++ )
 		{
 			out[index].u = ((float *)order)[0];
@@ -657,7 +657,7 @@ static void GL_DrawAliasFrame( aliashdr_t *paliashdr )
 			out[index].z = vert[2];
 			verts0++, verts1++;
 		}
-		sceGuDrawArray( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, count, 0, out );
+		extGuDrawArrayBatched( prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF, count, out );
 	}
 }
 
@@ -702,7 +702,7 @@ static void GL_DrawAliasShadow( aliashdr_t *paliashdr )
 			prim = GU_TRIANGLE_STRIP;
 		}
 
-		gu_vert_fv_t* const out = ( gu_vert_fv_t* )sceGuGetMemory( sizeof( gu_vert_fv_t ) * count );
+		gu_vert_fv_t* const out = ( gu_vert_fv_t* )extGuGetMemoryNoStall( sizeof( gu_vert_fv_t ) * count );
 		for( int index = 0; index < count; index++ )
 		{
 			// texture coordinates come from the draw list
@@ -727,7 +727,7 @@ static void GL_DrawAliasShadow( aliashdr_t *paliashdr )
 
 			verts0++, verts1++;
 		}
-		sceGuDrawArray( prim, GU_VERTEX_32BITF, count, 0, out );
+		extGuDrawArrayBatched( prim, GU_VERTEX_32BITF, count, out );
 	}
 
 	if( glState.stencilEnabled )
@@ -875,7 +875,7 @@ static void R_AliasDrawLightTrace( cl_entity_t *e )
 		sceGuDisable( GU_TEXTURE_2D );
 		sceGuDisable( GU_DEPTH_TEST );
 
-		gu_vert_fcv_t* out = ( gu_vert_fcv_t* )sceGuGetMemory( sizeof( gu_vert_fcv_t ) * 4 );
+		gu_vert_fcv_t* out = ( gu_vert_fcv_t* )extGuGetMemoryNoStall( sizeof( gu_vert_fcv_t ) * 4 );
 		out[0].c = GU_COLOR( 1.0f, 0.5f, 0.0f, 1.0f );
 		out[0].x = e->origin[0];
 		out[0].y = e->origin[1];
@@ -893,14 +893,14 @@ static void R_AliasDrawLightTrace( cl_entity_t *e )
 		out[3].x = origin[0];
 		out[3].y = origin[1];
 		out[3].z = origin[2];
-		sceGuDrawArray( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 4, 0, out );
+		extGuDrawArrayBatched( GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF, 4, out );
 
-		out = ( gu_vert_fcv_t* )sceGuGetMemory( sizeof( gu_vert_fcv_t ) );
+		out = ( gu_vert_fcv_t* )extGuGetMemoryNoStall( sizeof( gu_vert_fcv_t ) );
 		out->c = GU_COLOR( 1.0f, 0.0f, 0.0f, 1.0f );
 		out->x = g_alias.lightspot[0];
 		out->y = g_alias.lightspot[1];
 		out->z = g_alias.lightspot[2];
-		sceGuDrawArray( GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF, 1, 0, out );
+		extGuDrawArrayBatched( GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF, 1, out );
 
 		sceGuEnable( GU_DEPTH_TEST );
 		sceGuEnable( GU_TEXTURE_2D );

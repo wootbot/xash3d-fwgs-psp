@@ -214,9 +214,9 @@ static void GU_DrawClippedPoly( gu_vert_t *verts, int numverts )
 		int cvc;
 
 		GU_Clip( verts, numverts, &cv, &cvc );
-		if( cvc ) sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, cvc, 0, cv );
+		if( cvc ) extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, cvc, cv );
 	}
-	else sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numverts, 0, verts );
+	else extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numverts, verts );
 }
 
 /*
@@ -245,7 +245,7 @@ void R_AddSkyBoxSurface( msurface_t *fa )
 		gu_poly_t *p = GU_POLYS( fa );
 
 		// draw the sky poly
-		sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, p->numverts, 0, p->verts );
+		extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, p->numverts, p->verts );
 	}
 
 	// calculate vertex values for sky box
@@ -303,7 +303,7 @@ void R_DrawSkyBox( void )
 			GL_Bind( XASH_TEXTURE0, tr.skyboxTextures[r_skyTexOrder[i]] );
 		else GL_Bind( XASH_TEXTURE0, tr.grayTexture ); // stub
 
-		gu_vert_t *const uv = sceGuGetMemory( sizeof( gu_vert_t ) * 4 );
+		gu_vert_t *const uv = extGuGetMemoryNoStall( sizeof( gu_vert_t ) * 4 );
 		MakeSkyVec( RI.skyMins[0][i], RI.skyMins[1][i], i, &uv[0] );
 		MakeSkyVec( RI.skyMins[0][i], RI.skyMaxs[1][i], i, &uv[1] );
 		MakeSkyVec( RI.skyMaxs[0][i], RI.skyMaxs[1][i], i, &uv[2] );
@@ -378,7 +378,7 @@ static void R_CloudDrawPoly( vec3_t verts[4] )
 	GL_SetRenderMode( kRenderNormal );
 	GL_Bind( XASH_TEXTURE0, tr.solidskyTexture );
 
-	gu_vert_t *out = sceGuGetMemory( sizeof( gu_vert_t ) * 4 );
+	gu_vert_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_t ) * 4 );
 	for( int i = 0; i < 4; i++ )
 	{
 		R_CloudTexCoord( verts[i], 8.0f, &out[i].uv[0], &out[i].uv[1] );
@@ -389,7 +389,7 @@ static void R_CloudDrawPoly( vec3_t verts[4] )
 	GL_SetRenderMode( kRenderTransTexture );
 	GL_Bind( XASH_TEXTURE0, tr.alphaskyTexture );
 
-	out = sceGuGetMemory( sizeof( gu_vert_t ) * 4 );
+	out = extGuGetMemoryNoStall( sizeof( gu_vert_t ) * 4 );
 	for( int i = 0; i < 4; i++ )
 	{
 		R_CloudTexCoord( verts[i], 16.0f, &out[i].uv[0], &out[i].uv[1] );

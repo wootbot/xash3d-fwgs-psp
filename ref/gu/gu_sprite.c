@@ -287,7 +287,7 @@ static void R_DrawSpriteQuad( mspriteframe_t *frame, vec3_t org, vec3_t v_right,
 {
 	r_stats.c_sprite_polys++;
 
-	gu_vert_t* const out = ( gu_vert_t* )sceGuGetMemory( sizeof( gu_vert_t ) * 4 );
+	gu_vert_t* const out = ( gu_vert_t* )extGuGetMemoryNoStall( sizeof( gu_vert_t ) * 4 );
 	out[0].uv[0] = 0.0f;
 	out[0].uv[1] = 1.0f;
 	VectorMA( org, frame->down * scale, v_up, out[0].xyz );
@@ -304,7 +304,7 @@ static void R_DrawSpriteQuad( mspriteframe_t *frame, vec3_t org, vec3_t v_right,
 	out[3].uv[1] = 1.0f;
 	VectorMA( org, frame->down * scale, v_up, out[3].xyz );
 	VectorMA( out[3].xyz, frame->right * scale, v_right, out[3].xyz );
-	sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, 4, 0, out );
+	extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, 4, out );
 }
 
 static qboolean R_SpriteHasLightmap( cl_entity_t *e, int texFormat )

@@ -65,15 +65,35 @@ void extGuDrawArrayNoStall( int prim, int vtype, int count, const void *vertices
 {
 	unsigned int *p = gu_list->current;
 
-	*p++ = ( 18 << 24 ) | ( vtype & 0xffffff );  /* VTYPE */
-	*p++ = ( 16 << 24 ) | ((( unsigned int )vertices >> 8 ) & 0xf0000 ); /* BASE */
-	*p++ = ( 1 << 24 ) | (( unsigned int )vertices & 0xffffff );  /* VADDR */
+	/* like sceGuDrawArray: 0 keeps the vertex type, NULL the address */
+	if( vtype )
+		*p++ = ( 18 << 24 ) | ( vtype & 0xffffff );  /* VTYPE */
+	if( vertices )
+	{
+		*p++ = ( 16 << 24 ) | ((( unsigned int )vertices >> 8 ) & 0xf0000 ); /* BASE */
+		*p++ = ( 1 << 24 ) | (( unsigned int )vertices & 0xffffff );  /* VADDR */
+	}
 	*p++ = ( 4 << 24 ) | ((( prim << 16 ) | count ) & 0xffffff ); /* PRIM */
 	gu_list->current = p;
 }
 
+/*
+extGuDrawArrayNoStall that moves the stall address every 16 draws: for code
+that draws many small polygons (world, brush models, sprites, HUD), where a
+syscall per draw cost more than the draw itself
+*/
+static unsigned int gu_batched_draws;
+
+void extGuDrawArrayBatched( int prim, int vtype, int count, const void *vertices )
+{
+	extGuDrawArrayNoStall( prim, vtype, count, vertices );
+	if( ++gu_batched_draws >= 16 )
+		extGuUpdateStall();
+}
+
 void extGuUpdateStall( void )
 {
+	gu_batched_draws = 0;
 	if( !gu_curr_context )
 		sceGeListUpdateStallAddr( ge_list_executed[0], gu_list->current );
 }

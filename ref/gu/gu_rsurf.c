@@ -749,14 +749,35 @@ static void GU_DrawPolyVerts( gu_vert_t *verts, int numverts )
 			sceGuDisable( GU_TEXTURE_2D );
 			sceGuColor( 0xff0000ff );
 #endif
-			sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, cvc, 0, cv );
+			extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, cvc, cv );
 #if CLIPPING_DEBUGGING
 			sceGuEnable( GU_TEXTURE_2D );
 			sceGuColor( 0xffffffff );
 #endif
 		}
 	}
-	else sceGuDrawArray( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numverts, 0, verts );
+	else extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numverts, verts );
+}
+
+/*
+================
+GU_DrawPolyVertsCopy
+
+GU_DrawPolyVerts for vertices built in cached memory: the clip test reads
+them there, not back from the uncached display list
+================
+*/
+static void GU_DrawPolyVertsCopy( gu_vert_t *verts, int numverts )
+{
+	if( GU_ClipIsRequired( verts, numverts ))
+	{
+		GU_DrawPolyVerts( verts, numverts );
+		return;
+	}
+
+	gu_vert_t *out = extGuGetMemoryNoStall( sizeof( gu_vert_t ) * numverts );
+	memcpy( out, verts, sizeof( gu_vert_t ) * numverts );
+	extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, numverts, out );
 }
 
 /*
@@ -864,7 +885,8 @@ static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 	for( gu_poly_t *p = GU_POLYS( warp ); p; p = p->next )
 	{
 		const gu_vert_t *v = reverse ? &p->verts[p->numverts - 1] : &p->verts[0];
-		gu_vert_t *const out = sceGuGetMemory( sizeof( gu_vert_t ) * p->numverts );
+		gu_vert_t buf[64];
+		gu_vert_t *const out = p->numverts <= ARRAYSIZE( buf ) ? buf : extGuGetMemoryNoStall( sizeof( gu_vert_t ) * p->numverts );
 
 		for( int i = 0; i < p->numverts; i++ )
 		{
@@ -889,7 +911,9 @@ static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 			else v++;
 		}
 
-		GU_DrawPolyVerts( out, p->numverts );
+		if( out == buf )
+			GU_DrawPolyVertsCopy( out, p->numverts );
+		else GU_DrawPolyVerts( out, p->numverts );
 	}
 
 	GL_SetupFogColorForSurfaces();
