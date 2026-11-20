@@ -498,36 +498,67 @@ R_EntitySeesSky
 
 the sky test traces across the whole map, ~45 us per model on the PSP, and
 gives the same answer while the entity stays where it is: remember it per
-entity until the entity moves 32 units (or for a second at most): a soldier
-running at 15 units per frame missed an 8 unit cache every frame
+entity until the entity is 32 units from where it was traced (or for a
+second at most): a soldier running at 15 units per frame missed an 8 unit
+cache every frame. Then per 16 unit cell of the map, for whatever entity
+comes there next within that second: shells and gibs flying out of a fight
+land near each other (about half of the misses that were left, and no
+answer differed from the trace)
 ===============
 */
+typedef struct
+{
+	const model_t *world;
+	vec3_t origin, skyvec; // origin: where it was traced from
+	float time;
+	qboolean sky;
+} skytest_t;
+
+static qboolean R_SkyTestValid( const skytest_t *t, const vec3_t skyvec, float time )
+{
+	return t->world == gp_cl->models[1] && VectorCompare( t->skyvec, skyvec ) && time >= t->time && time < t->time + 1.0f;
+}
+
 static qboolean R_EntitySeesSky( const cl_entity_t *ent, const vec3_t origin, const vec3_t skyvec, float time, const vec3_t start, const vec3_t end )
 {
 	static struct
 	{
+		skytest_t test;
 		const cl_entity_t *ent;
-		const model_t *world;
-		vec3_t origin, skyvec;
-		float time;
-		qboolean sky;
 	} cache[256];
+	static struct
+	{
+		skytest_t test;
+		int x, y, z;
+	} cells[512];
 	// by address: temp entities (shells, gibs) all have index 0
 	typeof( cache[0] ) *c = &cache[((uint)(uintptr_t)ent * 2654435761u ) >> 24];
 
-	if( c->ent == ent && c->world == gp_cl->models[1] && VectorCompare( c->skyvec, skyvec )
-		&& VectorDistance2( c->origin, origin ) < 32.0f * 32.0f && time >= c->time && time < c->time + 1.0f )
-		return c->sky;
+	if( c->ent == ent && VectorDistance2( c->test.origin, origin ) < 32.0f * 32.0f && R_SkyTestValid( &c->test, skyvec, time ))
+		return c->test.sky;
 
-	const msurface_t *psurf = gEngfuncs.EV_TraceSurface( 0, (float *)start, (float *)end );
+	const int x = (int)floorf( origin[0] * ( 1.0f / 16.0f ));
+	const int y = (int)floorf( origin[1] * ( 1.0f / 16.0f ));
+	const int z = (int)floorf( origin[2] * ( 1.0f / 16.0f ));
+	typeof( cells[0] ) *cell = &cells[((uint)x * 73856093u ^ (uint)y * 19349663u ^ (uint)z * 83492791u ) & 511];
+
+	if( cell->x != x || cell->y != y || cell->z != z || !R_SkyTestValid( &cell->test, skyvec, time ))
+	{
+		const msurface_t *psurf = gEngfuncs.EV_TraceSurface( 0, (float *)start, (float *)end );
+
+		cell->x = x;
+		cell->y = y;
+		cell->z = z;
+		cell->test.world = gp_cl->models[1];
+		VectorCopy( origin, cell->test.origin );
+		VectorCopy( skyvec, cell->test.skyvec );
+		cell->test.time = time;
+		cell->test.sky = psurf && FBitSet( psurf->flags, SURF_DRAWSKY );
+	}
 
 	c->ent = ent;
-	c->world = gp_cl->models[1];
-	VectorCopy( origin, c->origin );
-	VectorCopy( skyvec, c->skyvec );
-	c->time = time;
-	c->sky = psurf && FBitSet( psurf->flags, SURF_DRAWSKY );
-	return c->sky;
+	c->test = cell->test;
+	return c->test.sky;
 }
 #endif
 
