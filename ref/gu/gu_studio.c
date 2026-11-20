@@ -1910,9 +1910,13 @@ product (wrap lambert, light gamma, light color), multiplied into the frame
 buffer where the depth matches. Same result as the CPU path up to the ramp
 resolution and one more 565 rounding.
 
+Chrome meshes get their texture coordinates from the skinned normals too (a
+texture matrix per draw), flat shaded ones a light pass at one fixed point of
+the ramp.
+
 Only for the common case: normal render mode, no local lights, no fog, no
-glow shell, no bone weights, and meshes without chrome/fullbright/flatshade/
-additive/float UVs; everything else takes the CPU path.
+glow shell, no bone weights, and meshes without fullbright/additive/float UVs;
+everything else takes the CPU path.
 
 =============================================================================
 */
@@ -1923,7 +1927,7 @@ CVAR_DEFINE_AUTO( r_studio_ge, "1", 0, "draw studio models with GE skinning and 
 #define GE_CACHE_SIZE	512	// submodels
 
 #define GE_CMD( cmd, arg )	((( cmd ) << 24 ) | (( arg ) & 0xffffff ))
-#define GE_UNSUPPORTED_FLAGS	( STUDIO_NF_CHROME|STUDIO_NF_FULLBRIGHT|STUDIO_NF_FLATSHADE|STUDIO_NF_ADDITIVE|STUDIO_NF_UV_COORDS )
+#define GE_UNSUPPORTED_FLAGS	( STUDIO_NF_FULLBRIGHT|STUDIO_NF_ADDITIVE|STUDIO_NF_UV_COORDS )
 
 typedef struct
 {
@@ -2501,14 +2505,15 @@ the ramp texture with u = 0.5 + 0.5 * dot( normal, lightvec ), multiplied
 into the frame buffer where the depth matches
 ===============
 */
-static const uint *R_StudioGELightBlock( const uint *ramp )
+static const uint *R_StudioGELightBlock( const uint *ramp, qboolean flat )
 {
-	static const uint *last, *lastramp;
+	static const uint *last[2], *lastramp[2];
 	static vec3_t lastvec;
-	static uint frame = ~0u;
+	static uint frame[2] = { ~0u, ~0u };
 
-	if( frame == guRender.vert_frame && ramp == lastramp && VectorCompare( lastvec, g_studio.lightvec ))
-		return last;
+	flat = !!flat;
+	if( frame[flat] == guRender.vert_frame && ramp == lastramp[flat] && ( flat || VectorCompare( lastvec, g_studio.lightvec )))
+		return last[flat];
 
 	uint *start = extGuBlockBegin();
 	ScePspFMatrix4 tm;
@@ -2521,10 +2526,19 @@ static const uint *R_StudioGELightBlock( const uint *ramp )
 	sceGuTexFunc( GU_TFX_REPLACE, GU_TCC_RGB );
 
 	memset( &tm, 0, sizeof( tm ));
-	tm.x.x = 0.5f * g_studio.lightvec[0];
-	tm.y.x = 0.5f * g_studio.lightvec[1];
-	tm.z.x = 0.5f * g_studio.lightvec[2];
-	tm.w.x = 0.5f;
+	if( flat )
+	{
+		// STUDIO_NF_FLATSHADE: ambient + shade * 0.8 for every normal, which is
+		// the ramp at dot( normal, lightvec ) = 1 - 0.8 * SHADE_LAMBERT
+		tm.w.x = 1.0f - 0.4f * SHADE_LAMBERT;
+	}
+	else
+	{
+		tm.x.x = 0.5f * g_studio.lightvec[0];
+		tm.y.x = 0.5f * g_studio.lightvec[1];
+		tm.z.x = 0.5f * g_studio.lightvec[2];
+		tm.w.x = 0.5f;
+	}
 	tm.w.y = 0.5f;
 	tm.w.z = 1.0f;
 	sceGuSetMatrix( GU_TEXTURE, &tm );
@@ -2537,11 +2551,12 @@ static const uint *R_StudioGELightBlock( const uint *ramp )
 	sceGuEnable( GU_BLEND );
 
 	glState.texIdentityMatrix = false;
-	last = extGuBlockEnd( start );
-	lastramp = ramp;
-	VectorCopy( g_studio.lightvec, lastvec );
-	frame = guRender.vert_frame;
-	return last;
+	last[flat] = extGuBlockEnd( start );
+	lastramp[flat] = ramp;
+	if( !flat )
+		VectorCopy( g_studio.lightvec, lastvec );
+	frame[flat] = guRender.vert_frame;
+	return last[flat];
 }
 
 /*
@@ -2566,6 +2581,7 @@ typedef struct
 	const void	*data, *palette;	// gl_texture_t the block points to
 	int		format, width, height, numMips, flags;
 	int		skinw, skinh;	// mstudiotexture_t size for the texture scale
+	int		chrome;
 	float		cvars[5];
 } geskin_t;
 
@@ -2582,6 +2598,7 @@ static void R_StudioGESkinKey( const gl_texture_t *t, const mstudiotexture_t *pt
 	k->flags = t->flags;
 	k->skinw = ptex->width;
 	k->skinh = ptex->height;
+	k->chrome = FBitSet( ptex->flags, STUDIO_NF_CHROME );
 	k->cvars[0] = gl_texture_nearest.value;
 	k->cvars[1] = gl_texture_lodfunc.value;
 	k->cvars[2] = gl_texture_lodbias.value;
@@ -2593,7 +2610,7 @@ static qboolean R_StudioGESkinMatches( const geskin_t *a, const geskin_t *b )
 {
 	return a->data == b->data && a->palette == b->palette && a->format == b->format && a->width == b->width
 		&& a->height == b->height && a->numMips == b->numMips && a->flags == b->flags && a->skinw == b->skinw
-		&& a->skinh == b->skinh && !memcmp( a->cvars, b->cvars, sizeof( a->cvars ));
+		&& a->skinh == b->skinh && a->chrome == b->chrome && !memcmp( a->cvars, b->cvars, sizeof( a->cvars ));
 }
 
 static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int skinindex )
@@ -2602,13 +2619,23 @@ static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int s
 
 	glState.currentTexture = 0; // force GL_Bind to emit everything
 	R_StudioSetupSkin( m_pStudioHeader, skinindex );
-	// texcoords are the raw texel shorts: u = s / 32768 * scale
-	sceGuTexScale( 32768.0f / ptex->width, 32768.0f / ptex->height );
+	if( FBitSet( ptex->flags, STUDIO_NF_CHROME ))
+	{
+		// texcoords from the normals, R_StudioGEChromeMatrix sets the matrix for each batch
+		sceGuTexScale( 1.0f, 1.0f );
+		sceGuTexMapMode( GU_TEXTURE_MATRIX, 0, 0 );
+		sceGuTexProjMapMode( GU_NORMALIZED_NORMAL );
+	}
+	else
+	{
+		// texcoords are the raw texel shorts: u = s / 32768 * scale
+		sceGuTexScale( 32768.0f / ptex->width, 32768.0f / ptex->height );
+		sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 );
+	}
 	sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
 	// the batches have no vertex color: the GE modulates with the material
 	// color instead, which is whatever sceGuColor was last (blood sprites, shells)
 	sceGuColor( 0xffffffff );
-	sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 );
 	sceGuDepthFunc( GU_LEQUAL );
 	sceGuDepthMask( GU_FALSE );
 	sceGuDisable( GU_BLEND );
@@ -2661,9 +2688,56 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 	return frame_block;
 }
 
-static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *ptex, int skinindex, const uint *lightblock )
+/*
+===============
+R_StudioGEChromeMatrix
+
+the texture matrix of a chrome batch, R_StudioSetupChrome for the normals the GE
+skinned: one view direction for the whole batch, to the middle of its bones
+===============
+*/
+static uint *R_StudioGEChromeMatrix( uint *p, const gebatch_t *b, const mstudiotexture_t *ptex )
 {
+	vec3_t org = { 0.0f, 0.0f, 0.0f }, dir, up, right;
+
+	for( int i = 0; i < b->numbones; i++ )
+	{
+		const float (*m)[4] = (const float (*)[4])g_studio.lighttransform[b->bones[i]];
+
+		org[0] += m[0][3];
+		org[1] += m[1][3];
+		org[2] += m[2][3];
+	}
+	VectorScale( org, 1.0f / b->numbones, org );
+	VectorSubtract( org, g_studio.chrome_origin, dir );
+	VectorNormalize( dir );
+	CrossProduct( dir, RI.vright, up );
+	VectorNormalize( up );
+	CrossProduct( up, dir, right );
+	VectorNormalize( right );
+
+	// u = ( dot( normal, right ) + 1 ) * 32 / width, v the same with up
+	const float su = 32.0f / ptex->width, sv = 32.0f / ptex->height;
+	const float m[12] =
+	{
+		right[0] * su, up[0] * sv, 0.0f,
+		right[1] * su, up[1] * sv, 0.0f,
+		right[2] * su, up[2] * sv, 0.0f,
+		su, sv, 1.0f,
+	};
+
+	*p++ = GE_CMD( 0x40, 0 ); // TMS
+	for( int i = 0; i < 12; i++ )
+		*p++ = GE_CMD( 0x41, GE_Float( m[i] )); // TMD
+	return p;
+}
+
+static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *ptex, int skinindex, const uint *ramp )
+{
+	const int flags = ptex->flags | g_nForceFaceFlags;
 	const uint *skinblock = R_StudioGESkinBlock( ptex, skinindex );
+	const uint *lightblock = R_StudioGELightBlock( ramp, FBitSet( flags, STUDIO_NF_FLATSHADE ));
+	const qboolean chrome = FBitSet( flags, STUDIO_NF_CHROME );
 
 	uint *p = extGuCmdBegin();
 	for( int i = 0; i < gmesh->numbatches; i++ )
@@ -2671,6 +2745,8 @@ static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *p
 		const gebatch_t *b = &gmesh->batches[i];
 
 		p = R_StudioGEBones( p, b );
+		if( chrome )
+			p = R_StudioGEChromeMatrix( p, b, ptex );
 		p = R_StudioGECall( p, skinblock );
 		p = R_StudioGECall( p, b->cmds );
 		p = R_StudioGECall( p, lightblock );
@@ -2696,6 +2772,7 @@ static void R_StudioGERestore( void )
 	uint *p = R_StudioGECall( extGuCmdBegin(), ge_last_skinblock );
 	extGuCmdEnd( p );
 	sceGuTexScale( 1.0f, 1.0f );
+	sceGuTexMapMode( GU_TEXTURE_COORDS, 0, 0 ); // after a chrome skin block
 	glState.currentTexture = 0;
 	ge_last_skinblock = NULL;
 }
@@ -2920,7 +2997,7 @@ static void R_StudioDrawPoints( void )
 
 	const mstudiomesh_t *pmeshbase = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex);
 	qboolean eye_view = false;
-	const uint *lightblock = NULL;
+	const uint *ramp = NULL;
 
 	ge_slots_valid = 0;
 
@@ -2940,8 +3017,8 @@ static void R_StudioDrawPoints( void )
 			eye_view = !!gmesh;
 			R_StudioGEViewMatrix( eye_view );
 		}
-		if( gmesh && !lightblock )
-			lightblock = R_StudioGELightBlock( R_StudioGERamp( ));
+		if( gmesh && !ramp )
+			ramp = R_StudioGERamp( );
 		short *ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex);
 
 		g_nFaceFlags = ptexture[pskinref[pmesh->skinref]].flags | g_nForceFaceFlags;
@@ -2970,7 +3047,7 @@ static void R_StudioDrawPoints( void )
 		}
 
 		if( gmesh )
-			R_StudioGEDrawMesh( gmesh, &ptexture[pskinref[pmesh->skinref]], pskinref[pmesh->skinref], lightblock );
+			R_StudioGEDrawMesh( gmesh, &ptexture[pskinref[pmesh->skinref]], pskinref[pmesh->skinref], ramp );
 		else
 		{
 			R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
