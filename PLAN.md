@@ -673,8 +673,12 @@ music), launched from the XMB.
   marked yet and the visframe check drops them. Tried and dropped: the walk's surface marks in
   their own array (skips touching ~460 rejected msurface_t a frame, no fps change).
   `GU_ClipBoxInside` on the VFPU (`d7868af8`): ~0.2 us a box warm, world chains 1.77 ->
-  1.65 ms. Sky polygons with all vertices on one face skip the clipping (`c3bd6b9b`, same
-  bounds, checked for a whole run): ~70% of ~29 a frame, ~0.07 ms. fight1 38.4 -> 39.3 fps.
+  1.65 ms, +0.2-0.3 fps against the scalar version in the same build. Sky polygons with all
+  vertices on one face skip the clipping (`c3bd6b9b`, same bounds, checked for a whole run):
+  ~70% of ~29 a frame, ~0.07 ms. The node walk's side plane tests on the VFPU (checked, same
+  results) gave no fps change in a same build A/B: dropped. **Builds differ by up to
+  ~0.5-1 fps with no related change** (39.3 one build, 38.3 the next; code layout and the
+  16 KB caches): compare changes only with a switch inside one build.
   Studio GE path (~13 models, ~170 meshes a frame): ~12.7 us a mesh (skin block lookup ~3,
   light block ~1.4, bone upload and calls ~4, the loop ~5), ~31 us a body part before the
   mesh loop. Next steps that can still give whole milliseconds, all restructuring: the world
