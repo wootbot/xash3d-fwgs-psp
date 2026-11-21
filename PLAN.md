@@ -542,3 +542,13 @@ music), launched from the XMB.
   ~10 static props 3.5 ms (300-400 us each: light 40-145 us, GE output 95-165 us). With it the
   shells drop to ~0.15 ms: 27.0 -> 28.9 fps. Next: the props (static, so their bones and light
   could be kept between frames) and the per-draw GE output cost.
+- 2026-11-21: `r_dynamic 0` by default on the PSP (`4993bc24`: no lightmap updates or model
+  lights for muzzle flashes, 28.85 -> 29.4 fps), entity lights folded into the GE model light
+  (`48bc9bce`: 1% low 14.5 -> 15.1), HOME quits through the system dialog (`2266b58d`).
+  Static props measured by skipping them (TEMP `r_abl 2048`): ~2.5 ms a frame (29.35 -> 31.65
+  fps without them). Keeping their bones and light between frames (`r_studio_propcache`) saves
+  only ~0.3 ms of it, so most of a prop's cost is the per-draw path (setup, GE output). Next
+  for props: a persistent GE command list per static prop, replayed with only the view
+  matrix changing. Prediction runs ~1.5 player moves a frame (~37 physents each, out-of-reach
+  ones already skipped): nothing to cut there without touching the movement code. Tried and
+  reverted: saving bone names without string copies (no gain).
