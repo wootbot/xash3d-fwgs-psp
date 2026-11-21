@@ -69,6 +69,20 @@ static void DrawSkyPolygon( int nump, vec3_t vecs )
 	}
 }
 
+#if XASH_PSP
+static qboolean R_SkyPolygonOnOneFace( int nump, const vec3_t vecs )
+{
+	const int axis = R_SkyboxAxisFromDir( vecs );
+
+	for( int i = 1; i < nump; i++ )
+	{
+		if( R_SkyboxAxisFromDir( vecs + i * 3 ) != axis )
+			return false;
+	}
+	return true;
+}
+#endif
+
 /*
 ==============
 ClipSkyPolygon
@@ -254,6 +268,17 @@ void R_AddSkyBoxSurface( msurface_t *fa )
 	{
 		for( int i = 0; i < p->numverts; i++ )
 			VectorSubtract( p->verts[i].xyz, RI.cullorigin, verts[i] );
+#if XASH_PSP
+		// a polygon with all its vertices on one face of the box lies on that
+		// face (each face's directions are a convex cone): the clipping would
+		// only cut it into pieces with the same bounds there (~70% of the sky
+		// polygons in a frame, ~12 us each)
+		if( R_SkyPolygonOnOneFace( p->numverts, verts[0] ))
+		{
+			DrawSkyPolygon( p->numverts, verts[0] );
+			continue;
+		}
+#endif
 		ClipSkyPolygon( p->numverts, verts[0], 0 );
 	}
 }
