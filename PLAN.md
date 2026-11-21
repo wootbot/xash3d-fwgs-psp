@@ -526,3 +526,13 @@ music), launched from the XMB.
   Pitfall found on the way: a cvar registered lazily behind its own `value` check never gets
   registered, so setting it does nothing and an A/B measures the same code twice. Register
   cvars in an init or new-map hook. fight1 in game: 26.65 fps.
+- 2026-11-20 (late night): Tried and reverted: **bone LOD** (distant models reuse their last
+  bone setup for 1/20-1/10 s, through one old-to-new pose transform when they moved or turned).
+  ~14 of ~37 bone setups a frame were reused in fight1, fps unchanged (26.7 vs 26.7): the reused
+  ones are cheap models (shells, gibs, far props), and the expensive soldiers are close or
+  changing sequences. At 26 fps a 1/20 s period can only skip every other frame anyway. Fresh
+  profile (ms per in-game frame): studio models and other render work not split into stages
+  ~10, world ~3.7, prediction ~3.8, sound mixing ~2.5 (costs the same per second at any fps:
+  ~0.65 ms a frame at 100 fps), demo reads ~2.7 and the debug console ~2.2 (timedemo/debug only).
+  The level load's resource list and server data are ~22% of a sampled timedemo, so read
+  sampled profiles net of them.
