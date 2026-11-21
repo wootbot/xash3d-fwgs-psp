@@ -552,3 +552,22 @@ music), launched from the XMB.
   matrix changing. Prediction runs ~1.5 player moves a frame (~37 physents each, out-of-reach
   ones already skipped): nothing to cut there without touching the movement code. Tried and
   reverted: saving bone names without string copies (no gain).
+- 2026-11-21 (later): **Temp entity cap** (`f7509b73`, `cl_tents_cap 32`): a firefight kept
+  150-300 temp entities alive (blood drips, shells) that the client DLL walks every frame.
+  fight1 29.4 -> 33.6 fps, 1% low 15.8 -> 17.5 (cap 16: another ~0.4 fps, kept at 32 so
+  explosions and muzzle flashes still get slots). Measured and left for now (TEMP `r_abl`,
+  fight1 with the cap): ~140 bullet impact traces a frame from client events cost ~nothing
+  (world-only traces: no change; skipping the traces saves only what their effects cost),
+  impact particles ~0.35 ms, bullet decals ~0.35 ms, the impact sound's texture lookup ~0.
+  The menu update under a timedemo costs nothing (its samples were the level load). The GPU
+  wait at the end of a frame is 0.2%: the GE overlaps the CPU, everything is CPU bound.
+  Fresh sampled profile, ms per in-game frame at ~34 fps: render work not split into stages
+  (mostly studio models) ~5.4, Wi-Fi stack threads ~3 (they run in the main thread's net
+  yield; yielding every 4th frame instead changes nothing, so it's work, not yield overhead,
+  and it's there online too), world ~3.1, prediction ~2.9, brush entities ~2, mixing ~1.7,
+  demo reads ~1.3 (timedemo only).
+  **The floor without rendering**: prediction, the Wi-Fi stack, mixing, parsing and the
+  client DLL's frame work add up to ~10-11 ms a frame, so 100 fps (10 ms) in fight1 can't be
+  reached by renderer work alone. 60 fps (16.7 ms) leaves ~5-6 ms for all rendering against
+  ~17 ms now: that needs the PSP model format (baked bones and animation, GE command lists)
+  and world display lists, not more small cuts.
