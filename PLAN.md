@@ -623,3 +623,15 @@ music), launched from the XMB.
   reads back part of the weapon data with `-=`, so it has to be copied). Prediction ~5.0 ->
   ~3.0 ms a frame in fight1, which is now 35.6 fps (1% low 18.8; it was 33.6 before the float
   math).
+- 2026-11-21 (night, later): **Prediction, all of it** (exact stages, fight1, ms a frame, net of
+  timer overhead): it was 2.9 after the float math, made of client movement 0.52, traces 0.52
+  (0.17 world hull, the rest the loop that rejects ~36 out-of-reach physents a trace), state
+  copies 0.52, the prediction functions' own code 0.51, position tests 0.23, contents 0.22,
+  footstep texture traces 0.16, setup and hull lookups ~0.2. Done: the reach cache keeps one box
+  per physent and each trace computes its swept box once (`a5056aa8`), the cache also lists the
+  physents that can have contents, the footstep texture is reused while the player stays within
+  4 units on the same ground, the per-move state copy stops at the highest weapon slot ever
+  used and the split temporary isn't cleared (`cc19b674`). Prediction 2.9 -> 1.7 ms a frame:
+  client movement ~0.48 (~60 us a move, no doubles left in it), world hull ~0.2, traces' own
+  code ~0.3, position tests ~0.15, contents ~0.12, the prediction functions ~0.28, setup and
+  copies ~0.15. fight1 37.0 fps, 1% low 19.5.
