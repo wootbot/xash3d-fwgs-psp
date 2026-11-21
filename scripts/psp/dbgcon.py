@@ -6,6 +6,8 @@ UDP 27999. The PC always sends first, so its firewall only sees replies.
 
   dbgcon.py listen <psp ip> [log]      keepalives, console output -> log (default build-psp/dbgcon.log),
                                        commands from <log>.cmd (one per line) -> PSP. Runs until killed.
+                                       When the PSP is silent for 10 s the keepalives are broadcast too, and
+                                       the listener follows the PSP to a new address (DHCP), written to <log>.ip
   dbgcon.py cmd "<command>" [log]      queue a console command for the running listener
   dbgcon.py update <psp ip> <eboot> [dest]
                                        send psp_update, push the EBOOT over TCP; the game restarts with it.
@@ -23,16 +25,26 @@ DEFAULT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..
 
 def listen(ip, log):
 	cmdfile = log + '.cmd'
+	ipfile = log + '.ip'
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 	sock.bind(('0.0.0.0', 0))
 	sock.settimeout(0.2)
 	last_keepalive = 0.0
+	last_heard = time.time()
 	with open(log, 'ab', buffering=0) as out:
 		out.write(('\n[dbgcon.py: listening for %s at %s]\n' % (ip, time.strftime('%H:%M:%S'))).encode())
 		while True:
 			now = time.time()
 			if now - last_keepalive >= 2.0:
 				sock.sendto(b'\xff', (ip, PORT))
+				# after a restart the PSP may come back with another address: the game
+				# answers whoever sent the last packet, so a broadcast finds it
+				if now - last_heard > 10.0:
+					try:
+						sock.sendto(b'\xff', ('255.255.255.255', PORT))
+					except OSError:
+						pass
 				last_keepalive = now
 			if os.path.exists(cmdfile):
 				try:
@@ -46,7 +58,14 @@ def listen(ip, log):
 						sock.sendto(c, (ip, PORT))
 						out.write(b'[dbgcon.py: > ' + c + b']\n')
 			try:
-				data, _ = sock.recvfrom(4096)
+				data, addr = sock.recvfrom(4096)
+				if addr[1] == PORT:
+					last_heard = time.time()
+					if addr[0] != ip:
+						ip = addr[0]
+						out.write(('\n[dbgcon.py: the PSP is at %s now]\n' % ip).encode())
+						with open(ipfile, 'w') as f:
+							f.write(ip + '\n')
 				out.write(data)
 			except socket.timeout:
 				pass
@@ -68,6 +87,15 @@ def cmd(command, log):
 
 def update(ip, eboot, dest=None):
 	data = open(eboot, 'rb').read()
+	try:
+		# where the listener last heard the PSP
+		with open(DEFAULT_LOG + '.ip') as f:
+			found = f.read().strip()
+		if found and found != ip:
+			print('using %s, where the listener found the PSP' % found)
+			ip = found
+	except OSError:
+		pass
 	command = 'psp_update' + (' ' + dest if dest else '')
 	# through the listener if it runs: the game sends its output to whoever sent the
 	# last packet, a packet from here would send the psp_update messages nowhere
