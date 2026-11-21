@@ -250,6 +250,9 @@ static void PSP_DbgConRestart_f( void )
 	Con_Printf( "restarting\n" );
 	PSP_DbgConFlush();
 	Host_WriteConfig();
+	// leave the access point first: restarted with the connection still up,
+	// the new instance often came back at the menu and never joined Wi-Fi
+	PSP_NetShutdown();
 	PSP_DbgConRestart();
 }
 
