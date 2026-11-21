@@ -1020,6 +1020,7 @@ R_BeginFrame
 */
 void R_BeginFrame( qboolean clearScene )
 {
+	R_WaitFrame();
 	glConfig.softwareGammaUpdate = false;	// in case of possible fails
 
 
@@ -1096,8 +1097,25 @@ void R_EndFrame( void )
 	// flush any remaining 2D bits
 	R_Set2DMode( false );
 
-	// finish rendering.
+	// finish rendering: the GE draws it while the next frame's game code runs,
+	// R_WaitFrame waits for it before anything touches what it reads
 	sceGuFinish();
+	guRender.frame_pending = true;
+}
+
+/*
+===============
+R_WaitFrame
+
+wait for the GE to finish the last frame, show it and open the next list
+===============
+*/
+void R_WaitFrame( void )
+{
+	if( !guRender.frame_pending )
+		return;
+	guRender.frame_pending = false;
+
 	sceGuSync( GU_SYNC_FINISH, GU_SYNC_WAIT );
 
 	gEngfuncs.GL_SwapBuffers(); // vsync

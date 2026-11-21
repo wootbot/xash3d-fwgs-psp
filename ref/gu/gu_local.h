@@ -544,6 +544,7 @@ void R_GammaChanged( qboolean do_reset_gamma );
 void R_BeginFrame( qboolean clearScene );
 void R_RenderFrame( const struct ref_viewpass_s *vp );
 void R_EndFrame( void );
+void R_WaitFrame( void );
 void R_GetTextureParms( int *w, int *h, int texnum );
 void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum );
 qboolean R_SpeedsMessage( char *out, size_t size );
@@ -653,6 +654,7 @@ typedef struct
 	size_t		vert_vram_size;
 	size_t		vert_vram_used;
 	uint		vert_frame;	// bumped when the per-frame memory is reused
+	qboolean		frame_pending;	// the GE may still be drawing the last frame, R_WaitFrame
 } gurender_t;
 
 extern glconfig_t	glConfig;

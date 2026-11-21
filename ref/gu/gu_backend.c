@@ -302,6 +302,7 @@ SCREEN SHOTS
 */
 qboolean VID_ScreenShot( const char *filename, int shot_type )
 {
+	R_WaitFrame();
 	uint flags = 0;
 	int width = 0, height = 0;
 

@@ -1140,6 +1140,7 @@ GL_UpdateTexture
 */
 qboolean GU_UpdateTextureRect( int texnum, int xoff, int yoff, int width, int height, const void *buffer )
 {
+	R_WaitFrame(); // the GE may still be reading it
 	gl_texture_t	*tex;
 	byte		*dst, *src;
 
@@ -1580,6 +1581,7 @@ GL_FreeTexture
 */
 void GL_FreeTexture( unsigned int texnum )
 {
+	R_WaitFrame(); // the GE may still be reading it
 	// number 0 it's already freed
 	if( texnum <= 0 ) return;
 

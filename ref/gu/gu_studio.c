@@ -4903,6 +4903,7 @@ Mod_StudioUnloadTextures
 */
 void Mod_StudioUnloadTextures( void *data )
 {
+	R_WaitFrame(); // R_StudioGEUnload frees what the GE may be drawing
 	studiohdr_t	*phdr = (studiohdr_t *)data;
 
 	if( !phdr )

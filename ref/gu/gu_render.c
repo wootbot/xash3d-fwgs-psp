@@ -188,6 +188,7 @@ GU_Shutdown
 */
 static void GU_Shutdown( void )
 {
+	R_WaitFrame();
 	// Finish rendering.
 	sceGuFinish();
 	sceGuSync( GU_SYNC_FINISH, GU_SYNC_WAIT );

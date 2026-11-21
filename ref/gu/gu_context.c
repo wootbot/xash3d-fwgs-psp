@@ -96,6 +96,7 @@ static void Mod_UnloadTextures( model_t *mod )
 
 static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte *buf, size_t buffersize )
 {
+	R_WaitFrame(); // frees and rebuilds what the GE may be drawing
 	qboolean loaded = false;
 
 	if( !create )
@@ -349,6 +350,7 @@ static const char *R_GetConfigName( void )
 
 static void R_NewMap( void )
 {
+	R_WaitFrame();
 	tr.worldmodel = gp_cl->models[1];
 
 	R_ClearDecals(); // clear all level decals
