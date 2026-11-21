@@ -660,3 +660,25 @@ music), launched from the XMB.
   0.35, header 0.2. Grunts are ~4 of it (~8 a frame, ~510 us each). The world texture chains
   are ~1.7 ms for ~350 surfaces (~5 us each, ~0.2 ms of it the draws): cache misses on the
   surface structs, a display list per visible area is still the way to cut it.
+- 2026-11-21 (morning): **Memory costs measured, world and studio per item costs.**
+  A one-shot benchmark in game: a cache miss on a read is ~0.2 us (~66 cycles, random lines in
+  1 MB), a write that misses ~0.32 us (the dirty line goes back too), an uncached store ~25 ns,
+  and the GE drawing the world slows CPU misses by only ~10%. Everything below is "many small
+  items at ~1-5 us each", mostly misses on scattered structs, not one hot spot.
+  World (fight1, ms a frame): node walk ~1.3 (~630 nodes at ~1 us, most of it the frustum box
+  tests, plus ~410 surfaces that pass at ~1.4 us), texture chains ~1.65 for ~350 surfaces
+  (~3 us each: draw 0.84, texture animation check 0.61, lightmap chain 0.57, box test 0.48,
+  bind 0.36), lightmap pass ~0.5, sky clipping ~0.3. No surface is ever back face culled
+  in the walk: a node's own surfaces come before its back side, so the ones facing away aren't
+  marked yet and the visframe check drops them. Tried and dropped: the walk's surface marks in
+  their own array (skips touching ~460 rejected msurface_t a frame, no fps change).
+  `GU_ClipBoxInside` on the VFPU (`d7868af8`): ~0.2 us a box warm, world chains 1.77 ->
+  1.65 ms. Sky polygons with all vertices on one face skip the clipping (`c3bd6b9b`, same
+  bounds, checked for a whole run): ~70% of ~29 a frame, ~0.07 ms. fight1 38.4 -> 39.3 fps.
+  Studio GE path (~13 models, ~170 meshes a frame): ~12.7 us a mesh (skin block lookup ~3,
+  light block ~1.4, bone upload and calls ~4, the loop ~5), ~31 us a body part before the
+  mesh loop. Next steps that can still give whole milliseconds, all restructuring: the world
+  as prebuilt GE blocks per node side (static surfaces only, dlights/lightstyles/decals on the
+  old path; ~1.3 ms), or compact per surface draw records in one cache line (~1.2 ms); fewer
+  meshes per model (texture atlas per model, palettes are the problem); half rate animation
+  for distant models (fidelity, ~0.5 ms).
