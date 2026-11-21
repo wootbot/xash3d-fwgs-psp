@@ -4522,11 +4522,21 @@ skips its events: StudioDrawModel returns before them for culled models.
 static CVAR_DEFINE_AUTO( r_studio_precull, "1", FCVAR_ARCHIVE, "cull studio models off screen before the client renderer sees them" );
 static CVAR_DEFINE_AUTO( r_studio_minpixels, "2", FCVAR_ARCHIVE, "skip studio models whose bounding radius is less than this many pixels on screen (0 = draw all)" );
 
+// per frame values of the test, set by R_StudioPreCullList
+static struct
+{
+	qboolean	active;	// the draw lists were tested: R_DrawStudioModel_ skips its own test
+	qboolean	enabled;
+	float	minpixels;	// 0 = no screen size test
+	float	px_scale;	// pixels on screen of one unit at distance 1
+	float	time;
+} g_precull;
+
 static qboolean R_StudioPreCull( cl_entity_t *e )
 {
 	const model_t *mod = e->model;
 
-	if( !r_studio_precull.value || r_nocull.value || !mod || mod->type != mod_studio )
+	if( !g_precull.enabled || !mod || mod->type != mod_studio )
 		return false;
 	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || e == tr.viewent || e->curstate.renderfx == kRenderFxDeadPlayer )
 		return false;
@@ -4561,13 +4571,13 @@ static qboolean R_StudioPreCull( cl_entity_t *e )
 
 	// too small on screen to make out (a shell far away is a pixel or two, and costs as
 	// much as a big prop): skip it. Radius r over the distance, in pixels
-	if( r_studio_minpixels.value > 0.0f && RI.rvp.fov_x > 0.0f )
+	if( g_precull.minpixels > 0.0f )
 	{
 		vec3_t d;
 		VectorSubtract( e->origin, RI.rvp.vieworigin, d );
 
-		const float px = r * RI.rvp.viewport[2] * 0.5f / tanf( RI.rvp.fov_x * ( M_PI_F / 360.0f ));
-		const float min = r_studio_minpixels.value;
+		const float px = r * g_precull.px_scale;
+		const float min = g_precull.minpixels;
 
 		if( px * px < min * min * DotProduct( d, d ))
 			return true;
@@ -4577,7 +4587,7 @@ static qboolean R_StudioPreCull( cl_entity_t *e )
 	// f = ( time - animtime ) / ( animtime - prevanimtime ) while animtime is less than 1 s old
 	if( e->curstate.movetype == MOVETYPE_STEP )
 	{
-		const float t = gp_cl->time;
+		const float t = g_precull.time;
 		float f = 0.0f;
 
 		if( t < e->curstate.animtime + 1.0f && e->curstate.animtime != e->latched.prevanimtime )
@@ -4593,6 +4603,40 @@ static qboolean R_StudioPreCull( cl_entity_t *e )
 	const vec3_t maxs = { e->origin[0] + r, e->origin[1] + r, e->origin[2] + r };
 
 	return R_CullBox( mins, maxs );
+}
+
+/*
+=================
+R_StudioPreCullList
+
+R_StudioPreCull for a whole draw list before it is drawn: tested one by one
+between model draws its code and the per frame values were evicted from the
+cache by each model's rendering, ~17 us a test against ~3 us in a row (fight1:
+~48 tests a frame, ~28 of them culled). Entities stay in the list, so a
+follower still finds its culled parent for its bones
+=================
+*/
+void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled )
+{
+	g_precull.enabled = r_studio_precull.value && !r_nocull.value;
+	g_precull.minpixels = r_studio_minpixels.value > 0.0f && RI.rvp.fov_x > 0.0f ? r_studio_minpixels.value : 0.0f;
+	g_precull.px_scale = g_precull.minpixels > 0.0f ? RI.rvp.viewport[2] * 0.5f / tanf( RI.rvp.fov_x * ( M_PI_F / 360.0f )) : 0.0f;
+	g_precull.time = gp_cl->time;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_t *e = list[i];
+
+		culled[i] = e->model && e->model->type == mod_studio && !e->player
+			&& e->curstate.movetype != MOVETYPE_FOLLOW && R_StudioPreCull( e );
+	}
+
+	g_precull.active = true;
+}
+
+void R_StudioPreCullEnd( void )
+{
+	g_precull.active = false;
 }
 #endif
 
@@ -4638,7 +4682,7 @@ void R_DrawStudioModel( cl_entity_t *e )
 	else
 	{
 #if XASH_PSP
-		if( R_StudioPreCull( e ))
+		if( !g_precull.active && R_StudioPreCull( e ))
 			return;
 #endif
 		R_StudioDrawModelInternal( e, STUDIO_RENDER|STUDIO_EVENTS );

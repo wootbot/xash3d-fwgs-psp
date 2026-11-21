@@ -810,7 +810,16 @@ R_DrawEntitiesOnList
 */
 static void R_DrawEntitiesOnList( void )
 {
+	static byte solid_culled[MAX_VISIBLE_PACKET], trans_culled[MAX_VISIBLE_PACKET];
+
 	tr.blend = 1.0f;
+
+	// studio models off screen, all in a row
+	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
+	{
+		R_StudioPreCullList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled );
+		R_StudioPreCullList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
+	}
 
 	// first draw solid entities
 	for( int i = 0; i < tr.draw_list->num_solid_entities && !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ); i++ )
@@ -833,7 +842,8 @@ static void R_DrawEntitiesOnList( void )
 			R_DrawAliasModel( RI.currententity );
 			break;
 		case mod_studio:
-			R_DrawStudioModel( RI.currententity );
+			if( !solid_culled[i] )
+				R_DrawStudioModel( RI.currententity );
 			break;
 		default:
 			break;
@@ -909,7 +919,8 @@ static void R_DrawEntitiesOnList( void )
 			R_DrawAliasModel( RI.currententity );
 			break;
 		case mod_studio:
-			R_DrawStudioModel( RI.currententity );
+			if( !trans_culled[i] )
+				R_DrawStudioModel( RI.currententity );
 			break;
 		case mod_sprite:
 			R_DrawSpriteModel( RI.currententity );
@@ -935,6 +946,7 @@ static void R_DrawEntitiesOnList( void )
 	}
 
 	sceGuDisable( GU_BLEND );	// Trinity Render issues
+	R_StudioPreCullEnd();
 
 	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
 		R_DrawViewModel();
