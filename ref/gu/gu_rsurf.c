@@ -859,11 +859,180 @@ EmitWaterPolys
 Does a water warp on the pre-fragmented gu_poly_t chain
 =============
 */
+#if XASH_PSP
+/*
+=============
+static water
+
+Warping water is ~4.5 us a polygon on the CPU (fight1: 328 polygons, 1.5 ms a
+frame). With r_water_static the polygons of a water surface are built once
+into one triangle list that the GE draws as is, with the texture scrolling
+instead of the warp: no ripples, but still clearly water. Polygons that need
+clipping this frame (near or behind the eye) and surfaces seen from below are
+warped as before. fight1: ~310 of ~328 polygons a frame from the lists,
+26.3 -> 26.65 fps.
+=============
+*/
+#include <pspkernel.h>
+#include <malloc.h>
+static CVAR_DEFINE_AUTO( r_water_static, "1", FCVAR_ARCHIVE, "draw water without the warp, from prebuilt vertex lists (faster)" );
+
+typedef struct
+{
+	const msurface_t	*surf;
+	const model_t	*world;
+	gu_vert_t		*verts;
+	int		numverts;
+	int		numpolys;
+	int		*first;		// per poly: its first vertex in verts
+	byte		*drawn;		// per poly, this call: drawn from verts
+} staticwater_t;
+
+#define STATICWATER_SIZE 256
+static staticwater_t r_staticwater[STATICWATER_SIZE];
+
+// called on a new map
+void R_StaticWaterClear( void )
+{
+	static qboolean registered;
+
+	if( !registered )
+	{
+		gEngfuncs.Cvar_RegisterVariable( &r_water_static );
+		registered = true;
+	}
+
+	for( int i = 0; i < STATICWATER_SIZE; i++ )
+	{
+		free( r_staticwater[i].verts );
+		free( r_staticwater[i].first );
+	}
+	memset( r_staticwater, 0, sizeof( r_staticwater ));
+}
+
+static staticwater_t *R_StaticWaterGet( const msurface_t *warp )
+{
+	uint h = ((uint)(uintptr_t)warp * 2654435761u ) >> 24;
+
+	for( int n = 0; n < 8; n++, h = ( h + 1 ) & ( STATICWATER_SIZE - 1 ))
+	{
+		staticwater_t *w = &r_staticwater[h];
+
+		if( w->surf == warp && w->world == WORLDMODEL )
+			return w->verts ? w : NULL;
+		if( w->surf && w->world == WORLDMODEL )
+			continue;
+
+		// free slot (or one of another map): build
+		free( w->verts );
+		free( w->first );
+		memset( w, 0, sizeof( *w ));
+		w->surf = warp;
+		w->world = WORLDMODEL;
+
+		int count = 0, polys = 0;
+		for( const gu_poly_t *p = GU_POLYS( warp ); p; p = p->next, polys++ )
+		{
+			if( p->numverts >= 3 )
+				count += ( p->numverts - 2 ) * 3;
+		}
+		if( !count )
+			return NULL;
+		w->verts = memalign( 16, count * sizeof( gu_vert_t ));
+		w->first = malloc(( polys + 1 ) * sizeof( int ) + polys );
+		if( !w->verts || !w->first )
+		{
+			free( w->verts );
+			free( w->first );
+			w->verts = NULL;
+			w->first = NULL;
+			return NULL;
+		}
+		w->numpolys = polys;
+		w->drawn = (byte *)( w->first + polys + 1 );
+
+		int pi = 0;
+		for( const gu_poly_t *p = GU_POLYS( warp ); p; p = p->next, pi++ )
+		{
+			w->first[pi] = w->numverts;
+			for( int i = 2; i < p->numverts; i++ )
+			{
+				const gu_vert_t *fan[3] = { &p->verts[0], &p->verts[i - 1], &p->verts[i] };
+				for( int k = 0; k < 3; k++ )
+				{
+					gu_vert_t *o = &w->verts[w->numverts++];
+					o->uv[0] = fan[k]->uv[0] * ( 1.0f / SUBDIVIDE_SIZE );
+					o->uv[1] = fan[k]->uv[1] * ( 1.0f / SUBDIVIDE_SIZE );
+					VectorCopy( fan[k]->xyz, o->xyz );
+				}
+			}
+		}
+		w->first[pi] = w->numverts;
+		sceKernelDcacheWritebackRange( w->verts, w->numverts * sizeof( gu_vert_t ));
+		return w;
+	}
+	return NULL; // table full around this slot
+}
+
+// draws the polys of the surface that need no clipping; true when that was all of them,
+// else *drawn flags (per poly) the ones done
+static qboolean R_StaticWaterDraw( msurface_t *warp, qboolean reverse, const byte **drawn )
+{
+	*drawn = NULL;
+	if( reverse || !r_water_static.value )
+		return false;
+
+	staticwater_t *w = R_StaticWaterGet( warp );
+	if( !w )
+		return false;
+
+	// the scroll stands in for the warp
+	const float t = (float)fmod( gp_cl->time * 0.05, 1.0 );
+	int run = -1, left = 0, pi = 0;
+
+	GL_ResetFogColor();
+	sceGuTexOffset( t, t * 0.5f );
+	for( gu_poly_t *p = GU_POLYS( warp ); p; p = p->next, pi++ )
+	{
+		const qboolean ok = p->numverts < 3 || !GU_ClipIsRequired( p->verts, p->numverts );
+
+		w->drawn[pi] = ok;
+		if( ok )
+		{
+			if( run < 0 )
+				run = pi;
+			continue;
+		}
+		left++;
+		if( run >= 0 && w->first[pi] > w->first[run] )
+			extGuDrawArrayBatched( GU_TRIANGLES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, w->first[pi] - w->first[run], w->verts + w->first[run] );
+		run = -1;
+	}
+	if( run >= 0 && w->first[pi] > w->first[run] )
+		extGuDrawArrayBatched( GU_TRIANGLES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, w->first[pi] - w->first[run], w->verts + w->first[run] );
+	sceGuTexOffset( 0.0f, 0.0f );
+	GL_SetupFogColorForSurfaces();
+
+	if( !left )
+		return true;
+	*drawn = w->drawn;
+	return false;
+}
+#endif
+
 static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 {
 	float	waveHeight;
 
 	if( !warp->polys ) return;
+
+#if XASH_PSP
+	const byte *drawn;
+	int pi = 0;
+
+	if( R_StaticWaterDraw( warp, reverse, &drawn ))
+		return;
+#endif
 
 	// set the current waveheight
 	if( GU_POLYS( warp )->verts[0].xyz[2] >= RI.rvp.vieworigin[2] )
@@ -884,6 +1053,10 @@ static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 
 	for( gu_poly_t *p = GU_POLYS( warp ); p; p = p->next )
 	{
+#if XASH_PSP
+		if( drawn && drawn[pi++] )
+			continue;
+#endif
 		const gu_vert_t *v = reverse ? &p->verts[p->numverts - 1] : &p->verts[0];
 		gu_vert_t buf[64];
 		gu_vert_t *const out = p->numverts <= ARRAYSIZE( buf ) ? buf : extGuGetMemoryNoStall( sizeof( gu_vert_t ) * p->numverts );

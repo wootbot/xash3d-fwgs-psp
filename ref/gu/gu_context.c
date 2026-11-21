@@ -354,6 +354,7 @@ static void R_NewMap( void )
 	R_ClearDecals(); // clear all level decals
 
 	R_StudioResetPlayerModels();
+	R_StaticWaterClear(); // the old map's surfaces
 
 	// clear out efrags in case the level hasn't been reloaded
 	for( int i = 0; i < WORLDMODEL->numleafs; i++ )

@@ -472,6 +472,7 @@ void Matrix4x4_FromFMatrix4( matrix4x4 out, const ScePspFMatrix4 *in );
 void R_MarkLeaves( void );
 void R_DrawWorld( void );
 void R_DrawWaterSurfaces( void );
+void R_StaticWaterClear( void );
 void R_DrawBrushModel( cl_entity_t *e );
 void GL_SubdivideSurface( model_t *mod, msurface_t *fa );
 void GL_SetupFogColorForSurfaces( void );
