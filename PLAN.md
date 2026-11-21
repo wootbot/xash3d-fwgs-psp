@@ -615,3 +615,11 @@ music), launched from the XMB.
   prediction closer to real play. Note: `docker-build.sh hlsdk` can fail with
   `psp/exports.c: No such file`: client and server both generate and delete that file and race
   under `make -j`; a plain `make` works.
+  Then (`be055ae1`): `PM_TestPlayerPosition` traces only when the point test hits something
+  (pm_shared reads that trace only when the player is stuck), and client prediction keeps the
+  physents' link boxes in one small array while it runs its commands, so each trace's broad
+  phase no longer reads two cache lines of every physent. Traces 0.49 -> 0.38, position tests
+  0.61 -> 0.24 ms a frame. Left alone: the per-move `local_state_t` copy (~0.4 ms; the client
+  reads back part of the weapon data with `-=`, so it has to be copied). Prediction ~5.0 ->
+  ~3.0 ms a frame in fight1, which is now 35.6 fps (1% low 18.8; it was 33.6 before the float
+  math).
