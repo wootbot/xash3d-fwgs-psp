@@ -37,6 +37,17 @@ TEMPENTS MANAGEMENT
 
 static TEMPENTITY *cl_active_tents;
 static TEMPENTITY *cl_free_tents;
+#if XASH_PSP
+static convar_t *cl_tents_cap;
+static int cl_tents_active;
+
+// a cap on live temp entities below max_tempents: the client DLL walks
+// every one each frame, and a firefight spawns hundreds of blood drips
+static qboolean CL_TempEntCapped( void )
+{
+	return cl_tents_cap && cl_tents_cap->value > 0 && cl_tents_active >= cl_tents_cap->value;
+}
+#endif
 static TEMPENTITY *cl_tempents = NULL;		// entities pool
 #if XASH_PSP
 // the clusters each temp entity's box touches, kept while the box doesn't move:
@@ -202,6 +213,7 @@ static void CL_ClearTempEnts( void )
 	cl_free_tents = cl_tempents;
 	cl_active_tents = NULL;
 #if XASH_PSP
+	cl_tents_active = 0;
 	if( cl_tentvis )
 		memset( cl_tentvis, 0, sizeof( *cl_tentvis ) * GI->max_tents );
 #endif
@@ -218,6 +230,7 @@ void CL_InitTempEnts( void )
 	cl_tempents = Mem_Calloc( cls.mempool, sizeof( TEMPENTITY ) * GI->max_tents );
 #if XASH_PSP
 	cl_tentvis = Mem_Calloc( cls.mempool, sizeof( *cl_tentvis ) * GI->max_tents );
+	cl_tents_cap = Cvar_Get( "cl_tents_cap", "32", FCVAR_ARCHIVE, "most temp entities alive at once (0 = max_tempents)" );
 #endif
 	CL_ClearTempEnts();
 
@@ -463,6 +476,12 @@ void CL_TempEntUpdate( void )
 	float	gravity = clgame.movevars.gravity;
 
 	clgame.dllFuncs.pfnTempEntUpdate( ft, cl.time, gravity, &cl_free_tents, &cl_active_tents, CL_TempEntAddEntity, CL_TempEntPlaySound );
+#if XASH_PSP
+	// the client DLL frees them in its own list walk, so count afterwards
+	cl_tents_active = 0;
+	for( TEMPENTITY *t = cl_active_tents; t; t = t->next )
+		cl_tents_active++;
+#endif
 }
 
 /*
@@ -511,6 +530,10 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 	static float cl_lasttimewarn;
 	TEMPENTITY	*pTemp;
 
+#if XASH_PSP
+	if( CL_TempEntCapped( ))
+		return NULL;
+#endif
 	if( !cl_free_tents )
 	{
 		if( cl_lasttimewarn < host.realtime )
@@ -531,6 +554,9 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 
 	pTemp->next = cl_active_tents;
 	cl_active_tents = pTemp;
+#if XASH_PSP
+	cl_tents_active++;
+#endif
 
 	return pTemp;
 }
@@ -546,6 +572,15 @@ TEMPENTITY *CL_TempEntAllocHigh( const vec3_t org, model_t *pmodel )
 {
 	TEMPENTITY	*pTemp;
 
+#if XASH_PSP
+	if( CL_TempEntCapped( ))
+	{
+		// replace a low priority one to stay under the cap
+		if( !CL_FreeLowPriorityTempEnt( ))
+			return NULL;
+		cl_tents_active--;
+	}
+#endif
 	if( !cl_free_tents )
 	{
 		// no temporary ents free, so find the first active low-priority temp ent
@@ -572,6 +607,9 @@ TEMPENTITY *CL_TempEntAllocHigh( const vec3_t org, model_t *pmodel )
 
 	pTemp->next = cl_active_tents;
 	cl_active_tents = pTemp;
+#if XASH_PSP
+	cl_tents_active++;
+#endif
 
 	return pTemp;
 }
