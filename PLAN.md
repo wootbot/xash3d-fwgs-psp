@@ -501,3 +501,19 @@ music), launched from the XMB.
   debug console ~3.7 ms, demo reads from the stick ~2.4 ms, the menu under the demo ~1.5 ms).
   The network yield length (20 vs 200 us) changes nothing. CPU path for all studio models
   (`r_studio_ge 0`): 4.5 ms a frame slower. Water: 328 polygons, 1330 vertices a frame.
+- 2026-11-20 (night, later): **Where a model's time goes** (engine renderer, fight1, per draw):
+  soldier ~650 us = transform+cull 20, animation decode 114, bone matrix loop 74 (~2.5 us per
+  bone for ~250 scalar FPU operations), save bones/attachments/events 56, lighting 38, GE
+  output 150. A 1-bone prop costs 3-6 us per stage when five of the same model are drawn in a
+  row and 14-20 us when it's drawn once: props and shells are dominated by cache misses (cold
+  model data and code, ~0.3-0.4 us each), soldiers by scalar FPU arithmetic. Done: VFPU
+  sin/cos/slerp in the engine (`1c6ed0c0`: soldier bones ~400 -> ~250 us), the engine studio
+  renderer as the PSP default (`fc439acf`, now faster than the client DLL's). Tried and
+  reverted: a cache of decoded animation frames (768 KB, soldier bones 252 -> 231 us, no fps
+  change: the decode isn't the cost), the floor light trace cache, water batching. The debug
+  console restart now leaves Wi-Fi first (`d536d059`) and the listener follows the PSP to a
+  new address (`691f1ae9`). fight1 in game: 25.9 fps, 1% low 14.5.
+  Next, by expected gain: the bone matrix pipeline on the VFPU; a rigid-model path (props,
+  shells, gibs: cached pose and light, models drawn grouped so their data stays in the cache);
+  then a PSP model format generated offline (reduced bones, pre-baked quantized animation, GE
+  command lists), which removes both the arithmetic and most of the scattered data.
