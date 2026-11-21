@@ -686,3 +686,47 @@ music), launched from the XMB.
   old path; ~1.3 ms), or compact per surface draw records in one cache line (~1.2 ms); fewer
   meshes per model (texture atlas per model, palettes are the problem); half rate animation
   for distant models (fidelity, ~0.5 ms).
+- 2026-11-21 (afternoon): **The GE became the limit; deferred GE wait + studio texture atlas
+  (NOT COMMITTED yet, work in progress in the working tree).** fight1 breakdown before
+  (26 ms a frame, 38.5 fps): SCR_UpdateScreen 17.1 (studio 8.0 for 19 models, world 3.9,
+  ~5.2 not split yet: brush models, effects, HUD, view model), CL_ReadPackets 2.6, sound 2.0,
+  CL_EmitEntities 1.8, CL_Move 1.2, prediction 0.7.
+  **Finding:** `R_EndFrame` waited for the GE (`sceGuSync`) at the end of every frame, so the
+  GE sat idle during the ~9 ms of game code and had only the ~17 ms of rendering to draw a
+  frame. Its work per frame is about that long now: the atlas cut studio CPU by 1.1-1.2 ms but
+  the CPU then waited 0.6-0.9 ms for the GE (TEMP `gpu_wait`, PROF3 slot 190) and fps didn't
+  move. CPU render savings only count while the GE has headroom.
+  **Deferred GE wait** (`ref/gu/gu_rmain.c`): `R_EndFrame` only does `sceGuFinish`; the new
+  `R_WaitFrame` (GE sync, swap, vertex ring reset, `extGuStart`) runs at `R_BeginFrame` and
+  before anything that frees or rewrites memory the GE may still read: `Mod_ProcessRenderData`,
+  `R_NewMap`, `Mod_StudioLoadTextures`/`Unload`, `GL_FreeTexture`, `GU_UpdateTextureRect`,
+  `VID_ScreenShot`, `GU_Shutdown`. TEMP switch `gu_deferred_sync` (1), TEMP warning
+  "GU: N command words between frames" if something emits GU commands while no list is open
+  (none seen in fight1). Frame shows ~9 ms later (one frame of extra latency).
+  **Studio texture atlas** (`ref/gu/gu_studio.c`, "STUDIO TEXTURE ATLAS", cvar
+  `r_studio_atlas` 1, built at model load): plain textures of a model (not masked, additive,
+  chrome, flat shade, fullbright, remap, nomips) go into 8-bit pages (skyline packer on the
+  16 px grid, up to 512x512, median cut palette per page = fidelity loss), the GE meshes of a
+  submodel in a page are one merged batch list per skin family (`R_StudioGEGetMerge`, atlas
+  UVs in the vertices, skin block binds the page). Memory: `GL_CreateAtlasPage` stores only
+  the used rows of each mip level (`gl_texture_t.rows`, `GL_TextureRows`), and each original
+  texture becomes an alias of its slot (`GL_AliasTexture`: base level only, `stride` = page
+  width, own pixels and palette freed), so the CPU path and single meshes still work
+  (wrapping included, but without mips). Per-mesh GE batches are built lazily
+  (`R_StudioGEMeshBatches`) so merged meshes don't keep a second copy. Pages: ~1.8 MB for
+  1.6 MB of textures on fight1's map; heap in game 29.0 MB without atlases, 29.1-29.3 with.
+  The first version (pow2 pages, originals kept) cost +2.5 MB and ran out of memory on the
+  4th map load. Results (same build, fight1): old wait + no atlas 37.6, deferred 38.2,
+  deferred + atlas 39.1-39.6 fps; GE meshes a frame ~160 -> ~25 (+ merged batches).
+  **To do next:** (1) the user hasn't checked the atlas on screen yet: model textures (palette
+  banding, seams/bleeding at slot edges, distant models), no flicker or tearing from the
+  deferred wait, map changes and the menu. (2) Commit: the working tree also holds older TEMP
+  instrumentation in the same files and `stage_clean.py` mangles these files (it dropped real
+  lines like `R_DrawWorld()`); stage by hand (`git add -p`) or apply
+  `tools/dbg/atlas_defer_wip.patch` (untracked: diff of the 7 ref/gu files against HEAD,
+  includes the old TEMP code) selectively; build the staged tree with `verify_staged.sh`.
+  Probably two commits: deferred wait, then atlas. Remove the TEMP `ATLAS`/`itemkb` log, keep
+  or drop `gu_deferred_sync`. (3) With the GE no longer waited on, CPU savings count again:
+  split the ~5.2 ms of unattributed rendering, then the world restructuring above.
+  (4) Watch the GE budget: it has ~25 ms now instead of ~17, but heavier GE work (more
+  passes, unswizzled textures) can make it the limit again; `gpu_wait` shows it.
