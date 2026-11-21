@@ -211,6 +211,7 @@ typedef struct gu_poly_s
 } gu_poly_t;
 
 #define GU_POLYS( x ) ((gu_poly_t *)( x )->polys )
+#define GU_POLY_NOCLIP BIT( 30 ) // set while drawing a surface whose box is inside the clip planes
 #define GU_POLY_SIZE( numverts ) ( sizeof( gu_poly_t ) + ( numverts ) * 2 * sizeof( gu_vert_t ))
 
 typedef struct
@@ -589,6 +590,7 @@ uint getTriBrightness( float brightness );
 void GU_ClipSetWorldFrustum( const matrix4x4 in );
 void GU_ClipRestoreWorldFrustum( void );
 void GU_ClipSetModelFrustum( const matrix4x4 in );
+qboolean GU_ClipBoxInside( const vec3_t mins, const vec3_t maxs );
 void GU_ClipLoadFrustum( const mplane_t *plane ); // Experimental
 int GU_ClipIsRequired( gu_vert_t *uv, int uvc );
 void GU_Clip( gu_vert_t *uv, int uvc, gu_vert_t **cv, int *cvc );

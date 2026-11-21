@@ -38,37 +38,93 @@ static gu_vert_t	work_buffer[2][MAX_CLIPPED_VERTICES] __attribute__(( aligned( 1
 
 /*
 =================
-GU_ClipGetFrustum
+GU_ClipGetAndStoreFrustum
+
+The GE culls a whole primitive when a vertex lands outside its 4096 pixel
+coordinate range (the guard band, +-2048 around the view center); anything
+inside it is cut to the screen by the scissor. So only primitives that reach
+past the guard band need clipping on the CPU, against planes inside it.
+Clipping against the view frustum instead clipped ~65 world polygons a
+frame in a firefight on the CPU, of which ~2 reach past the guard band.
+The margin covers views not centered at 2048 (a viewport offset by up to
+its own width or height).
 =================
 */
-static inline void GU_ClipGetAndStoreFrustum( const ScePspFMatrix4 *matrix )
+#define GU_GUARD_X	6.0f	// |x| <= 6 w: 1440 pixels from the center of a 480 pixel wide view
+#define GU_GUARD_Y	12.0f	// |y| <= 12 w: 1632 pixels for 272 lines
+
+// the planes in C as well, for GU_ClipBoxInside: distances in world units
+static float clip_planes[4][4] __attribute__(( aligned( 16 )));
+static float clip_planes_world[4][4] __attribute__(( aligned( 16 )));
+
+static void GU_ClipGetAndStoreFrustum( const ScePspFMatrix4 *matrix )
 {
-	__asm__ (
+	// ScePspFMatrix4 holds columns: row r of column c is m[c * 4 + r]
+	const float *m = (const float *)matrix;
+	// bottom ( w + y ), left ( w + x ), right ( w - x ), top ( w - y ), w scaled to the guard band
+	static const int axis[4] = { 1, 0, 0, 1 };
+	static const float sign[4] = { 1.0f, 1.0f, -1.0f, -1.0f };
+	static const float guard[4] = { GU_GUARD_Y, GU_GUARD_X, GU_GUARD_X, GU_GUARD_Y };
+
+
+	for( int i = 0; i < 4; i++ )
+	{
+		float p[4];
+
+		for( int c = 0; c < 4; c++ )
+			p[c] = guard[i] * m[c * 4 + 3] + sign[i] * m[c * 4 + axis[i]];
+
+		const float len = sqrtf( p[0] * p[0] + p[1] * p[1] + p[2] * p[2] );
+		const float scale = len > 0.0f ? 1.0f / len : 0.0f;
+
+		for( int c = 0; c < 4; c++ )
+			clip_planes[i][c] = p[c] * scale;
+	}
+
+	// planes into the columns of M700
+	__asm__ volatile(
 		".set		push\n"				// save assembler option
 		".set		noreorder\n"			// suppress reordering
-		"vzero.q	C210\n"				// set zero vector
-		"lv.q		C100,  0(%0)\n"			// C000 = matrix->x
-		"lv.q		C110, 16(%0)\n"			// C010 = matrix->y
-		"lv.q		C120, 32(%0)\n"			// C020 = matrix->z
-		"lv.q		C130, 48(%0)\n"			// C030 = matrix->w
-		"vadd.q		C000, R103, R101\n"		// C000 = R103 + R101                                   ( BOTTOM )
-		"vadd.q		C010, R103, R100\n"		// C010 = R103 + R100                                   ( LEFT )
-		"vsub.q		C020, R103, R100\n"		// C020 = R103 - R100                                   ( RIGHT )
-		"vsub.q		C030, R103, R101\n"		// C030 = R103 - R101                                   ( TOP )
-		"vdot.q		S200, C000, C000\n"		// S110 = S100*S100 + S101*S101 + S102*S102 + S103*S103 ( BOTTOM )
-		"vdot.q		S201, C010, C010\n"		// S110 = S100*S100 + S101*S101 + S102*S102 + S103*S103 ( LEFT )
-		"vdot.q		S202, C020, C020\n"		// S110 = S100*S100 + S101*S101 + S102*S102 + S103*S103 ( RIGHT )
-		"vdot.q		S203, C030, C030\n"		// S110 = S100*S100 + S101*S101 + S102*S102 + S103*S103 ( TOP )
-		"vcmp.q		EZ,   C200\n"			// CC[*] = ( C200 == 0.0f )
-		"vrsq.q		C200, C200\n"			// C200 = 1.0 / sqrt( C200 )
-		"vcmovt.q	C200, C210, 6\n"		// if ( CC[*] ) C200 = C210
-		"vscl.q		C700, C000, S200\n"		// C700 = C000 * S200                                   ( BOTTOM )
-		"vscl.q		C710, C010, S201\n"		// C710 = C010 * S201                                   ( LEFT )
-		"vscl.q		C720, C020, S202\n"		// C720 = C020 * S202                                   ( RIGHT )
-		"vscl.q		C730, C030, S203\n"		// C730 = C030 * S203                                   ( TOP )
+		"lv.q		C700,  0(%0)\n"			// BOTTOM
+		"lv.q		C710, 16(%0)\n"			// LEFT
+		"lv.q		C720, 32(%0)\n"			// RIGHT
+		"lv.q		C730, 48(%0)\n"			// TOP
 		".set		pop\n"				// Restore assembler option
-		::	"r"( matrix )
+		::	"r"( clip_planes )
+		:	"memory"
 	);
+}
+
+/*
+=================
+GU_ClipBoxInside
+
+true if the box is inside all clip planes: none of its polygons need the
+per vertex test (one box test against ~5 vertex tests reading vertex data
+that is mostly not in the cache)
+=================
+*/
+qboolean GU_ClipBoxInside( const vec3_t mins, const vec3_t maxs )
+{
+	vec3_t center, extents;
+
+	for( int i = 0; i < 3; i++ )
+	{
+		center[i] = ( mins[i] + maxs[i] ) * 0.5f;
+		extents[i] = ( maxs[i] - mins[i] ) * 0.5f;
+	}
+
+	for( int i = 0; i < 4; i++ )
+	{
+		const float *p = clip_planes[i];
+		const float d = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
+		const float r = fabsf( p[0] ) * extents[0] + fabsf( p[1] ) * extents[1] + fabsf( p[2] ) * extents[2];
+
+		if( d < r )
+			return false;
+	}
+
+	return true;
 }
 
 /*
@@ -87,6 +143,7 @@ void GU_ClipSetWorldFrustum( const matrix4x4 in )
 	GU_ClipGetAndStoreFrustum( &projection_view_matrix );
 
 	// Save the clipping frustum.
+	memcpy( clip_planes_world, clip_planes, sizeof( clip_planes ));
 	__asm__ volatile(
 		".set		push\n"				// save assembler option
 		".set		noreorder\n"			// suppress reordering
@@ -105,6 +162,7 @@ Restore the clipping frustum
 void GU_ClipRestoreWorldFrustum( void )
 {
 	// Restore the clipping frustum.
+	memcpy( clip_planes, clip_planes_world, sizeof( clip_planes ));
 	__asm__ volatile(
 		".set		push\n"				// save assembler option
 		".set		noreorder\n"			// suppress reordering

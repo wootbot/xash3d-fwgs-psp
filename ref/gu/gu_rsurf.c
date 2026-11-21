@@ -761,6 +761,21 @@ static void GU_DrawPolyVerts( gu_vert_t *verts, int numverts )
 
 /*
 ================
+GU_DrawPoly
+
+draws one of a surface's vertex sets, without the clip test when
+R_RenderBrushPoly found the surface's box inside the clip planes
+================
+*/
+static void GU_DrawPoly( gu_poly_t *p, gu_vert_t *verts )
+{
+	if( FBitSet( p->flags, GU_POLY_NOCLIP ))
+		extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, p->numverts, verts );
+	else GU_DrawPolyVerts( verts, p->numverts );
+}
+
+/*
+================
 GU_DrawPolyVertsCopy
 
 GU_DrawPolyVerts for vertices built in cached memory: the clip test reads
@@ -843,7 +858,7 @@ static void DrawGLPoly( gu_poly_t *p, float xScale, float yScale )
 	if( hasScale ) sceGuTexScale( xScale, yScale );
 	if( hasOffset ) sceGuTexOffset( sOffset * xScale, tOffset * yScale );
 
-	GU_DrawPolyVerts( p->verts, p->numverts );
+	GU_DrawPoly( p, p->verts );
 
 	if( hasScale ) sceGuTexScale( 1.0f, 1.0f );
 	if( hasOffset ) sceGuTexOffset( 0.0f, 0.0f );
@@ -1106,7 +1121,7 @@ static void DrawGLPolyChain( gu_poly_t *p, float soffset, float toffset )
 	if( dynamic ) sceGuTexOffset( -soffset, -toffset );
 
 	for( ; p != NULL; p = p->chain )
-		GU_DrawPolyVerts( &p->verts[p->numverts], p->numverts );
+		GU_DrawPoly( p, &p->verts[p->numverts] );
 
 	if( dynamic ) sceGuTexOffset( 0.0f, 0.0f );
 }
@@ -1468,9 +1483,19 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
 		return;
 	}
 
+	// the clip test result for this surface's other passes in this frame too
+	// (fullbrights, details, lightmaps): all of them come through here first
+	gu_poly_t *p = GU_POLYS( fa );
+	if( p )
+	{
+		if( GU_ClipBoxInside( fa->info->mins, fa->info->maxs ))
+			SetBits( p->flags, GU_POLY_NOCLIP );
+		else ClearBits( p->flags, GU_POLY_NOCLIP );
+	}
+
 	R_RenderFullbrightForSurface( fa, t );
 	R_RenderDetailsForSurface( fa, t );
-	DrawGLPoly( GU_POLYS( fa ), 0.0f, 0.0f );
+	DrawGLPoly( p, 0.0f, 0.0f );
 	R_RenderDecalsForSurface( fa, cull_type );
 	R_RenderLightmapForSurface( fa );
 }
