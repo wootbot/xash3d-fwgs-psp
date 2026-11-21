@@ -331,12 +331,9 @@ only clip against entities whose link box (SV_LinkEdict: origin + mins/maxs, a c
 the radius for rotated brush models, one unit larger) touches the move.
 ==================
 */
-static qboolean PM_PhysEntOutOfReach( const playermove_t *pmove, const physent_t *pe, const vec3_t start, const vec3_t end )
+// the physent's link box relative to its origin, false when it can't be culled
+static qboolean PM_PhysEntLinkBox( const physent_t *pe, vec3_t emins, vec3_t emaxs )
 {
-	const float *pmins = host.player_mins[pmove->usehull];
-	const float *pmaxs = host.player_maxs[pmove->usehull];
-	vec3_t emins, emaxs;
-
 	if( pe->solid == SOLID_CUSTOM )
 		return false;
 
@@ -376,17 +373,81 @@ static qboolean PM_PhysEntOutOfReach( const playermove_t *pmove, const physent_t
 		VectorCopy( pe->mins, emins );
 		VectorCopy( pe->maxs, emaxs );
 	}
+	return true;
+}
+
+static qboolean PM_MoveOutsideBox( const playermove_t *pmove, const vec3_t start, const vec3_t end, const vec3_t absmins, const vec3_t absmaxs )
+{
+	const float *pmins = host.player_mins[pmove->usehull];
+	const float *pmaxs = host.player_maxs[pmove->usehull];
 
 	for( int j = 0; j < 3; j++ )
 	{
 		float lo = Q_min( start[j], end[j] ) + pmins[j] - 1.0f;
 		float hi = Q_max( start[j], end[j] ) + pmaxs[j] + 1.0f;
 
-		if( lo > pe->origin[j] + emaxs[j] || hi < pe->origin[j] + emins[j] )
+		if( lo > absmaxs[j] || hi < absmins[j] )
 			return true;
 	}
-
 	return false;
+}
+
+/*
+the physents don't change while client prediction runs its commands, but each
+trace and position test walked all of them, two cache misses each (~60 us a
+trace with ~37 physents). Their absolute link boxes are kept in one small array
+between PM_BeginReachCache and PM_EndReachCache instead.
+*/
+#define PM_REACH_MAX 128
+static struct
+{
+	const playermove_t *pmove;
+	int	num;
+	byte	cull[PM_REACH_MAX];
+	vec3_t	mins[PM_REACH_MAX], maxs[PM_REACH_MAX];
+} pm_reach;
+
+void PM_BeginReachCache( const playermove_t *pmove )
+{
+	const int num = Q_min( pmove->numphysent, PM_REACH_MAX );
+
+	for( int i = 0; i < num; i++ )
+	{
+		const physent_t *pe = &pmove->physents[i];
+		vec3_t emins, emaxs;
+
+		pm_reach.cull[i] = i != 0 && PM_PhysEntLinkBox( pe, emins, emaxs );
+		if( pm_reach.cull[i] )
+		{
+			VectorAdd( pe->origin, emins, pm_reach.mins[i] );
+			VectorAdd( pe->origin, emaxs, pm_reach.maxs[i] );
+		}
+	}
+	pm_reach.num = num;
+	pm_reach.pmove = pmove;
+}
+
+void PM_EndReachCache( void )
+{
+	pm_reach.pmove = NULL;
+}
+
+static qboolean PM_PhysEntOutOfReach( const playermove_t *pmove, const physent_t *ents, int i, const vec3_t start, const vec3_t end )
+{
+	vec3_t emins, emaxs, absmins, absmaxs;
+
+	if( i == 0 )
+		return false;
+
+	if( pm_reach.pmove == pmove && ents == pmove->physents && pmove->numphysent == pm_reach.num && i < pm_reach.num )
+		return pm_reach.cull[i] && PM_MoveOutsideBox( pmove, start, end, pm_reach.mins[i], pm_reach.maxs[i] );
+
+	if( !PM_PhysEntLinkBox( &ents[i], emins, emaxs ))
+		return false;
+
+	VectorAdd( ents[i].origin, emins, absmins );
+	VectorAdd( ents[i].origin, emaxs, absmaxs );
+	return PM_MoveOutsideBox( pmove, start, end, absmins, absmaxs );
 }
 #endif
 
@@ -412,6 +473,11 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 		if( i != 0 && ( flags & PM_WORLD_ONLY ))
 			break;
 
+#if XASH_PSP
+		if( PM_PhysEntOutOfReach( pmove, ents, i, start, end ))
+			continue;
+#endif
+
 		// run custom user filter
 		if( pmFilter != NULL )
 		{
@@ -432,11 +498,6 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 
 		if(( flags & PM_CUSTOM_IGNORE ) && pe->solid == SOLID_CUSTOM )
 			continue;
-
-#if XASH_PSP
-		if( i != 0 && PM_PhysEntOutOfReach( pmove, pe, start, end ))
-			continue;
-#endif
 
 		hullcount = 1;
 
@@ -604,10 +665,41 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 	return trace_total;
 }
 
+#if XASH_PSP
+static int PM_TestPlayerPoint( playermove_t *pmove, vec3_t pos, pfnIgnore pmFilter );
+
+int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, pfnIgnore pmFilter )
+{
+	// the trace only tells what the player is stuck in: pm_shared reads it only when
+	// the test hits something, and it costs as much as the test, so trace only then
+	const int hit = PM_TestPlayerPoint( pmove, pos, pmFilter );
+
+	if( ptrace )
+	{
+		if( hit != -1 )
+		{
+			*ptrace = PM_PlayerTraceExt( pmove, pmove->origin, pmove->origin, 0, pmove->numphysent, pmove->physents, -1, pmFilter );
+		}
+		else
+		{
+			// what the trace returns when nothing is solid there
+			memset( ptrace, 0, sizeof( *ptrace ));
+			VectorCopy( pmove->origin, ptrace->endpos );
+			ptrace->fraction = 1.0f;
+			ptrace->ent = -1;
+		}
+	}
+	return hit;
+}
+
+static int PM_TestPlayerPoint( playermove_t *pmove, vec3_t pos, pfnIgnore pmFilter )
+{
+#else
 int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, pfnIgnore pmFilter )
 {
 	pmtrace_t trace = PM_PlayerTraceExt( pmove, pmove->origin, pmove->origin, 0, pmove->numphysent, pmove->physents, -1, pmFilter );
 	if( ptrace ) *ptrace = trace;
+#endif
 
 	for( int i = 0; i < pmove->numphysent; i++ )
 	{
@@ -616,6 +708,11 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 		vec3_t mins, maxs;
 		hull_t *hull = NULL;
 		int hullcount;
+
+#if XASH_PSP
+		if( PM_PhysEntOutOfReach( pmove, pmove->physents, i, pos, pos ))
+			continue;
+#endif
 
 		// run custom user filter
 		if( pmFilter != NULL )
@@ -626,11 +723,6 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 
 		if( pe->model != NULL && pe->solid == SOLID_NOT && pe->skin != CONTENTS_NONE )
 			continue;
-
-#if XASH_PSP
-		if( i != 0 && PM_PhysEntOutOfReach( pmove, pe, pos, pos ))
-			continue;
-#endif
 
 		hullcount = 1;
 

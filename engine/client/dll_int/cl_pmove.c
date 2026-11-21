@@ -1104,6 +1104,9 @@ void CL_PredictMovement( qboolean repredicting )
 	// predict forward until cl.time <= to->senttime
 	CL_PushPMStates();
 	CL_SetSolidPlayers( cl.playernum );
+#if XASH_PSP
+	PM_BeginReachCache( clgame.pmove );
+#endif
 
 #if XASH_PSP
 	uint last_done = cls.netchan.incoming_acknowledged;
@@ -1147,6 +1150,9 @@ void CL_PredictMovement( qboolean repredicting )
 	pred_done = (int)( last_done - cls.netchan.outgoing_sequence ) < 0 ? last_done : cls.netchan.outgoing_sequence - 1;
 #endif
 
+#if XASH_PSP
+	PM_EndReachCache();
+#endif
 	CL_PopPMStates();
 
 	if(( i == CL_UPDATE_MASK ) || ( !to && !repredicting ))
