@@ -536,3 +536,9 @@ music), launched from the XMB.
   ~0.65 ms a frame at 100 fps), demo reads ~2.7 and the debug console ~2.2 (timedemo/debug only).
   The level load's resource list and server data are ~22% of a sampled timedemo, so read
   sampled profiles net of them.
+- 2026-11-21: **Screen-size cull** (`r_studio_minpixels 2`): studio models whose bounding radius
+  is under 2 pixels on screen are skipped in the pre-cull. Per-model profile before it (fight1,
+  per frame): ~23 brass shells 3.8 ms (~170 us each for 20 triangles), 8 soldiers 3.7 ms,
+  ~10 static props 3.5 ms (300-400 us each: light 40-145 us, GE output 95-165 us). With it the
+  shells drop to ~0.15 ms: 27.0 -> 28.9 fps. Next: the props (static, so their bones and light
+  could be kept between frames) and the per-draw GE output cost.
