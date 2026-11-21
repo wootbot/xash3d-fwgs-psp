@@ -106,25 +106,44 @@ that is mostly not in the cache)
 */
 qboolean GU_ClipBoxInside( const vec3_t mins, const vec3_t maxs )
 {
-	vec3_t center, extents;
+	// the four planes at once from M700 (see GU_ClipIsRequired), for every
+	// world and brush surface: the scalar floats were ~0.1 ms a frame more
+	int result = 0;
 
-	for( int i = 0; i < 3; i++ )
-	{
-		center[i] = ( mins[i] + maxs[i] ) * 0.5f;
-		extents[i] = ( maxs[i] - mins[i] ) * 0.5f;
-	}
+	__asm__ (
+		".set		push\n"
+		".set		noreorder\n"
+		"lv.s		S000, 0(%1)\n"			// C000 = mins
+		"lv.s		S001, 4(%1)\n"
+		"lv.s		S002, 8(%1)\n"
+		"lv.s		S010, 0(%2)\n"			// C010 = maxs
+		"lv.s		S011, 4(%2)\n"
+		"lv.s		S012, 8(%2)\n"
+		"vabs.q		C100, C700\n"			// M100 = | planes |
+		"vabs.q		C110, C710\n"
+		"vabs.q		C120, C720\n"
+		"vabs.q		C130, C730\n"
+		"vfim.s		S003, 0.5\n"
+		"vadd.t		C020, C000, C010\n"		// C020 = center * 2
+		"vsub.t		C030, C010, C000\n"		// C030 = extents * 2
+		"vscl.t		C020, C020, S003\n"		// C020 = center
+		"vscl.t		C030, C030, S003\n"		// C030 = extents
+		"vzero.s	S033\n"
+		"vhtfm4.q	C200, M700, C020\n"		// C200 = plane distances of the center
+		"vtfm4.q	C210, M100, C030\n"		// C210 = the box's reach along each plane normal
+		"vsub.q		C220, C200, C210\n"		// C220 = distances of the nearest corners
+		"vzero.q	C230\n"
+		"vcmp.q		LT, C220, C230\n"		// any corner behind a plane?
+		"bvt		4, 1f\n"
+		"nop\n"
+		"li		%0, 1\n"
+	"1:\n"
+		".set		pop\n"
+		: "+r"( result )
+		: "r"( mins ), "r"( maxs )
+	);
 
-	for( int i = 0; i < 4; i++ )
-	{
-		const float *p = clip_planes[i];
-		const float d = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
-		const float r = fabsf( p[0] ) * extents[0] + fabsf( p[1] ) * extents[1] + fabsf( p[2] ) * extents[2];
-
-		if( d < r )
-			return false;
-	}
-
-	return true;
+	return result;
 }
 
 /*
