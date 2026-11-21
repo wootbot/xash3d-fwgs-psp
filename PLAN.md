@@ -562,12 +562,14 @@ music), launched from the XMB.
   The menu update under a timedemo costs nothing (its samples were the level load). The GPU
   wait at the end of a frame is 0.2%: the GE overlaps the CPU, everything is CPU bound.
   Fresh sampled profile, ms per in-game frame at ~34 fps: render work not split into stages
-  (mostly studio models) ~5.4, Wi-Fi stack threads ~3 (they run in the main thread's net
-  yield; yielding every 4th frame instead changes nothing, so it's work, not yield overhead,
-  and it's there online too), world ~3.1, prediction ~2.9, brush entities ~2, mixing ~1.7,
-  demo reads ~1.3 (timedemo only).
-  **The floor without rendering**: prediction, the Wi-Fi stack, mixing, parsing and the
-  client DLL's frame work add up to ~10-11 ms a frame, so 100 fps (10 ms) in fight1 can't be
-  reached by renderer work alone. 60 fps (16.7 ms) leaves ~5-6 ms for all rendering against
-  ~17 ms now: that needs the PSP model format (baked bones and animation, GE command lists)
-  and world display lists, not more small cuts.
+  (mostly studio models) ~5.4, world ~3.1, prediction ~2.9, brush entities ~2, mixing ~1.7.
+  **The sampler overcounts blocking calls**: it put ~3 ms a frame in the net yield, but the
+  threads' own run clocks (TEMP `psp_threads`, `sceKernelReferThreadStatus` of every thread
+  over a fight1 timedemo, 25 s) show all Wi-Fi and network threads together at ~195 ms in
+  25 s (~0.25 ms a frame), and a direct timer shows the 200 us yield takes ~0.45 ms a frame
+  (wake-up latency). So the sampler's numbers for the debug console and demo reads (both
+  blocking) are likely too high as well; time blocking work with timers or thread clocks.
+  Without rendering a frame is ~8 ms (prediction, parsing, the client DLL's frame work,
+  mixing). 100 fps still needs rendering at ~2 ms against ~17 ms now, and 60 fps ~8-9 ms:
+  that needs the PSP model format (baked bones and animation, GE command lists) and world
+  display lists, not more small cuts.
