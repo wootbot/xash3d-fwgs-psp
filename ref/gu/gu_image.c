@@ -18,6 +18,26 @@ GNU General Public License for more details.
 #include "gu_local.h"
 #include "crclib.h"
 
+// upload scratch buffers come from the P5 RAM when possible: they are big and short-lived,
+// the heap is nearly full in game (the renderer is linked into the engine on the PSP)
+void *PSP_VolatileAlloc( size_t size );
+void PSP_VolatileFree( void *ptr );
+qboolean PSP_IsVolatile( const void *ptr );
+
+static void *GL_TempAlloc( size_t size )
+{
+	void *p = PSP_VolatileAlloc( size ); // 16-byte aligned
+
+	return p ? p : memalign( 16, size );
+}
+
+static void GL_TempFree( void *p )
+{
+	if( PSP_IsVolatile( p ))
+		PSP_VolatileFree( p );
+	else free( p );
+}
+
 #define TEXTURES_HASH_SIZE	(MAX_TEXTURES >> 2)
 
 static gl_texture_t	gl_textures[MAX_TEXTURES];
@@ -1025,7 +1045,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 		// Volatile memory for temporary buffer
 		if( swizzle )
 		{
-			tempBuff = memalign( 16, texSize );
+			tempBuff = GL_TempAlloc( texSize );
 			if( !tempBuff ) gEngfuncs.Host_Error( "GL_UploadTexture: temporary memory error\n" );
 		}
 
@@ -1045,7 +1065,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 
 		if( swizzle )
 		{
-			free( tempBuff );
+			GL_TempFree( tempBuff );
 			SetBits( tex->flags, TF_IMG_SWIZZLED );
 		}
 	}
@@ -1053,7 +1073,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	{
 		if( swizzle )
 		{
-			tempBuff = memalign( 16, texSize );
+			tempBuff = GL_TempAlloc( texSize );
 			if( !tempBuff ) gEngfuncs.Host_Error( "GL_UploadTexture: temporary memory error\n" );
 		}
 
@@ -1070,7 +1090,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 		if( swizzle )
 		{
 			GL_TextureSwizzle( tex->dstTexture, tempBuff, tex->width * tex->bpp, tex->height );
-			free( tempBuff );
+			GL_TempFree( tempBuff );
 			SetBits( tex->flags, TF_IMG_SWIZZLED );
 		}
 	}
@@ -1080,7 +1100,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 			offset = tex->width * tex->height * 4; // src size
 
 		// 32-bit source (offset bytes), then the packed texture to swizzle from
-		tempBuff = memalign( 16, swizzle ? ( texSize + offset ) : offset );
+		tempBuff = GL_TempAlloc( swizzle ? ( texSize + offset ) : offset );
 		if( !tempBuff ) gEngfuncs.Host_Error( "GL_UploadTexture: temporary memory error\n" );
 
 		if(( pic->width != tex->width ) || ( pic->height != tex->height ))
@@ -1121,7 +1141,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 				SetBits( tex->flags, TF_IMG_SWIZZLED );
 			}
 		}
-		free( tempBuff );
+		GL_TempFree( tempBuff );
 	}
 
 	sceKernelDcacheWritebackRange( tex->dstTexture, texSize );
