@@ -942,6 +942,33 @@ static const void CL_FinishPMove( const playermove_t *pmove, local_state_t *to )
 	VectorCopy( pmove->vuser4, cd->vuser4 );
 }
 
+#if XASH_PSP
+/*
+a local_state_t is ~6.4 KB, ~5.6 KB of it the 64 weapon slots, and one is copied for
+every predicted move. The slots past the highest weapon the server sent are zero in the
+state each prediction starts from, so only the slots up to the highest one ever used
+are copied: nothing is written above it, so it stays zero in every state.
+*/
+static int pred_weaponslots;
+
+static void CL_CopyLocalState( local_state_t *to, const local_state_t *from )
+{
+	if( to == from )
+		return;
+	to->playerstate = from->playerstate;
+	to->client = from->client;
+	memcpy( to->weapondata, from->weapondata, pred_weaponslots * sizeof( to->weapondata[0] ));
+}
+
+static void CL_CountWeaponSlots( const weapon_data_t *weapondata )
+{
+	int i;
+
+	for( i = MAX_LOCAL_WEAPONS; i > pred_weaponslots && !weapondata[i - 1].m_iId; i-- );
+	pred_weaponslots = i;
+}
+#endif
+
 /*
 =================
 CL_RunUsercmd
@@ -958,7 +985,10 @@ static void CL_RunUsercmd( local_state_t *from, local_state_t *to, usercmd_t *u,
 		local_state_t	temp;
 		usercmd_t		split;
 
+#if !XASH_PSP
 		memset( &temp, 0, sizeof( temp ));
+#endif
+		// PSP: no memset, the call below assigns all of temp before reading it (6.4 KB)
 
 		split = *u;
 		split.msec /= 2;
@@ -969,7 +999,11 @@ static void CL_RunUsercmd( local_state_t *from, local_state_t *to, usercmd_t *u,
 	}
 
 	cmd = *u;	// deal with local copy
+#if XASH_PSP
+	CL_CopyLocalState( to, from );
+#else
 	*to = *from;
+#endif
 
 	if( CL_IsPredicted( ))
 	{
@@ -1091,7 +1125,12 @@ void CL_PredictMovement( qboolean repredicting )
 
 	from = &cl.predicted_frames[cl.parsecountmod];
 	from_cmd = &cl.commands[cls.netchan.incoming_acknowledged & CL_UPDATE_MASK];
+#if XASH_PSP
+	CL_CountWeaponSlots( frame->weapondata );
+	memcpy( from->weapondata, frame->weapondata, pred_weaponslots * sizeof( from->weapondata[0] ));
+#else
 	memcpy( from->weapondata, frame->weapondata, sizeof( from->weapondata ));
+#endif
 	from->playerstate = frame->playerstate[cl.playernum];
 	from->client = frame->clientdata;
 	if( !frame->valid ) return;
