@@ -126,7 +126,12 @@ typedef struct
 
 // studio-related cvars
 CVAR_DEFINE_AUTO( r_studio_sort_textures, "0", FCVAR_GLCONFIG, "change draw order for additive meshes" );
+#if XASH_PSP
+// the PSP optimizations (VFPU bone math) are in this one, measured faster
+CVAR_DEFINE_AUTO( r_studio_builtin_renderer, "1", 0, "use built-in studio model renderer instead of the one provided by client library" );
+#else
 CVAR_DEFINE_AUTO( r_studio_builtin_renderer, "0", 0, "use built-in studio model renderer instead of the one provided by client library (debugging)" );
+#endif
 static cvar_t			*cl_righthand = NULL;
 
 static r_studio_interface_t	*pStudioDraw;
