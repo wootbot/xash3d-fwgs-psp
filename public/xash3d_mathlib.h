@@ -381,8 +381,25 @@ static inline float anglemod( float a )
 
 static inline void SinCos( float radians, float *sine, float *cosine )
 {
+#if XASH_PSP
+	// the VFPU takes quarter turns. sin() and cos() are double: software calls on
+	// the PSP, ~6 for each model's transform alone. The engine's math only, the
+	// player movement prediction (pm_shared in the game DLLs) has its own
+	float x = radians * (float)( 2.0 / M_PI ), out[2];
+
+	__asm__ volatile(
+		"lv.s    S500, 0(%1)\n"
+		"vsin.s  S501, S500\n"
+		"vcos.s  S502, S500\n"
+		"sv.s    S501, 0(%0)\n"
+		"sv.s    S502, 4(%0)\n"
+		:: "r"( out ), "r"( &x ) : "memory" );
+	*sine = out[0];
+	*cosine = out[1];
+#else
 	*sine = sin( radians );
 	*cosine = cos( radians );
+#endif
 }
 
 static inline int NearestPOW( int value, qboolean roundDown )

@@ -358,8 +358,17 @@ QuaternionSlerp
 Quaternion sphereical linear interpolation
 ====================
 */
+#if XASH_PSP
+static void PSP_StudioQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt );
+#endif
+
 void QuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt )
 {
+#if XASH_PSP
+	// rendering only (bone and movement interpolation): the VFPU version below
+	PSP_StudioQuaternionSlerp( p, q, t, qt );
+	return;
+#endif
 	vec4_t q2;
 
 	// 0.0 returns p, 1.0 return q.
@@ -431,6 +440,93 @@ int BoxOnPlaneSide( const vec3_t emins, const vec3_t emaxs, const mplane_t *p )
 	return sides;
 }
 
+#if XASH_PSP
+/*
+====================
+PSP studio bone math
+
+AngleQuaternion and QuaternionSlerp on the VFPU. The generic versions call the
+double sin, cos and acos: the PSP FPU has no doubles, so each is a software
+call, ~16 of them per animated bone, ~400 us for one soldier's bone setup.
+Uses VFPU matrix 5 only (ref_gu keeps state in matrices 6 and 7).
+====================
+*/
+static void PSP_StudioAngleQuaternion( const float *angles, vec4_t q )
+{
+	// half angles in quarter turns: ( a / 2 ) / ( pi / 2 )
+	const float x[3] = { angles[0] * ( 1.0f / M_PI_F ), angles[1] * ( 1.0f / M_PI_F ), angles[2] * ( 1.0f / M_PI_F ) };
+	float sn[3], cs[3];
+
+	__asm__ volatile(
+		"lv.s    S500, 0(%2)\n"
+		"lv.s    S501, 4(%2)\n"
+		"lv.s    S502, 8(%2)\n"
+		"vsin.t  C510, C500\n"
+		"vcos.t  C520, C500\n"
+		"sv.s    S510, 0(%0)\n"
+		"sv.s    S511, 4(%0)\n"
+		"sv.s    S512, 8(%0)\n"
+		"sv.s    S520, 0(%1)\n"
+		"sv.s    S521, 4(%1)\n"
+		"sv.s    S522, 8(%1)\n"
+		:: "r"( sn ), "r"( cs ), "r"( x ) : "memory" );
+
+	// as AngleQuaternion( angles, q, true ): angles[ROLL] gives y, [YAW] p, [PITCH] r
+	const float sr = sn[0], cr = cs[0];
+	const float sp = sn[1], cp = cs[1];
+	const float sy = sn[2], cy = cs[2];
+
+	q[0] = sr * cp * cy - cr * sp * sy; // X
+	q[1] = cr * sp * cy + sr * cp * sy; // Y
+	q[2] = cr * cp * sy - sr * sp * cy; // Z
+	q[3] = cr * cp * cy + sr * sp * sy; // W
+}
+
+static void PSP_StudioQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt )
+{
+	vec4_t q2;
+
+	QuaternionAlign( p, q, q2 );
+
+	const float cosom = p[0] * q2[0] + p[1] * q2[1] + p[2] * q2[2] + p[3] * q2[3];
+	float sclp, sclq;
+
+	// q2 is aligned with p, so cosom >= 0. Below ~2 degrees the VFPU asin is
+	// too coarse for sin( omega ), and a plain lerp is off by less than 2e-4 there
+	if(( 1.0f - cosom ) > 0.0005f )
+	{
+		float in[2] = { cosom, t }, out[2];
+
+		__asm__ volatile(
+			"lv.s    S500, 0(%1)\n"		// cosom
+			"lv.s    S501, 4(%1)\n"		// t
+			"vone.s  S502\n"
+			"vasin.s S500, S500\n"
+			"vsub.s  S510, S502, S500\n"	// omega = acos( cosom ), in quarter turns
+			"vsub.s  S503, S502, S501\n"	// 1 - t
+			"vmul.s  S511, S503, S510\n"	// ( 1 - t ) * omega
+			"vmul.s  S512, S501, S510\n"	// t * omega
+			"vsin.t  C510, C510\n"
+			"vrcp.s  S510, S510\n"
+			"vmul.s  S511, S511, S510\n"
+			"vmul.s  S512, S512, S510\n"
+			"sv.s    S511, 0(%0)\n"
+			"sv.s    S512, 4(%0)\n"
+			:: "r"( out ), "r"( in ) : "memory" );
+		sclp = out[0];
+		sclq = out[1];
+	}
+	else
+	{
+		sclp = 1.0f - t;
+		sclq = t;
+	}
+
+	for( int i = 0; i < 4; i++ )
+		qt[i] = sclp * p[i] + sclq * q2[i];
+}
+#endif
+
 void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, vec4_t q )
 {
 	float v1[6], v2[6];
@@ -499,13 +595,23 @@ void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const ms
 		{
 			vec4_t q1, q2;
 
+#if XASH_PSP
+			PSP_StudioAngleQuaternion( &v1[3], q1 );
+			PSP_StudioAngleQuaternion( &v2[3], q2 );
+			PSP_StudioQuaternionSlerp( q1, q2, s, q );
+#else
 			AngleQuaternion( &v1[3], q1, true );
 			AngleQuaternion( &v2[3], q2, true );
 			QuaternionSlerp( q1, q2, s, q );
+#endif
 		}
 		else
 		{
+#if XASH_PSP
+			PSP_StudioAngleQuaternion( &v1[3], q );
+#else
 			AngleQuaternion( &v1[3], q, true );
+#endif
 		}
 	}
 }
