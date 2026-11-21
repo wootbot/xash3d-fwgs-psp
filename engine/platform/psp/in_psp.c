@@ -120,6 +120,10 @@ void Platform_RunEvents( void )
 	if( host.status == HOST_INIT )
 		host.status = HOST_FRAME;
 
+	// HOME, then Yes
+	if( PSP_ExitRequested( ))
+		Sys_Quit( "HOME" );
+
 	PSP_NetFrame();
 	PSP_DbgConFrame();
 

@@ -185,6 +185,7 @@ void PS4_AllowHideSplash( void );
 #if XASH_PSP
 void PSP_Init( void );
 void PSP_Shutdown( void );
+qboolean PSP_ExitRequested( void );
 int PSP_GetArgv( int in_argc, char **in_argv, char ***out_argv );
 int PSP_LoadModule( const char *filename, int mpid, size_t argsize, void *argp );
 int PSP_UnloadModule( int modid, int *sce_code );

@@ -48,9 +48,36 @@ static int PSP_PowerCallback( int count, int arg, void *common )
 	return 0;
 }
 
+/*
+===========
+PSP_ExitCallback
+
+HOME, then Yes in the system's dialog. The main thread quits on its next frame
+the normal way (config saved, Wi-Fi left); if it doesn't within 5 s (stuck,
+or in a long load), the game is ended from here
+===========
+*/
+static volatile qboolean psp_exit_requested;
+
+static int PSP_ExitCallback( int count, int arg, void *common )
+{
+	psp_exit_requested = true;
+	sceKernelDelayThread( 5 * 1000 * 1000 );
+	sceKernelExitGame();
+	return 0;
+}
+
+qboolean PSP_ExitRequested( void )
+{
+	return psp_exit_requested;
+}
+
 static int PSP_CallbackThread( SceSize args, void *argp )
 {
-	int cbid = sceKernelCreateCallback( "Power Callback", PSP_PowerCallback, NULL );
+	int cbid = sceKernelCreateCallback( "Exit Callback", PSP_ExitCallback, NULL );
+	sceKernelRegisterExitCallback( cbid );
+
+	cbid = sceKernelCreateCallback( "Power Callback", PSP_PowerCallback, NULL );
 	scePowerRegisterCallback( 0, cbid );
 
 	sceKernelSleepThreadCB();
