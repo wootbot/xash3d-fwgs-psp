@@ -154,7 +154,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull;
+static convar_t r_studio_precull, r_studio_minpixels;
 #endif
 
 void R_StudioInit( void )
@@ -168,6 +168,9 @@ void R_StudioInit( void )
 	Matrix3x4_LoadIdentity( g_studio.rotationmatrix );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_precull );
+#if XASH_PSP
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
+#endif
 #endif
 
 	g_studio.interpolate = true;
@@ -4287,6 +4290,7 @@ skips its events: StudioDrawModel returns before them for culled models.
 =================
 */
 static CVAR_DEFINE_AUTO( r_studio_precull, "1", FCVAR_ARCHIVE, "cull studio models off screen before the client renderer sees them" );
+static CVAR_DEFINE_AUTO( r_studio_minpixels, "2", FCVAR_ARCHIVE, "skip studio models whose bounding radius is less than this many pixels on screen (0 = draw all)" );
 
 static qboolean R_StudioPreCull( cl_entity_t *e )
 {
@@ -4324,6 +4328,20 @@ static qboolean R_StudioPreCull( cl_entity_t *e )
 	float r = sqrtf( r2 );
 	if( e->curstate.scale > 1.0f )
 		r *= e->curstate.scale;
+
+	// too small on screen to make out (a shell far away is a pixel or two, and costs as
+	// much as a big prop): skip it. Radius r over the distance, in pixels
+	if( r_studio_minpixels.value > 0.0f && RI.rvp.fov_x > 0.0f )
+	{
+		vec3_t d;
+		VectorSubtract( e->origin, RI.rvp.vieworigin, d );
+
+		const float px = r * RI.rvp.viewport[2] * 0.5f / tanf( RI.rvp.fov_x * ( M_PI_F / 360.0f ));
+		const float min = r_studio_minpixels.value;
+
+		if( px * px < min * min * DotProduct( d, d ))
+			return true;
+	}
 
 	// StudioSetUpTransform moves MOVETYPE_STEP models by ( origin - prevorigin ) * ( f - 1 ),
 	// f = ( time - animtime ) / ( animtime - prevanimtime ) while animtime is less than 1 s old
