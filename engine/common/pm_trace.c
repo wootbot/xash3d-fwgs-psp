@@ -376,54 +376,54 @@ static qboolean PM_PhysEntLinkBox( const physent_t *pe, vec3_t emins, vec3_t ema
 	return true;
 }
 
-static qboolean PM_MoveOutsideBox( const playermove_t *pmove, const vec3_t start, const vec3_t end, const vec3_t absmins, const vec3_t absmaxs )
-{
-	const float *pmins = host.player_mins[pmove->usehull];
-	const float *pmaxs = host.player_maxs[pmove->usehull];
-
-	for( int j = 0; j < 3; j++ )
-	{
-		float lo = Q_min( start[j], end[j] ) + pmins[j] - 1.0f;
-		float hi = Q_max( start[j], end[j] ) + pmaxs[j] + 1.0f;
-
-		if( lo > absmaxs[j] || hi < absmins[j] )
-			return true;
-	}
-	return false;
-}
-
 /*
 the physents don't change while client prediction runs its commands, but each
 trace and position test walked all of them, two cache misses each (~60 us a
-trace with ~37 physents). Their absolute link boxes are kept in one small array
-between PM_BeginReachCache and PM_EndReachCache instead.
+trace with ~37 physents). Between PM_BeginReachCache and PM_EndReachCache their
+absolute link boxes are kept in one small array (an infinite box for the ones
+that can't be culled), and so is the list of the physents that can have contents.
 */
 #define PM_REACH_MAX 128
 static struct
 {
 	const playermove_t *pmove;
 	int	num;
-	byte	cull[PM_REACH_MAX];
-	vec3_t	mins[PM_REACH_MAX], maxs[PM_REACH_MAX];
+	float	box[PM_REACH_MAX][6]; // mins, maxs
+	int	numcontents;
+	short	contents[PM_REACH_MAX];
 } pm_reach;
 
 void PM_BeginReachCache( const playermove_t *pmove )
 {
-	const int num = Q_min( pmove->numphysent, PM_REACH_MAX );
+	if( pmove->numphysent > PM_REACH_MAX )
+	{
+		pm_reach.pmove = NULL;
+		return;
+	}
 
-	for( int i = 0; i < num; i++ )
+	pm_reach.numcontents = 0;
+	for( int i = 0; i < pmove->numphysent; i++ )
 	{
 		const physent_t *pe = &pmove->physents[i];
+		float *box = pm_reach.box[i];
 		vec3_t emins, emaxs;
 
-		pm_reach.cull[i] = i != 0 && PM_PhysEntLinkBox( pe, emins, emaxs );
-		if( pm_reach.cull[i] )
+		if( i != 0 && PM_PhysEntLinkBox( pe, emins, emaxs ))
 		{
-			VectorAdd( pe->origin, emins, pm_reach.mins[i] );
-			VectorAdd( pe->origin, emaxs, pm_reach.maxs[i] );
+			VectorAdd( pe->origin, emins, box );
+			VectorAdd( pe->origin, emaxs, box + 3 );
 		}
+		else
+		{
+			VectorSet( box, -1e30f, -1e30f, -1e30f );
+			VectorSet( box + 3, 1e30f, 1e30f, 1e30f );
+		}
+
+		// what PM_PointContents tests
+		if( i != 0 && pe->solid == SOLID_NOT && pe->model )
+			pm_reach.contents[pm_reach.numcontents++] = i;
 	}
-	pm_reach.num = num;
+	pm_reach.num = pmove->numphysent;
 	pm_reach.pmove = pmove;
 }
 
@@ -432,22 +432,56 @@ void PM_EndReachCache( void )
 	pm_reach.pmove = NULL;
 }
 
-static qboolean PM_PhysEntOutOfReach( const playermove_t *pmove, const physent_t *ents, int i, const vec3_t start, const vec3_t end )
+static qboolean PM_ReachCached( const playermove_t *pmove, const physent_t *ents )
 {
-	vec3_t emins, emaxs, absmins, absmaxs;
+	return pm_reach.pmove == pmove && ents == pmove->physents && pmove->numphysent == pm_reach.num;
+}
+
+// the player box swept from start to end, one unit larger like the server's link boxes
+typedef struct
+{
+	qboolean	cached;
+	float	lo[3], hi[3];
+} pm_sweep_t;
+
+static void PM_SweepInit( pm_sweep_t *sw, const playermove_t *pmove, const physent_t *ents, const vec3_t start, const vec3_t end )
+{
+	const float *pmins = host.player_mins[pmove->usehull];
+	const float *pmaxs = host.player_maxs[pmove->usehull];
+
+	for( int j = 0; j < 3; j++ )
+	{
+		sw->lo[j] = Q_min( start[j], end[j] ) + pmins[j] - 1.0f;
+		sw->hi[j] = Q_max( start[j], end[j] ) + pmaxs[j] + 1.0f;
+	}
+	sw->cached = PM_ReachCached( pmove, ents );
+}
+
+static qboolean PM_PhysEntOutOfReach( const pm_sweep_t *sw, const physent_t *ents, int i )
+{
+	vec3_t emins, emaxs;
+	const float *box;
+	float ebox[6];
 
 	if( i == 0 )
 		return false;
 
-	if( pm_reach.pmove == pmove && ents == pmove->physents && pmove->numphysent == pm_reach.num && i < pm_reach.num )
-		return pm_reach.cull[i] && PM_MoveOutsideBox( pmove, start, end, pm_reach.mins[i], pm_reach.maxs[i] );
+	if( sw->cached )
+	{
+		box = pm_reach.box[i];
+	}
+	else
+	{
+		if( !PM_PhysEntLinkBox( &ents[i], emins, emaxs ))
+			return false;
+		VectorAdd( ents[i].origin, emins, ebox );
+		VectorAdd( ents[i].origin, emaxs, ebox + 3 );
+		box = ebox;
+	}
 
-	if( !PM_PhysEntLinkBox( &ents[i], emins, emaxs ))
-		return false;
-
-	VectorAdd( ents[i].origin, emins, absmins );
-	VectorAdd( ents[i].origin, emaxs, absmaxs );
-	return PM_MoveOutsideBox( pmove, start, end, absmins, absmaxs );
+	return sw->lo[0] > box[3] || sw->hi[0] < box[0]
+		|| sw->lo[1] > box[4] || sw->hi[1] < box[1]
+		|| sw->lo[2] > box[5] || sw->hi[2] < box[2];
 }
 #endif
 
@@ -460,6 +494,10 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 	trace_total.fraction = 1.0f;
 	trace_total.ent = -1;
 
+#if XASH_PSP
+	pm_sweep_t sweep;
+	PM_SweepInit( &sweep, pmove, ents, start, end );
+#endif
 	for( int i = 0; i < numents; i++ )
 	{
 		physent_t *pe = &ents[i];
@@ -474,7 +512,7 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 			break;
 
 #if XASH_PSP
-		if( PM_PhysEntOutOfReach( pmove, ents, i, start, end ))
+		if( PM_PhysEntOutOfReach( &sweep, ents, i ))
 			continue;
 #endif
 
@@ -694,6 +732,9 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 
 static int PM_TestPlayerPoint( playermove_t *pmove, vec3_t pos, pfnIgnore pmFilter )
 {
+	pm_sweep_t sweep;
+	PM_SweepInit( &sweep, pmove, pmove->physents, pos, pos );
+
 #else
 int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, pfnIgnore pmFilter )
 {
@@ -710,7 +751,7 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 		int hullcount;
 
 #if XASH_PSP
-		if( PM_PhysEntOutOfReach( pmove, pmove->physents, i, pos, pos ))
+		if( PM_PhysEntOutOfReach( &sweep, pmove->physents, i ))
 			continue;
 #endif
 
@@ -857,8 +898,17 @@ int PM_PointContents( playermove_t *pmove, const vec3_t p )
 	// get base contents from world
 	int contents = PM_HullPointContents( &pmove->physents[0].model->hulls[0], 0, p );
 
+#if XASH_PSP
+	const qboolean cached = PM_ReachCached( pmove, pmove->physents );
+	const int count = cached ? pm_reach.numcontents : pmove->numphysent;
+
+	for( int k = cached ? 0 : 1; k < count; k++ )
+	{
+		const int i = cached ? pm_reach.contents[k] : k;
+#else
 	for( int i = 1; i < pmove->numphysent; i++ )
 	{
+#endif
 		physent_t *pe = &pmove->physents[i];
 
 		if( pe->solid != SOLID_NOT ) // disabled ?
@@ -1003,7 +1053,38 @@ const char *PM_TraceTexture( playermove_t *pmove, int ground, float *vstart, flo
 	if( ground < 0 || ground >= pmove->numphysent )
 		return NULL; // bad ground
 
+#if XASH_PSP
+	// pm_shared asks for the texture under the player on every move to pick the
+	// footstep sounds (~20 us a surface trace): keep the answer while the player
+	// stays within a few units on the same ground
+	static struct
+	{
+		const playermove_t *pmove;
+		const model_t *model;
+		vec3_t	start, end;
+		msurface_t *surf;
+	} last;
+	const model_t *groundmodel = pmove->physents[ground].model;
+	msurface_t *surf;
+
+	if( last.pmove == pmove && last.model == groundmodel && groundmodel
+		&& fabsf( last.start[0] - vstart[0] ) < 4.0f && fabsf( last.start[1] - vstart[1] ) < 4.0f && fabsf( last.start[2] - vstart[2] ) < 4.0f
+		&& fabsf( last.end[2] - vend[2] ) < 4.0f )
+	{
+		surf = last.surf;
+	}
+	else
+	{
+		surf = PM_TraceSurface( &pmove->physents[ground], vstart, vend );
+		last.pmove = pmove;
+		last.model = groundmodel;
+		VectorCopy( vstart, last.start );
+		VectorCopy( vend, last.end );
+		last.surf = surf;
+	}
+#else
 	msurface_t *surf = PM_TraceSurface( &pmove->physents[ground], vstart, vend );
+#endif
 
 	if( !surf || !surf->texinfo || !surf->texinfo->texture )
 		return NULL;
