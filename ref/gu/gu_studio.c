@@ -154,7 +154,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_atlas;
 #endif
 
 void R_StudioInit( void )
@@ -169,6 +169,7 @@ void R_StudioInit( void )
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_precull );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge_elights );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_atlas );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_propcache );
@@ -2019,6 +2020,454 @@ generic path
 /*
 =============================================================================
 
+STUDIO TEXTURE ATLAS
+
+The GE path draws each mesh with its own texture: a skin block, a light block
+and the bone uploads per mesh, ~13 us of CPU each and ~170 meshes a frame in a
+firefight (a grunt has ~10). The plain textures of a model (not masked,
+additive, chrome, flat shaded, fullbright or remapped) also go into 8-bit
+atlas pages with one palette per page, and the GE meshes of a submodel that
+use them are drawn as one (R_StudioGEGetMerge). Each texture keeps its own
+copy, for the CPU path and for meshes whose texture coordinates leave the
+texture. Fidelity: a page's palette is a median cut of its textures' colors.
+
+=============================================================================
+*/
+static CVAR_DEFINE_AUTO( r_studio_atlas, "1", 0, "draw the GE meshes of a submodel with plain textures as one, from texture atlases (built for models loaded while it's on)" );
+
+#define ATLAS_MAX_SIZE	512	// the GE's largest texture
+#define ATLAS_CELL		16	// TEXTURE_SIZE_MIN: textures are multiples of it
+#define ATLAS_GRID		( ATLAS_MAX_SIZE / ATLAS_CELL )
+#define ATLAS_MAX_PAGES	4
+#define ATLAS_FLAGS		( STUDIO_NF_FLATSHADE|STUDIO_NF_CHROME|STUDIO_NF_FULLBRIGHT|STUDIO_NF_NOMIPS|STUDIO_NF_ADDITIVE|STUDIO_NF_MASKED|STUDIO_NF_NORMALMAP|STUDIO_NF_COLORMAP|STUDIO_NF_UV_COORDS )
+
+// where a texture is in its atlas page: u = ou + s * su for the raw texel coordinates
+typedef struct
+{
+	int		atlas;	// texture number of the page, 0: not in one
+	float		ou, ov, su, sv;
+} studioatlasslot_t;
+
+static studioatlasslot_t *studio_atlas_slots; // MAX_TEXTURES, by texture number
+
+typedef struct
+{
+	int		tex;	// index in the model's textures
+	int		w, h;	// size as uploaded (powers of two)
+	int		x, y;
+} atlasitem_t;
+
+typedef struct
+{
+	byte		rgb[3];
+	uint		weight;	// pixels
+	ushort		src;	// item * 256 + palette index
+} atlascolor_t;
+
+static int atlas_sort_axis;
+
+static int R_StudioAtlasColorCmp( const void *a, const void *b )
+{
+	return (int)((const atlascolor_t *)a )->rgb[atlas_sort_axis] - (int)((const atlascolor_t *)b )->rgb[atlas_sort_axis];
+}
+
+static int R_StudioAtlasItemCmp( const void *a, const void *b )
+{
+	const atlasitem_t *x = *(const atlasitem_t * const *)a, *y = *(const atlasitem_t * const *)b;
+
+	if( x->h != y->h )
+		return y->h - x->h;
+	return y->w - x->w;
+}
+
+// bottom-left skyline on the 16 pixel grid: the height used, -1 if an item
+// doesn't fit (placed: skip those instead and mark the others)
+static int R_StudioAtlasSkyline( atlasitem_t **items, int n, int w, int h, qboolean *placed )
+{
+	const int gw = w / ATLAS_CELL, gh = h / ATLAS_CELL;
+	int sky[ATLAS_GRID] = { 0 }, used = 0;
+
+	for( int i = 0; i < n; i++ )
+	{
+		const int cw = items[i]->w / ATLAS_CELL, ch = items[i]->h / ATLAS_CELL;
+		int bestx = -1, besty = gh;
+
+		for( int x = 0; x + cw <= gw; x++ )
+		{
+			int y = 0;
+			for( int k = 0; k < cw; k++ )
+				y = Q_max( y, sky[x + k] );
+			if( y + ch <= gh && y < besty )
+			{
+				besty = y;
+				bestx = x;
+			}
+		}
+
+		if( placed )
+			placed[i] = bestx >= 0;
+		if( bestx < 0 )
+		{
+			if( !placed )
+				return -1;
+			continue;
+		}
+
+		for( int k = 0; k < cw; k++ )
+			sky[bestx + k] = besty + ch;
+		items[i]->x = bestx * ATLAS_CELL;
+		items[i]->y = besty * ATLAS_CELL;
+		used = Q_max( used, ( besty + ch ) * ATLAS_CELL );
+	}
+	return used;
+}
+
+// the smallest page that holds all the items (squarer first), placed
+static qboolean R_StudioAtlasFit( atlasitem_t **items, int n, int *outw, int *outh, int *outrows )
+{
+	int maxw = 0, bestw = 0, besth = 0, bestrows = 0;
+
+	for( int i = 0; i < n; i++ )
+		maxw = Q_max( maxw, items[i]->w );
+
+	for( int w = Q_max( maxw, ATLAS_CELL ); w <= ATLAS_MAX_SIZE; w <<= 1 )
+	{
+		const int used = R_StudioAtlasSkyline( items, n, w, ATLAS_MAX_SIZE, NULL );
+		int h = ATLAS_CELL;
+
+		if( used < 0 )
+			continue;
+		while( h < used )
+			h <<= 1;
+		// the rows past the used ones aren't stored (GL_CreateAtlasPage)
+		if( !bestw || w * used < bestw * bestrows || ( w * used == bestw * bestrows && abs( w - h ) < abs( bestw - besth )))
+		{
+			bestw = w;
+			besth = h;
+			bestrows = used;
+		}
+	}
+
+	if( !bestw )
+		return false;
+	R_StudioAtlasSkyline( items, n, bestw, besth, NULL );
+	*outw = bestw;
+	*outh = besth;
+	*outrows = bestrows;
+	return true;
+}
+
+// 256 colors for the page: median cut, weighted by pixels; lut[src] = palette index
+static void R_StudioAtlasPalette( atlascolor_t *c, int n, byte *pal, byte *lut )
+{
+	struct { int start, end, range, axis; } box[256];
+	int numboxes = 0;
+
+	memset( pal, 0, 768 );
+
+	for( int b = 0; b < 256; b++ )
+	{
+		int changed = 0;
+
+		if( b > 0 )
+		{
+			// split the box with the widest range at its weighted median
+			int best = -1;
+			for( int i = 0; i < numboxes; i++ )
+				if( box[i].end - box[i].start > 1 && box[i].range > 0 && ( best < 0 || box[i].range > box[best].range ))
+					best = i;
+			if( best < 0 )
+				break;
+
+			atlas_sort_axis = box[best].axis;
+			qsort( c + box[best].start, box[best].end - box[best].start, sizeof( *c ), R_StudioAtlasColorCmp );
+
+			uint total = 0, sum = 0;
+			for( int i = box[best].start; i < box[best].end; i++ )
+				total += c[i].weight;
+			int m = box[best].start + 1;
+			for( int i = box[best].start; i < box[best].end - 1; i++ )
+			{
+				sum += c[i].weight;
+				m = i + 1;
+				if( sum * 2 >= total )
+					break;
+			}
+			box[numboxes].start = m;
+			box[numboxes].end = box[best].end;
+			box[best].end = m;
+			changed = best;
+			numboxes++;
+		}
+		else
+		{
+			box[0].start = 0;
+			box[0].end = n;
+			numboxes = 1;
+		}
+
+		// ranges of the split box and the new one
+		for( int k = 0; k < 2; k++ )
+		{
+			const int i = k ? numboxes - 1 : changed;
+			byte lo[3] = { 255, 255, 255 }, hi[3] = { 0, 0, 0 };
+			for( int j = box[i].start; j < box[i].end; j++ )
+			{
+				for( int a = 0; a < 3; a++ )
+				{
+					lo[a] = Q_min( lo[a], c[j].rgb[a] );
+					hi[a] = Q_max( hi[a], c[j].rgb[a] );
+				}
+			}
+			box[i].axis = 0;
+			for( int a = 1; a < 3; a++ )
+				if( hi[a] - lo[a] > hi[box[i].axis] - lo[box[i].axis] ) box[i].axis = a;
+			box[i].range = hi[box[i].axis] - lo[box[i].axis];
+		}
+	}
+
+	for( int i = 0; i < numboxes; i++ )
+	{
+		uint sum[3] = { 0, 0, 0 }, total = 0;
+
+		for( int j = box[i].start; j < box[i].end; j++ )
+		{
+			for( int a = 0; a < 3; a++ )
+				sum[a] += c[j].rgb[a] * c[j].weight;
+			total += c[j].weight;
+		}
+		for( int a = 0; a < 3; a++ )
+			pal[i * 3 + a] = total ? ( sum[a] + total / 2 ) / total : 0;
+		for( int j = box[i].start; j < box[i].end; j++ )
+			lut[c[j].src] = i;
+	}
+}
+
+static int R_StudioAtlasBuildPage( const char *name, const byte *base, const mstudiotexture_t *ptexture, const int *pixofs, atlasitem_t **items, int n, int w, int h, int rows )
+{
+	byte *pixels = calloc( 1, w * rows );
+	uint *count = calloc( n * 256, sizeof( *count ));
+	atlascolor_t *colors = malloc( n * 256 * sizeof( *colors ));
+	byte *lut = calloc( n, 256 );
+	byte pal[768];
+	int texnum = 0;
+
+	if( !pixels || !count || !colors || !lut )
+	{
+		free( pixels );
+		free( count );
+		free( colors );
+		free( lut );
+		return 0;
+	}
+
+	// the same resampling as GL_ResampleTexture8 for the texture by itself
+	for( int k = 0; k < n; k++ )
+	{
+		const atlasitem_t *it = items[k];
+		const mstudiotexture_t *ptex = &ptexture[it->tex];
+		const byte *src = base + pixofs[it->tex];
+		const uint fracstep = ptex->width * 0x10000 / it->w;
+
+		for( int y = 0; y < it->h; y++ )
+		{
+			const byte *inrow = src + ptex->width * ( y * ptex->height / it->h );
+			byte *out = pixels + ( it->y + y ) * w + it->x;
+			uint frac = fracstep >> 1;
+
+			for( int x = 0; x < it->w; x++, frac += fracstep )
+			{
+				out[x] = inrow[frac >> 16];
+				count[k * 256 + out[x]]++;
+			}
+		}
+	}
+
+	int numcolors = 0;
+	for( int k = 0; k < n; k++ )
+	{
+		const mstudiotexture_t *ptex = &ptexture[items[k]->tex];
+		const byte *srcpal = base + pixofs[items[k]->tex] + ptex->width * ptex->height;
+
+		for( int i = 0; i < 256; i++ )
+		{
+			if( !count[k * 256 + i] )
+				continue;
+			atlascolor_t *c = &colors[numcolors++];
+			memcpy( c->rgb, srcpal + i * 3, 3 );
+			c->weight = count[k * 256 + i];
+			c->src = k * 256 + i;
+		}
+	}
+	R_StudioAtlasPalette( colors, numcolors, pal, lut );
+
+	for( int k = 0; k < n; k++ )
+	{
+		const atlasitem_t *it = items[k];
+		for( int y = 0; y < it->h; y++ )
+		{
+			byte *out = pixels + ( it->y + y ) * w + it->x;
+			for( int x = 0; x < it->w; x++ )
+				out[x] = lut[k * 256 + out[x]];
+		}
+	}
+
+	texnum = GL_CreateAtlasPage( name, w, h, rows, pixels, pal );
+
+	free( pixels );
+	free( count );
+	free( colors );
+	free( lut );
+	return texnum;
+}
+
+static void R_StudioFreeAtlas( int texnum )
+{
+	if( !studio_atlas_slots || texnum <= 0 || texnum >= MAX_TEXTURES )
+		return;
+
+	const int atlas = studio_atlas_slots[texnum].atlas;
+	if( !atlas )
+		return;
+
+	for( int i = 0; i < MAX_TEXTURES; i++ )
+		if( studio_atlas_slots[i].atlas == atlas ) studio_atlas_slots[i].atlas = 0;
+	GL_FreeTexture( atlas );
+}
+
+/*
+===============
+R_StudioBuildAtlas
+
+after the model's textures are loaded, while its pixels (at pixofs from
+base) are still in memory
+===============
+*/
+static void R_StudioBuildAtlas( model_t *mod, studiohdr_t *phdr, const int *pixofs )
+{
+	mstudiotexture_t *ptexture = (mstudiotexture_t *)((byte *)phdr + phdr->textureindex);
+	atlasitem_t *items, **order;
+	int n = 0, pages = 0, kb = 0, placed = 0, aliased = 0;
+
+	if( !studio_atlas_slots && !( studio_atlas_slots = calloc( MAX_TEXTURES, sizeof( *studio_atlas_slots ))))
+		return;
+
+	// stale entries from textures freed in bulk (the numbers are reused)
+	for( int i = 0; i < phdr->numtextures; i++ )
+		if( ptexture[i].index > 0 && ptexture[i].index < MAX_TEXTURES ) studio_atlas_slots[ptexture[i].index].atlas = 0;
+
+	if( !r_studio_atlas.value || phdr->numtextures < 2 )
+		return;
+
+	items = malloc( phdr->numtextures * sizeof( *items ));
+	order = malloc( phdr->numtextures * sizeof( *order ));
+	if( !items || !order )
+	{
+		free( items );
+		free( order );
+		return;
+	}
+
+	for( int i = 0; i < phdr->numtextures; i++ )
+	{
+		const mstudiotexture_t *ptex = &ptexture[i];
+		const int texnum = ptex->index;
+		int j;
+
+		if( FBitSet( ptex->flags, ATLAS_FLAGS ) || texnum <= 0 || texnum >= MAX_TEXTURES || texnum == tr.defaultTexture || pixofs[i] <= 0 )
+			continue;
+		if( ptex->width <= 0 || ptex->height <= 0 )
+			continue;
+
+		const gl_texture_t *t = R_GetTexture( texnum );
+		if( t->name[0] != '#' || t->format != GU_PSM_T8 || t->width % ATLAS_CELL || t->height % ATLAS_CELL )
+			continue;
+
+		for( j = 0; j < n; j++ )
+			if( ptexture[items[j].tex].index == texnum ) break;
+		if( j < n )
+			continue; // the same texture twice
+
+		items[n].tex = i;
+		items[n].w = t->width;
+		items[n].h = t->height;
+		order[n] = &items[n];
+		n++;
+	}
+	qsort( order, n, sizeof( *order ), R_StudioAtlasItemCmp );
+
+	char mdlname[64];
+	Q_strncpy( mdlname, mod->name, sizeof( mdlname ));
+	COM_StripExtension( mdlname );
+
+	while( n >= 2 && pages < ATLAS_MAX_PAGES )
+	{
+		int count = n, w = 0, h = 0, rows = 0;
+
+		// what doesn't fit in the largest page waits for the next one
+		if( !R_StudioAtlasFit( order, count, &w, &h, &rows ))
+		{
+			qboolean fits[MAXSTUDIOSKINS];
+			atlasitem_t *rest[MAXSTUDIOSKINS];
+			int nrest = 0;
+
+			if( n > MAXSTUDIOSKINS )
+				break;
+			R_StudioAtlasSkyline( order, n, ATLAS_MAX_SIZE, ATLAS_MAX_SIZE, fits );
+			count = 0;
+			for( int i = 0; i < n; i++ )
+			{
+				if( fits[i] )
+					order[count++] = order[i];
+				else rest[nrest++] = order[i];
+			}
+			memcpy( order + count, rest, nrest * sizeof( *rest ));
+			if( !R_StudioAtlasFit( order, count, &w, &h, &rows ))
+				break;
+		}
+		if( count < 2 )
+			break;
+
+		char name[96];
+		Q_snprintf( name, sizeof( name ), "#atlas/%s/%d", mdlname, pages );
+		const int atlas = R_StudioAtlasBuildPage( name, (const byte *)phdr, ptexture, pixofs, order, count, w, h, rows );
+		if( !atlas )
+			break;
+
+		for( int i = 0; i < count; i++ )
+		{
+			const atlasitem_t *it = order[i];
+			const mstudiotexture_t *ptex = &ptexture[it->tex];
+			studioatlasslot_t *s = &studio_atlas_slots[ptex->index];
+
+			s->atlas = atlas;
+			s->ou = (float)it->x / w;
+			s->ov = (float)it->y / h;
+			s->su = (float)it->w / ( (float)w * ptex->width );
+			s->sv = (float)it->h / ( (float)h * ptex->height );
+
+			// the texture by itself becomes that part of the page
+			if( GL_AliasTexture( ptex->index, atlas, it->x, it->y ))
+				aliased++;
+		}
+
+		pages++;
+		placed += count;
+		kb += R_GetTexture( atlas )->size / 1024;
+		memmove( order, order + count, ( n - count ) * sizeof( *order ));
+		n -= count;
+	}
+
+	if( pages )
+		gEngfuncs.Con_Reportf( "%s: %d textures (%d aliased) in %d atlas pages, %d KB\n", mod->name, placed, aliased, pages, kb );
+
+	free( items );
+	free( order );
+}
+
+/*
+=============================================================================
+
 GE SKINNING
 
 The CPU path transforms every vertex, lights every normal and writes ~24 bytes
@@ -2060,9 +2509,27 @@ typedef struct
 
 typedef struct
 {
-	int		numbatches;	// 0: drawn by the CPU path
+	qboolean		ge;	// the GE can draw it, the batches are built on first use (R_StudioGEMeshBatches)
+	int		numbatches;
 	gebatch_t		*batches;
 } gemesh_t;
+
+// the meshes of a submodel that use one atlas page, drawn as one
+typedef struct
+{
+	int		atlas;	// texture number of the page
+	int		numbatches;
+	gebatch_t		*batches;
+} gemergegroup_t;
+
+typedef struct gemerge_s
+{
+	int		skin;	// skin family
+	int		numgroups;
+	gemergegroup_t	groups[ATLAS_MAX_PAGES];
+	byte		*merged;	// per mesh: drawn by the groups
+	struct gemerge_s	*next;
+} gemerge_t;
 
 typedef struct
 {
@@ -2071,6 +2538,7 @@ typedef struct
 	qboolean		cpumeshes;	// some meshes still need the CPU path
 	int		nummesh;
 	gemesh_t		*meshes;
+	gemerge_t		*merges;	// R_StudioGEGetMerge, by skin family
 	void		**blocks;		// batch memory, freed with the model
 	int		numblocks;
 } gemodel_t;
@@ -2095,6 +2563,15 @@ static void R_StudioGEFreeModel( gemodel_t *gm )
 		free( gm->blocks[i] );
 	for( int i = 0; i < gm->nummesh; i++ )
 		free( gm->meshes[i].batches );
+	while( gm->merges )
+	{
+		gemerge_t *m = gm->merges;
+		gm->merges = m->next;
+		for( int i = 0; i < m->numgroups; i++ )
+			free( m->groups[i].batches );
+		free( m->merged );
+		free( m );
+	}
 	free( gm->blocks );
 	free( gm->meshes );
 	free( gm );
@@ -2130,6 +2607,7 @@ typedef struct
 	int		count;
 	const short	*verts[3];	// GU_TRIANGLES: one triangle, else NULL
 	const short	*first;	// strips and fans: first tricmd record
+	const studioatlasslot_t *uv;	// atlas page coordinates, NULL: the raw texel shorts
 } geunit_t;
 
 static int R_StudioGEUnitBones( const geunit_t *u, const byte *pvertbone, byte *bones )
@@ -2226,8 +2704,17 @@ static qboolean R_StudioGEBuildBatch( gemodel_t *gm, gebatch_t *batch, const geu
 
 			memset( v, 0, vsize );
 			v[slot] = 128; // 1.0
-			((short *)( v + off_t ))[0] = t[2];
-			((short *)( v + off_t ))[1] = t[3];
+			if( u->uv )
+			{
+				// normalized in the page, 1.0 = 32768 (the skin block's texture scale is 1)
+				((short *)( v + off_t ))[0] = (short)bound( 0, (int)roundf(( u->uv->ou + t[2] * u->uv->su ) * 32768.0f ), 32767 );
+				((short *)( v + off_t ))[1] = (short)bound( 0, (int)roundf(( u->uv->ov + t[3] * u->uv->sv ) * 32768.0f ), 32767 );
+			}
+			else
+			{
+				((short *)( v + off_t ))[0] = t[2];
+				((short *)( v + off_t ))[1] = t[3];
+			}
 			for( int c = 0; c < 3; c++ )
 				((signed char *)( v + off_n ))[c] = (signed char)bound( -127, (int)roundf( pstudionorms[t[1]][c] * 127.0f ), 127 );
 			memcpy( v + off_p, pstudioverts[t[0]], 12 );
@@ -2284,10 +2771,11 @@ static void R_StudioGEOrderSlots( gebatch_t *b )
 	ge_build_prevn = n;
 }
 
-static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short *ptricmds, const byte *pvertbone, const byte *pnormbone, const vec3_t *pstudioverts, const vec3_t *pstudionorms )
+// upper bound of the units of a mesh (one per triangle), -1: a normal on another bone than its vertex
+static int R_StudioGECountUnits( const short *ptricmds, const byte *pvertbone, const byte *pnormbone )
 {
-	int numunits = 0, i;
 	const short *p = ptricmds;
+	int numunits = 0, i;
 
 	// the GE moves a normal with its vertex's bone
 	while(( i = *( p++ )))
@@ -2295,19 +2783,19 @@ static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short
 		if( i < 0 ) i = -i;
 		for( int k = 0; k < i; k++, p += 4 )
 			if( pvertbone[p[0]] != pnormbone[p[1]] )
-				return false;
-		numunits += i; // upper bound: one unit per triangle
+				return -1;
+		numunits += i;
 	}
+	return numunits;
+}
 
-	geunit_t *units = malloc( sizeof( *units ) * ( numunits + 1 ));
-	gebatch_t *batches = NULL;
-	int nunits = 0, nbatches = 0;
+// the strips and fans of a mesh, split into triangles where they touch more than 8 bones
+static int R_StudioGEAddUnits( geunit_t *units, int nunits, const short *ptricmds, const byte *pvertbone, const studioatlasslot_t *uv )
+{
+	const short *p = ptricmds;
 	byte bones[MAXSTUDIOBONES];
+	int i;
 
-	if( !units )
-		return false;
-
-	p = ptricmds;
 	while(( i = *( p++ )))
 	{
 		geunit_t u = { 0 };
@@ -2320,6 +2808,7 @@ static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short
 		}
 		u.count = i;
 		u.first = p;
+		u.uv = uv;
 
 		if( R_StudioGEUnitBones( &u, pvertbone, bones ) <= GE_MAXBONES )
 			units[nunits++] = u;
@@ -2347,12 +2836,19 @@ static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short
 				t->prim = GU_TRIANGLES;
 				t->count = 3;
 				t->verts[0] = a; t->verts[1] = b; t->verts[2] = c;
+				t->uv = uv;
 			}
 		}
 		p += i * 4;
 	}
+	return nunits;
+}
 
-	// greedy batches
+// greedy batches of at most 8 bones
+static qboolean R_StudioGEBatchUnits( gemodel_t *gm, const geunit_t *units, int nunits, const byte *pvertbone, const vec3_t *pstudioverts, const vec3_t *pstudionorms, gebatch_t **outbatches, int *outnum )
+{
+	gebatch_t *batches = NULL;
+	int nbatches = 0;
 	int first = 0;
 	gebatch_t cur;
 	memset( &cur, 0, sizeof( cur ));
@@ -2389,7 +2885,6 @@ static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short
 				if( !nb || !R_StudioGEBuildBatch( gm, &cur, units, first, u, pvertbone, pstudioverts, pstudionorms ))
 				{
 					free( nb ? nb : batches );
-					free( units );
 					return false;
 				}
 				batches = nb;
@@ -2411,11 +2906,28 @@ static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short
 		}
 	}
 
-	free( units );
-	gmesh->batches = batches;
-	gmesh->numbatches = nbatches;
+	*outbatches = batches;
+	*outnum = nbatches;
 	ge_cache_bytes += sizeof( *batches ) * nbatches;
 	return nbatches > 0;
+}
+
+static qboolean R_StudioGEBuildMesh( gemodel_t *gm, gemesh_t *gmesh, const short *ptricmds, const byte *pvertbone, const byte *pnormbone, const vec3_t *pstudioverts, const vec3_t *pstudionorms )
+{
+	const int numunits = R_StudioGECountUnits( ptricmds, pvertbone, pnormbone );
+
+	if( numunits < 0 )
+		return false;
+
+	geunit_t *units = malloc( sizeof( *units ) * ( numunits + 1 ));
+	if( !units )
+		return false;
+
+	const int nunits = R_StudioGEAddUnits( units, 0, ptricmds, pvertbone, NULL );
+	const qboolean ok = R_StudioGEBatchUnits( gm, units, nunits, pvertbone, pstudioverts, pstudionorms, &gmesh->batches, &gmesh->numbatches );
+
+	free( units );
+	return ok;
 }
 
 /*
@@ -2465,24 +2977,149 @@ static gemodel_t *R_StudioGEGetModel( void )
 	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
 	int numge = 0;
 
-	ge_build_prevn = 0;
+	// the batches come when a mesh is drawn by itself: the ones in atlas pages
+	// may never need them (R_StudioGEGetMerge)
 	for( int j = 0; j < m_pSubModel->nummesh; j++ )
 	{
 		const short *ptricmds = (const short *)((const byte *)m_pStudioHeader + pmesh[j].triindex);
 
-		if( R_StudioGEBuildMesh( gm, &gm->meshes[j], ptricmds, pvertbone, pnormbone, pstudioverts, pstudionorms ))
-			numge++;
-		else
+		if( R_StudioGECountUnits( ptricmds, pvertbone, pnormbone ) > 0 )
 		{
-			gm->meshes[j].numbatches = 0;
-			gm->cpumeshes = true;
+			gm->meshes[j].ge = true;
+			numge++;
 		}
+		else gm->cpumeshes = true;
 	}
+	(void)pstudioverts; (void)pstudionorms;
 
 	gm->nummesh = m_pSubModel->nummesh;
 	gEngfuncs.Con_DPrintf( "GE studio: %s %d/%d meshes, %u KB cached\n", m_pSubModel->name, numge, gm->nummesh, (uint)( ge_cache_bytes >> 10 ));
 
 	return numge ? gm : NULL;
+}
+
+/*
+===============
+R_StudioGEMeshBatches
+
+the batches of a mesh of the current submodel drawn by itself
+===============
+*/
+static void R_StudioGEMeshBatches( gemodel_t *gm, int j )
+{
+	gemesh_t *gmesh = &gm->meshes[j];
+
+	if( !gmesh->ge || gmesh->numbatches )
+		return;
+
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	const short *ptricmds = (const short *)((const byte *)m_pStudioHeader + pmesh[j].triindex);
+
+	if( !R_StudioGEBuildMesh( gm, gmesh, ptricmds, (const byte *)m_pStudioHeader + m_pSubModel->vertinfoindex,
+		(const byte *)m_pStudioHeader + m_pSubModel->norminfoindex,
+		(const vec3_t *)((const byte *)m_pStudioHeader + m_pSubModel->vertindex),
+		(const vec3_t *)((const byte *)m_pStudioHeader + m_pSubModel->normindex)))
+	{
+		gmesh->ge = false;
+		gmesh->numbatches = 0;
+		gm->cpumeshes = true;
+	}
+}
+
+/*
+===============
+R_StudioGEGetMerge
+
+the GE meshes of the current submodel that use the atlas pages for this skin
+family, built on first use; NULL: none
+===============
+*/
+static const gemerge_t *R_StudioGEGetMerge( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
+{
+	for( gemerge_t *m = gm->merges; m; m = m->next )
+		if( m->skin == skin ) return m->numgroups ? m : NULL;
+
+	gemerge_t *m = calloc( 1, sizeof( *m ));
+	if( !m )
+		return NULL;
+	m->skin = skin;
+	m->next = gm->merges;
+	gm->merges = m;
+
+	if( !studio_atlas_slots || !( m->merged = calloc( gm->nummesh, 1 )))
+		return NULL;
+
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	const byte *pvertbone = (const byte *)m_pStudioHeader + m_pSubModel->vertinfoindex;
+	const byte *pnormbone = (const byte *)m_pStudioHeader + m_pSubModel->norminfoindex;
+	const vec3_t *pstudioverts = (const vec3_t *)((const byte *)m_pStudioHeader + m_pSubModel->vertindex);
+	const vec3_t *pstudionorms = (const vec3_t *)((const byte *)m_pStudioHeader + m_pSubModel->normindex);
+	int count[ATLAS_MAX_PAGES] = { 0 }, units[ATLAS_MAX_PAGES] = { 0 }, numgroups = 0;
+	gemergegroup_t groups[ATLAS_MAX_PAGES];
+
+	memset( groups, 0, sizeof( groups ));
+
+	// GE meshes with a texture in a page and texture coordinates inside it
+	for( int j = 0; j < gm->nummesh; j++ )
+	{
+		const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[j].skinref]];
+		const short *ptricmds = (const short *)((const byte *)m_pStudioHeader + pmesh[j].triindex);
+		const short *p = ptricmds;
+		int i, g;
+
+		if( !gm->meshes[j].ge || FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|ATLAS_FLAGS ))
+			continue;
+		if( ptex->index <= 0 || ptex->index >= MAX_TEXTURES || !studio_atlas_slots[ptex->index].atlas )
+			continue;
+
+		qboolean inside = true;
+		while( inside && ( i = *( p++ )))
+		{
+			if( i < 0 ) i = -i;
+			for( int k = 0; k < i; k++, p += 4 )
+				if( p[2] < 0 || p[2] > ptex->width || p[3] < 0 || p[3] > ptex->height ) inside = false;
+		}
+		if( !inside )
+			continue;
+
+		for( g = 0; g < numgroups; g++ )
+			if( groups[g].atlas == studio_atlas_slots[ptex->index].atlas ) break;
+		if( g == numgroups )
+			groups[numgroups++].atlas = studio_atlas_slots[ptex->index].atlas;
+
+		m->merged[j] = g + 1;
+		count[g]++;
+		units[g] += R_StudioGECountUnits( ptricmds, pvertbone, pnormbone );
+	}
+
+	for( int g = 0; g < numgroups; g++ )
+	{
+		geunit_t *u = count[g] >= 2 ? malloc( sizeof( *u ) * ( units[g] + 1 )) : NULL;
+		int nunits = 0;
+
+		for( int j = 0; u && j < gm->nummesh; j++ )
+		{
+			if( m->merged[j] != g + 1 )
+				continue;
+			const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[j].skinref]];
+			nunits = R_StudioGEAddUnits( u, nunits, (const short *)((const byte *)m_pStudioHeader + pmesh[j].triindex), pvertbone, &studio_atlas_slots[ptex->index] );
+		}
+
+		ge_build_prevn = 0;
+		if( u && R_StudioGEBatchUnits( gm, u, nunits, pvertbone, pstudioverts, pstudionorms, &groups[g].batches, &groups[g].numbatches ))
+		{
+			m->groups[m->numgroups++] = groups[g];
+			for( int j = 0; j < gm->nummesh; j++ )
+				if( m->merged[j] == g + 1 ) m->merged[j] = 0xff;
+		}
+		free( u );
+	}
+
+	// 0xff: drawn by a group
+	for( int j = 0; j < gm->nummesh; j++ )
+		m->merged[j] = m->merged[j] == 0xff;
+
+	return m->numgroups ? m : NULL;
 }
 
 /*
@@ -2737,12 +3374,14 @@ static qboolean R_StudioGESkinMatches( const geskin_t *a, const geskin_t *b )
 		&& a->skinh == b->skinh && a->chrome == b->chrome && !memcmp( a->cvars, b->cvars, sizeof( a->cvars ));
 }
 
-static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int skinindex )
+static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int skinindex, int bindtex )
 {
 	uint *start = extGuBlockBegin();
 
 	glState.currentTexture = 0; // force GL_Bind to emit everything
-	R_StudioSetupSkin( m_pStudioHeader, skinindex );
+	if( bindtex )
+		GL_Bind( XASH_TEXTURE0, bindtex ); // an atlas page
+	else R_StudioSetupSkin( m_pStudioHeader, skinindex );
 	if( FBitSet( ptex->flags, STUDIO_NF_CHROME ))
 	{
 		// texcoords from the normals, R_StudioGEChromeMatrix sets the matrix for each batch
@@ -2767,16 +3406,17 @@ static const uint *R_StudioGEBuildSkinBlock( const mstudiotexture_t *ptex, int s
 	return block;
 }
 
-static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinindex )
+// bindtex: the texture to bind instead of the skin's (atlas pages)
+static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinindex, int bindtex )
 {
-	const int texnum = ptex->index;
+	const int texnum = bindtex ? bindtex : ptex->index;
 
 	// remapped player skins differ per entity, r_lightmap binds the white texture
-	if( m_fDoRemap || r_lightmap->value || texnum <= 0 || texnum >= MAX_TEXTURES )
-		return R_StudioGEBuildSkinBlock( ptex, skinindex );
+	if(( m_fDoRemap && !bindtex ) || r_lightmap->value || texnum <= 0 || texnum >= MAX_TEXTURES )
+		return R_StudioGEBuildSkinBlock( ptex, skinindex, bindtex );
 
 	if( !ge_skins && !( ge_skins = calloc( MAX_TEXTURES, sizeof( *ge_skins ))))
-		return R_StudioGEBuildSkinBlock( ptex, skinindex );
+		return R_StudioGEBuildSkinBlock( ptex, skinindex, bindtex );
 
 	geskin_t *s = &ge_skins[texnum];
 	geskin_t key;
@@ -2795,7 +3435,7 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 		return s->block;
 	}
 
-	const uint *frame_block = R_StudioGEBuildSkinBlock( ptex, skinindex );
+	const uint *frame_block = R_StudioGEBuildSkinBlock( ptex, skinindex, bindtex );
 	const uint words = extGuCmdBegin() - frame_block; // up to and including the RET
 
 	if( words > s->capacity )
@@ -2867,7 +3507,7 @@ static uint *R_StudioGEChromeMatrix( uint *p, const gebatch_t *b, const mstudiot
 static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *ptex, int skinindex, const uint *ramp )
 {
 	const int flags = ptex->flags | g_nForceFaceFlags;
-	const uint *skinblock = R_StudioGESkinBlock( ptex, skinindex );
+	const uint *skinblock = R_StudioGESkinBlock( ptex, skinindex, 0 );
 	const uint *lightblock = R_StudioGELightBlock( ramp, FBitSet( flags, STUDIO_NF_FLATSHADE ));
 	const qboolean chrome = FBitSet( flags, STUDIO_NF_CHROME );
 
@@ -2879,6 +3519,28 @@ static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *p
 		p = R_StudioGEBones( p, b );
 		if( chrome )
 			p = R_StudioGEChromeMatrix( p, b, ptex );
+		p = R_StudioGECall( p, skinblock );
+		p = R_StudioGECall( p, b->cmds );
+		p = R_StudioGECall( p, lightblock );
+		p = R_StudioGECall( p, b->cmds );
+	}
+	extGuCmdEnd( p );
+	ge_last_skinblock = skinblock;
+}
+
+// the meshes of an atlas page: texture coordinates in the page, texture scale 1
+static void R_StudioGEDrawMerged( const gemergegroup_t *g, const uint *ramp )
+{
+	static mstudiotexture_t atlas_ptex = { "atlas", 0, 32768, 32768, 0 };
+	const uint *skinblock = R_StudioGESkinBlock( &atlas_ptex, 0, g->atlas );
+	const uint *lightblock = R_StudioGELightBlock( ramp, false );
+
+	uint *p = extGuCmdBegin();
+	for( int i = 0; i < g->numbatches; i++ )
+	{
+		const gebatch_t *b = &g->batches[i];
+
+		p = R_StudioGEBones( p, b );
 		p = R_StudioGECall( p, skinblock );
 		p = R_StudioGECall( p, b->cmds );
 		p = R_StudioGECall( p, lightblock );
@@ -3060,11 +3722,20 @@ static void R_StudioDrawPoints( void )
 	short *pskinref = (short *)((byte *)m_pStudioHeader + m_pStudioHeader->skinindex);
 	if( m_skinnum > 0 && m_skinnum < m_pStudioHeader->numskinfamilies )
 		pskinref += (m_skinnum * m_pStudioHeader->numskinref);
+	else m_skinnum = 0;
 
 	const int numverts = m_pSubModel->numverts;
 	const int numnorms = m_pSubModel->numnorms;
 
 	gemodel_t *gm = R_StudioGEAllowed() ? R_StudioGEGetModel() : NULL;
+	// meshes in atlas pages are drawn as one per page, the others need their own batches
+	const gemerge_t *merge = NULL;
+	if( gm && r_studio_atlas.value && !m_fDoRemap )
+		merge = R_StudioGEGetMerge( gm, m_skinnum, ptexture, pskinref );
+	ge_build_prevn = 0; // consecutive meshes keep shared bones in the same slots
+	for( int j = 0; gm && j < gm->nummesh; j++ )
+		if( !( merge && merge->merged[j] )) R_StudioGEMeshBatches( gm, j );
+
 	qboolean cpumeshes = !gm || gm->cpumeshes;
 
 	// the skin family decides the flags
@@ -3131,7 +3802,7 @@ static void R_StudioDrawPoints( void )
 		if( FBitSet( g_nFaceFlags, STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
 			need_sort = true;
 
-		if( gm && gm->meshes[j].numbatches && !FBitSet( g_nFaceFlags, GE_UNSUPPORTED_FLAGS ))
+		if( gm && ( gm->meshes[j].numbatches || ( merge && merge->merged[j] )) && !FBitSet( g_nFaceFlags, GE_UNSUPPORTED_FLAGS ))
 		{
 			// lit by the GE
 			const int n = pmesh[j].numnorms;
@@ -3212,11 +3883,26 @@ static void R_StudioDrawPoints( void )
 
 	ge_slots_valid = 0;
 
+	// the meshes in atlas pages first, one draw per page
+	if( merge )
+	{
+		eye_view = true;
+		R_StudioGEViewMatrix( true );
+		ramp = R_StudioGERamp();
+		for( int i = 0; i < merge->numgroups; i++ )
+			R_StudioGEDrawMerged( &merge->groups[i], ramp );
+	}
+
 	for( int j = 0; j < m_pSubModel->nummesh; j++ )
 	{
 		float	oldblend = tr.blend;
 
 		pmesh = g_studio.meshes[j].mesh;
+		if( merge && merge->merged[pmesh - pmeshbase] )
+		{
+			r_stats.c_studio_polys += pmesh->numtris;
+			continue;
+		}
 		const gemesh_t *gmesh = gm ? &gm->meshes[pmesh - pmeshbase] : NULL;
 		if( gmesh && ( !gmesh->numbatches || FBitSet( ptexture[pskinref[pmesh->skinref]].flags | g_nForceFaceFlags, GE_UNSUPPORTED_FLAGS )))
 			gmesh = NULL;
@@ -4876,6 +5562,10 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 	}
 }
 
+// the model whose textures are being loaded and how many are done, see Mod_StudioUnloadTextures
+static studiohdr_t *studio_loading_hdr;
+static int studio_loaded_textures;
+
 /*
 =================
 Mod_StudioLoadTextures
@@ -4883,16 +5573,32 @@ Mod_StudioLoadTextures
 */
 void Mod_StudioLoadTextures( model_t *mod, void *data )
 {
+	R_WaitFrame(); // R_StudioGEUnload frees what the GE may be drawing
 	studiohdr_t	*phdr = (studiohdr_t *)data;
 
 	if( !phdr )
 		return;
 
+	R_StudioGEUnload( phdr );
+
 	mstudiotexture_t *ptexture = (mstudiotexture_t *)(((byte *)phdr) + phdr->textureindex);
 	if( phdr->textureindex > 0 )
 	{
-		for( int i = 0; i < phdr->numtextures; i++ )
-			R_StudioLoadTexture( mod, phdr, &ptexture[i] );
+		// R_StudioLoadTexture replaces the pixel offsets with texture numbers
+		int *pixofs = malloc( Q_max( phdr->numtextures, 1 ) * sizeof( *pixofs ));
+		for( int i = 0; pixofs && i < phdr->numtextures; i++ )
+			pixofs[i] = ptexture[i].index;
+
+		studio_loading_hdr = phdr;
+
+		for( studio_loaded_textures = 0; studio_loaded_textures < phdr->numtextures; studio_loaded_textures++ )
+			R_StudioLoadTexture( mod, phdr, &ptexture[studio_loaded_textures] );
+
+		studio_loading_hdr = NULL;
+
+		if( pixofs )
+			R_StudioBuildAtlas( mod, phdr, pixofs );
+		free( pixofs );
 	}
 }
 
@@ -4912,12 +5618,22 @@ void Mod_StudioUnloadTextures( void *data )
 	R_StudioGEUnload( phdr );
 
 	mstudiotexture_t *ptexture = (mstudiotexture_t *)(((byte *)phdr) + phdr->textureindex);
+	int numtextures = phdr->numtextures;
+
+	// a Host_Error (texture out of memory) in the middle of Mod_StudioLoadTextures:
+	// the textures after the failed one still hold file offsets, not texture numbers
+	if( phdr == studio_loading_hdr )
+	{
+		numtextures = studio_loaded_textures;
+		studio_loading_hdr = NULL;
+	}
 
 	// release all textures
-	for( int i = 0; i < phdr->numtextures; i++ )
+	for( int i = 0; i < numtextures; i++ )
 	{
 		if( ptexture[i].index == tr.defaultTexture )
 			continue;
+		R_StudioFreeAtlas( ptexture[i].index );
 		GL_FreeTexture( ptexture[i].index );
 	}
 }

@@ -113,6 +113,8 @@ typedef struct gltexture_s
 	byte		*dstTexture;	// texture data, in VRAM when TF_IMG_INVRAM, swizzled when TF_IMG_SWIZZLED
 	byte		*dstPalette;	// CLUT for 4/8-bit textures
 	byte		clutFormat;	// GU_PSM_5650, 5551 or 4444, depending on the alpha the palette needs
+	word		stride;		// row length in pixels when it's a part of an atlas page, see GL_AliasTexture
+	word		rows;		// atlas pages: rows stored at the base level (0: all), GL_TextureRows
 	int		format;		// uploaded format (pixformat_t)
 	texFlags_t	flags;
 
@@ -421,6 +423,8 @@ gl_texture_t *R_GetTexture( unsigned int texnum );
 int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags );
 int GL_LoadTextureArray( const char **names, int flags );
 int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update );
+qboolean GL_AliasTexture( int texnum, int atlas, int x, int y );
+int GL_CreateAtlasPage( const char *name, int width, int height, int rows, const byte *pixels, const byte *palette );
 #define PC_SWF( X ) ( ( X ) | ( 1 << 15 ) )
 #define PC_HWF( X ) ( X )
 #define ImageIND( type ) ( type == PF_INDEXED_24 || type == PF_INDEXED_32 )

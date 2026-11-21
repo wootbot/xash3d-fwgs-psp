@@ -59,6 +59,19 @@ static byte*		gl_palette_332 = NULL;
 #define IsLightMap( tex )	( FBitSet(( tex )->flags, TF_ATLAS_PAGE ))
 
 /*
+rows stored at a mip level: all of them, or for an atlas page (tex->rows) the
+used ones plus a row of 8x16 blocks for bilinear filtering at the bottom
+*/
+static int GL_TextureRows( const gl_texture_t *tex, int level )
+{
+	const int h = Q_max( TEXTURE_SIZE_MIN, tex->height >> level );
+
+	if( !tex->rows )
+		return h;
+	return Q_min( h, (((( tex->rows + ( 1 << level ) - 1 ) >> level ) + 8 + 7 ) & ~7 ));
+}
+
+/*
 =================
 R_GetTexture
 
@@ -133,18 +146,18 @@ void GL_Bind( int tmu, unsigned int texnum )
 		sceGuTexWrap( GU_REPEAT, GU_REPEAT );
 
 	// Set base texture
-	sceGuTexImage( 0, texture->width, texture->height, texture->width, texture->dstTexture );
+	sceGuTexImage( 0, texture->width, texture->height, texture->stride ? texture->stride : texture->width, texture->dstTexture );
 
 	// Set mip textures
 	if( texture->numMips > 1 )
 	{
-		offset = texture->width * texture->height * texture->bpp;
+		offset = texture->width * GL_TextureRows( texture, 0 ) * texture->bpp;
 		for ( i = 1; i < texture->numMips; i++ )
 		{
 			width = Q_max( TEXTURE_SIZE_MIN, ( texture->width >> i ));
 			height = Q_max( TEXTURE_SIZE_MIN, ( texture->height >> i ));
 			sceGuTexImage( i, width, height, width,  &texture->dstTexture[offset] );
-			offset += width * height * texture->bpp;
+			offset += width * GL_TextureRows( texture, i ) * texture->bpp;
 		}
 	}
 	glState.currentTexture = texnum;
@@ -376,6 +389,8 @@ static void GL_SetTextureDimensions( gl_texture_t *tex, int width, int height )
 
 	if( GL_IsSceneTexture( tex ))
 		maxTextureSize = bound( TEXTURE_SIZE_MIN, (int)gu_texture_maxsize.value, maxTextureSize );
+	else if( !Q_strncmp( tex->name, "#atlas/", 7 ))
+		maxTextureSize = 512; // studio texture atlases (R_StudioBuildAtlas), the GE's limit
 
 	if( width > maxTextureSize || height > maxTextureSize )
 	{
@@ -998,6 +1013,14 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	swizzle = !IsLightMap( tex ) && ( GL_CalcTextureSize( tex->format, tex->width, 1, NULL ) % 16 ) == 0 && ( tex->height % 8 ) == 0;
 	mipOffset = 0;
 
+	// a part of an atlas page (GL_AliasTexture) gets its own memory again
+	if( tex->stride )
+	{
+		tex->dstTexture = tex->dstPalette = NULL;
+		tex->stride = 0;
+		ClearBits( tex->flags, TF_IMG_SWIZZLED );
+	}
+
 	// Check allocation size
 	if( tex->dstTexture && ( tex->size != texSize ) )
 	{
@@ -1149,6 +1172,56 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 
 	SetBits( tex->flags, TF_IMG_UPLOADED ); // done
 
+	return true;
+}
+
+/*
+===============
+GL_AliasTexture
+
+make a texture the part of an atlas page at x, y (the same size, base level
+only): its own pixels and palette are freed. The page must outlive it.
+===============
+*/
+qboolean GL_AliasTexture( int texnum, int atlas, int x, int y )
+{
+	if( texnum <= 0 || texnum >= MAX_TEXTURES || atlas <= 0 || atlas >= MAX_TEXTURES || texnum == atlas )
+		return false;
+
+	gl_texture_t *tex = &gl_textures[texnum];
+	const gl_texture_t *page = &gl_textures[atlas];
+	const qboolean swizzled = FBitSet( page->flags, TF_IMG_SWIZZLED ) != 0;
+
+	if( page->format != GU_PSM_T8 || tex->format != GU_PSM_T8 || !page->dstTexture || !page->dstPalette || tex->stride || page->stride )
+		return false;
+	if( x < 0 || y < 0 || x + tex->width > page->width || y + tex->height > page->height )
+		return false;
+	// swizzled pages are 16 byte x 8 row blocks, a row of blocks after another
+	if( swizzled && (( x & 15 ) || ( y & 7 )))
+		return false;
+
+	if( tex->original )
+	{
+		gEngfuncs.FS_FreeImage( tex->original );
+		tex->original = NULL;
+	}
+	GL_FreePalette( tex );
+	if( tex->dstTexture )
+	{
+		if( FBitSet( tex->flags, TF_IMG_INVRAM ))
+			vfree( tex->dstTexture );
+		else free( tex->dstTexture );
+	}
+
+	tex->dstTexture = page->dstTexture + ( swizzled ? y * page->width + x * 8 : y * page->width + x );
+	tex->dstPalette = page->dstPalette;
+	tex->clutFormat = page->clutFormat;
+	tex->stride = page->width;
+	tex->numMips = 1;
+	tex->size = 0;
+	ClearBits( tex->flags, TF_IMG_SWIZZLED|TF_IMG_INVRAM );
+	if( swizzled )
+		SetBits( tex->flags, TF_IMG_SWIZZLED );
 	return true;
 }
 
@@ -1389,6 +1462,10 @@ static void GL_DeleteTexture( gl_texture_t *tex )
 	if( tex->original )
 		gEngfuncs.FS_FreeImage( tex->original );
 
+	// a part of an atlas page: the page owns the memory
+	if( tex->stride )
+		tex->dstTexture = tex->dstPalette = NULL;
+
 	GL_FreePalette( tex );
 
 	if( tex->dstTexture )
@@ -1506,6 +1583,77 @@ int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags
 	}
 
 	return (tex - gl_textures);
+}
+
+/*
+================
+GL_CreateAtlasPage
+
+an 8-bit texture of width x height (powers of two) that stores only its first
+rows at every mip level (GL_TextureRows): the GE reads only what it samples.
+pixels: width x rows, palette: 256 RGB. Mipmapped and swizzled.
+================
+*/
+int GL_CreateAtlasPage( const char *name, int width, int height, int rows, const byte *pixels, const byte *palette )
+{
+	if( !GL_CheckTexName( name ) || GL_TextureForName( name ) || rows <= 0 || rows > height )
+		return 0;
+
+	gl_texture_t *tex = GL_AllocTexture( name, 0 );
+	size_t size = 0, offset = 0;
+
+	tex->width = tex->srcWidth = width;
+	tex->height = tex->srcHeight = height;
+	tex->depth = 1;
+	tex->format = GU_PSM_T8;
+	tex->bpp = 1;
+	tex->rows = rows;
+	tex->numMips = GL_CalcMipmapCount( tex, true, NULL );
+	for( int i = 0; i < tex->numMips; i++ )
+		size += Q_max( TEXTURE_SIZE_MIN, width >> i ) * GL_TextureRows( tex, i );
+
+	tex->dstTexture = GL_AllocTextureData( tex, size );
+	byte *temp = tex->dstTexture ? GL_TempAlloc( width * GL_TextureRows( tex, 0 )) : NULL;
+	if( !temp )
+	{
+		GL_DeleteTexture( tex );
+		return 0;
+	}
+
+	// point sampled from the base level, like GL_ResampleTexture8
+	for( int i = 0; i < tex->numMips; i++ )
+	{
+		const int w = Q_max( TEXTURE_SIZE_MIN, width >> i ), h = Q_max( TEXTURE_SIZE_MIN, height >> i );
+		const int r = GL_TextureRows( tex, i );
+		const uint fracstep = width * 0x10000 / w;
+
+		for( int y = 0; y < r; y++ )
+		{
+			const byte *in = pixels + width * Q_min( y * height / h, rows - 1 );
+			uint frac = fracstep >> 1;
+
+			for( int x = 0; x < w; x++, frac += fracstep )
+				temp[y * w + x] = in[frac >> 16];
+		}
+		GL_TextureSwizzle( tex->dstTexture + offset, temp, w, r );
+		offset += w * r;
+	}
+	GL_TempFree( temp );
+	sceKernelDcacheWritebackRange( tex->dstTexture, size );
+	tex->size = size;
+	SetBits( tex->flags, TF_IMG_SWIZZLED|TF_IMG_UPLOADED );
+
+	byte rgba[256 * 4];
+	for( int i = 0; i < 256; i++ )
+	{
+		rgba[i * 4 + 0] = palette[i * 3 + 0];
+		rgba[i * 4 + 1] = palette[i * 3 + 1];
+		rgba[i * 4 + 2] = palette[i * 3 + 2];
+		rgba[i * 4 + 3] = 0xff;
+	}
+	GL_UploadPalette( tex, rgba, 256 );
+
+	return tex - gl_textures;
 }
 
 /*
