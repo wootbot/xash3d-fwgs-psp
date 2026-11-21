@@ -154,7 +154,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache;
 #endif
 
 void R_StudioInit( void )
@@ -171,6 +171,7 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge_elights );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_propcache );
 #endif
 #endif
 
@@ -3455,9 +3456,16 @@ static void R_StudioSetRemapColors( int newTop, int newBottom )
 		m_fDoRemap = true;
 }
 
+#if XASH_PSP
+static void R_StudioPropCacheClear( void );
+#endif
+
 void R_StudioResetPlayerModels( void )
 {
 	memset( g_studio.player_models, 0, sizeof( g_studio.player_models ));
+#if XASH_PSP
+	R_StudioPropCacheClear(); // called on a new map
+#endif
 }
 
 /*
@@ -4228,6 +4236,115 @@ R_StudioDrawModel
 
 ===============
 */
+#if XASH_PSP
+/*
+=================
+static props
+
+A prop (a model of at most 2 bones in a sequence of one frame: items, weapons
+on the floor, gibs at rest) that stays where it is keeps its bones and its
+light: the bone setup and the light traces run again only when it moves,
+changes, or every 0.25 s for light styles and dynamic lights. fight1: the
+props were ~2.5 ms a frame.
+=================
+*/
+static CVAR_DEFINE_AUTO( r_studio_propcache, "1", FCVAR_ARCHIVE, "keep the bones and light of studio models that don't move or animate between frames" );
+
+#define PROP_MAXBONES	2
+#define PROP_SLOTS	64
+#define PROP_LIGHT_TIME	0.25
+
+typedef struct
+{
+	const cl_entity_t	*e;
+	const model_t	*model;
+	int		sequence, body, skin;
+	double		time;		// of the light
+	matrix3x4		rotation;
+	matrix3x4		bones[PROP_MAXBONES];
+	matrix3x4		lights[PROP_MAXBONES];
+	vec3_t		blightvec[PROP_MAXBONES];
+	float		ambientlight, shadelight;
+	vec3_t		lightvec, lightcolor, lightspot;
+	qboolean		valid;
+} propcache_t;
+
+static propcache_t r_propcache[PROP_SLOTS];
+
+// the slot of this entity if it may be cached at all; *hit when its state is still good
+static propcache_t *R_StudioPropCache( cl_entity_t *e, qboolean *hit )
+{
+	*hit = false;
+	if( !r_studio_propcache.value || e == tr.viewent || m_pStudioHeader->numbones > PROP_MAXBONES || m_pStudioHeader->numbones <= 0 )
+		return NULL;
+	if( e->curstate.movetype == MOVETYPE_FOLLOW || e->curstate.renderfx != kRenderFxNone || e->curstate.sequence >= m_pStudioHeader->numseq )
+		return NULL;
+
+	const mstudioseqdesc_t *pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex) + e->curstate.sequence;
+	if( pseqdesc->numframes > 1 )
+		return NULL;
+
+	// two slots to choose from: this entity's, else the free or older one
+	const uint h = ((uint)(uintptr_t)e * 2654435761u ) >> 26;
+	propcache_t *pc = &r_propcache[h], *pc2 = &r_propcache[( h + 1 ) & ( PROP_SLOTS - 1 )];
+
+	if( pc->e != e && ( pc2->e == e || ( pc->valid && ( !pc2->valid || pc2->time < pc->time ))))
+		pc = pc2;
+
+	if( pc->valid && pc->e == e && pc->model == RI.currentmodel && pc->sequence == e->curstate.sequence
+		&& pc->body == e->curstate.body && pc->skin == e->curstate.skin
+		&& g_studio.time >= pc->time && g_studio.time < pc->time + PROP_LIGHT_TIME
+		&& !memcmp( pc->rotation, g_studio.rotationmatrix, sizeof( matrix3x4 )))
+		*hit = true;
+	return pc;
+}
+
+static void R_StudioPropRestore( const propcache_t *pc )
+{
+	const int n = m_pStudioHeader->numbones;
+
+	memcpy( g_studio.bonestransform, pc->bones, n * sizeof( matrix3x4 ));
+	memcpy( g_studio.lighttransform, pc->lights, n * sizeof( matrix3x4 ));
+	memcpy( g_studio.blightvec, pc->blightvec, n * sizeof( vec3_t ));
+	g_studio.ambientlight = pc->ambientlight;
+	g_studio.shadelight = pc->shadelight;
+	VectorCopy( pc->lightvec, g_studio.lightvec );
+	VectorCopy( pc->lightcolor, g_studio.lightcolor );
+	VectorCopy( pc->lightspot, g_studio.lightspot );
+	g_studio.numlocallights = 0;
+}
+
+static void R_StudioPropStore( propcache_t *pc, cl_entity_t *e )
+{
+	const int n = m_pStudioHeader->numbones;
+
+	// entity lights take the per-vertex path: not worth keeping
+	pc->valid = !g_studio.numlocallights;
+	if( !pc->valid )
+		return;
+	pc->e = e;
+	pc->model = RI.currentmodel;
+	pc->sequence = e->curstate.sequence;
+	pc->body = e->curstate.body;
+	pc->skin = e->curstate.skin;
+	pc->time = g_studio.time;
+	memcpy( pc->rotation, g_studio.rotationmatrix, sizeof( matrix3x4 ));
+	memcpy( pc->bones, g_studio.bonestransform, n * sizeof( matrix3x4 ));
+	memcpy( pc->lights, g_studio.lighttransform, n * sizeof( matrix3x4 ));
+	memcpy( pc->blightvec, g_studio.blightvec, n * sizeof( vec3_t ));
+	pc->ambientlight = g_studio.ambientlight;
+	pc->shadelight = g_studio.shadelight;
+	VectorCopy( g_studio.lightvec, pc->lightvec );
+	VectorCopy( g_studio.lightcolor, pc->lightcolor );
+	VectorCopy( g_studio.lightspot, pc->lightspot );
+}
+
+static void R_StudioPropCacheClear( void )
+{
+	memset( r_propcache, 0, sizeof( r_propcache ));
+}
+#endif
+
 static int R_StudioDrawModel( int flags )
 {
 	alight_t	lighting;
@@ -4275,6 +4392,34 @@ static int R_StudioDrawModel( int flags )
 			return 1;
 	}
 
+#if XASH_PSP
+	qboolean prop_hit = false;
+	propcache_t *prop = FBitSet( flags, STUDIO_RENDER ) ? R_StudioPropCache( RI.currententity, &prop_hit ) : NULL;
+
+	if( prop_hit )
+	{
+		R_StudioPropRestore( prop );
+		R_StudioSaveBones();
+
+		// attachments only: one frame, no events to fire
+		if( flags & STUDIO_EVENTS )
+		{
+			R_StudioCalcAttachments( );
+			if( RI.currententity->index > 0 )
+			{
+				cl_entity_t *ent = CL_GetEntityByIndex( RI.currententity->index );
+				memcpy( ent->attachment, RI.currententity->attachment, sizeof( vec3_t ) * 4 );
+			}
+		}
+
+		g_nTopColor = RI.currententity->curstate.colormap & 0xFF;
+		g_nBottomColor = (RI.currententity->curstate.colormap & 0xFF00) >> 8;
+		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+		R_StudioRenderModel();
+		return 1;
+	}
+#endif
+
 	if( RI.currententity->curstate.movetype == MOVETYPE_FOLLOW )
 		R_StudioMergeBones( RI.currententity, RI.currentmodel );
 	else R_StudioSetupBones( RI.currententity );
@@ -4309,6 +4454,11 @@ static int R_StudioDrawModel( int flags )
 		g_nBottomColor = (RI.currententity->curstate.colormap & 0xFF00) >> 8;
 
 		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+
+#if XASH_PSP
+		if( prop )
+			R_StudioPropStore( prop, RI.currententity );
+#endif
 
 		R_StudioRenderModel();
 	}
