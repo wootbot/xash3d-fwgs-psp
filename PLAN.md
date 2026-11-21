@@ -635,3 +635,28 @@ music), launched from the XMB.
   client movement ~0.48 (~60 us a move, no doubles left in it), world hull ~0.2, traces' own
   code ~0.3, position tests ~0.15, contents ~0.12, the prediction functions ~0.28, setup and
   copies ~0.15. fight1 37.0 fps, 1% low 19.5.
+- 2026-11-21 (early morning): **Software doubles outside prediction, clipping, pre-cull.**
+  A count of `jal __*df*` calls per function in the engine ELF found the remaining hot
+  doubles: `DEG2RAD`/`RAD2DEG` cast to double (every `AngleVectors`, entity transform and
+  interpolation) and the delta decoder compared each field's multipliers with `1.0` as doubles
+  (`cc6d3abe`: both float now, decoding math unchanged; no timedemo change, the demo skips
+  entity interpolation). The mixer's per channel bookkeeping was ~60 double calls (~30 us) per
+  channel and paint call; it steps the position in 32.32 fixed point now (`f9ff9c91`): channel
+  mixing 2.26 -> 1.58 ms a frame. What's left there is the per sample loops (~1.45 ms for
+  ~17,400 channel-samples a frame, nearly all 8-bit mono, ~28 cycles each): a cap on mixed
+  channels (~28 at once in a firefight) or table lookups instead of multiplies would be next.
+  **World clipping** (`8e5e4e6d`): the CPU clipped polygons against the view frustum, ~65 a
+  frame in fight1, but the GE only drops primitives that leave its 4096 pixel guard band
+  (~2 a frame do). The clip planes sit inside the guard band now (6x / 12x the half view), and
+  each surface's box is tested once against them, so its passes skip the per vertex test
+  (~800 of ~815 polygon draws a frame): lightmap pass 0.88 -> 0.50 ms, water 0.74 -> 0.49 (more
+  static lists), fight1 37.8 -> 38.9 fps. Needs a look on the screen for missing polygons near
+  the camera. Studio pre-cull in one pass per draw list (`06bcb12c`): ~+0.2 fps.
+  **Measuring pitfall:** the stage timer showed the pre-cull at ~17 us a call cold against ~3 us
+  in a loop and the batched pass saving 0.66 ms, but an A/B timedemo showed ~0.15 ms: the
+  timer's own ticks evict cache lines around tiny functions. A/B small changes with timedemos.
+  Fresh split of the studio work (fight1, ms a frame, ~12 models past the cull): bone setup
+  1.74, GE output ~2.6 (meshes, skin/bone/light blocks), lighting ~0.55, save bones 0.39, bbox
+  0.35, header 0.2. Grunts are ~4 of it (~8 a frame, ~510 us each). The world texture chains
+  are ~1.7 ms for ~350 surfaces (~5 us each, ~0.2 ms of it the draws): cache misses on the
+  surface structs, a display list per visible area is still the way to cut it.
