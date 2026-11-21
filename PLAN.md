@@ -600,3 +600,18 @@ music), launched from the XMB.
 
   Without rendering that is ~13.5 ms a frame (prediction, parsing, emit, mixing), so both
   halves need cuts: rendering ~17 -> ~3-5 ms and the rest ~13.5 -> ~11 for 60 fps.
+- 2026-11-21 (night): **Prediction** (user decision: float math is fine in prediction, small
+  errors are ok). The client's movement code spent ~250 us per move, mostly software doubles:
+  `sin`/`cos` of a double ~23 us each (six per `AngleVectors`), `sqrt` ~8 us, against 0.2-0.7 us
+  for the float versions (TEMP `psp_mathbench`). The game libraries now build with
+  `-fsingle-precision-constant` and `<tgmath.h>` for C (hlsdk `7a1818c4`): movement ~250 -> ~70 us
+  a move, prediction 5.0 -> 3.5 ms a frame, fight1 ~1.4 ms a frame faster. What's left
+  (exact stages, ms a frame): engine traces and position tests ~1.7 (~77 us each, no doubles in
+  them), client movement ~0.6, player state copies ~0.4 (a `local_state_t` with its 64 weapons
+  is copied for every move), the prediction loop ~0.5. **The timedemo overstates prediction**:
+  fight1 was recorded at ~7-10 fps, so its commands are 100-150 ms long and each runs as 3-4
+  moves of up to 50 ms (~8 moves a frame). Playing at 60 fps a command is ~16 ms, one move,
+  so about half the moves per second. A demo recorded at the current frame rate would measure
+  prediction closer to real play. Note: `docker-build.sh hlsdk` can fail with
+  `psp/exports.c: No such file`: client and server both generate and delete that file and race
+  under `make -j`; a plain `make` works.

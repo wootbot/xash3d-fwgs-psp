@@ -142,8 +142,11 @@ Docker Desktop must be in **Linux containers** mode.
     `cd ms0:/PSP/GAME/Xash3D` then `./xash.prx -dev 2 -log -dbgcon` (it can't run `EBOOT.PBP`).
   - The PSP FPU has no doubles: every `double` operation is a software call. In hot loops (per
     vertex, particle, bone, entity) keep math in float; find offenders with `psp-objdump -d` and a
-    count of `jal __*df*` calls per function. Never change the math in pm_shared/prediction or delta
-    decoding: it has to match the server.
+    count of `jal __*df*` calls per function (`sin`/`cos` of a double ~23 us, `sqrt` ~8 us, the float
+    versions 0.2-0.7 us). Prediction may use float math: the user decided (2026-11-21) that small
+    prediction errors are fine, the game libraries build with `-fsingle-precision-constant` and
+    `<tgmath.h>`. Delta decoding stays exact (protocol). Game time stays double (float loses ms
+    precision within hours).
   - `dbgcon.py cmd psp_restart` restarts the game, also when it's stuck (hang, error dialog waiting for
     X): the watchdog thread handles it then. Error dialogs are sent to the log too.
   - The PC always sends first (keepalives), so the Windows firewall needs no rule.
