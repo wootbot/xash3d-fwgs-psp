@@ -573,3 +573,30 @@ music), launched from the XMB.
   mixing). 100 fps still needs rendering at ~2 ms against ~17 ms now, and 60 fps ~8-9 ms:
   that needs the PSP model format (baked bones and animation, GE command lists) and world
   display lists, not more small cuts.
+- 2026-11-21 (later still): **Exact stage profile** (TEMP `psp_stagetime`: on every stage
+  change the main thread reads the clock and adds the time since the last change to the stage
+  it was in; armed, it covers the in-game frames of the next timedemo). Checks: the stages sum
+  to the wall time, the main thread's own run clock is 31.7 of 32.6 ms a frame (the rest is
+  the net yield and higher priority threads), 2511 clock reads a frame at 0.77 us = 1.9 ms of
+  overhead, subtracted below by each stage's read count. pspsdk's gprof (`libpspprof`) was
+  not used: its 1 ms timer credits the function entered last, not the running code, and
+  `-pg` adds a call with a divide to every function call. fight1, ms per in-game frame
+  (~30.5 net, 33.8 fps untimed):
+
+  | Part | ms | Sampler said |
+  |---|---|---|
+  | Render work outside marked stages (studio model setup, bones, lighting) | 6.7 | ~5.4 |
+  | Prediction (c_predict + CL_RedoPrediction, traces, pmove) | 5.0 | ~2.9 |
+  | World | 4.0 | ~3.1 |
+  | Network message parsing (svc 41 packet entities ~1.8) | 2.75 | |
+  | Brush entities | 2.7 | ~2 |
+  | Mixing | 2.5 | ~1.7 |
+  | Studio GE output (meshes, skin/bone/light blocks) | 2.0 | |
+  | Entity and temp entity emit | 1.75 | |
+  | HUD, console, 2D | 0.75 | |
+  | Effects, sprites | 0.5 | |
+  | Net yield (Wi-Fi threads included) | 0.46 | ~3 |
+  | View model | 0.3 | |
+
+  Without rendering that is ~13.5 ms a frame (prediction, parsing, emit, mixing), so both
+  halves need cuts: rendering ~17 -> ~3-5 ms and the rest ~13.5 -> ~11 for 60 fps.
