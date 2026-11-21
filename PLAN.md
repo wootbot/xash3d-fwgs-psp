@@ -517,3 +517,12 @@ music), launched from the XMB.
   shells, gibs: cached pose and light, models drawn grouped so their data stays in the cache);
   then a PSP model format generated offline (reduced bones, pre-baked quantized animation, GE
   command lists), which removes both the arithmetic and most of the scattered data.
+- 2026-11-20 (night, later still): Bone matrices on the VFPU (`67cf0eac`: a 3x4 concat with
+  `vmmul`, self-tested against the C version on first use; without the distort/hologram
+  effects the light transforms are a copy of the bone transforms): soldier matrix loop 74 ->
+  39 us. **Static water** (`b58bddfb`, `r_water_static 1`): water surfaces are built once into
+  GE triangle lists with a scrolling texture instead of the warp; only polygons that need
+  clipping are still warped (fight1: ~310 of ~328 a frame from the lists), 26.3 -> 26.65 fps.
+  Pitfall found on the way: a cvar registered lazily behind its own `value` check never gets
+  registered, so setting it does nothing and an A/B measures the same code twice. Register
+  cvars in an init or new-map hook. fight1 in game: 26.65 fps.
