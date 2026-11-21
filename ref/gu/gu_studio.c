@@ -154,7 +154,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_minpixels;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels;
 #endif
 
 void R_StudioInit( void )
@@ -168,6 +168,7 @@ void R_StudioInit( void )
 	Matrix3x4_LoadIdentity( g_studio.rotationmatrix );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_precull );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge_elights );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
 #endif
@@ -2914,15 +2915,94 @@ R_StudioGEAllowed
 entity state that the GE path can draw
 ===============
 */
+#if XASH_PSP
+/*
+===============
+R_StudioGEFoldElights
+
+entity lights (muzzle flashes, ~20 models a frame in a firefight) need the
+per-vertex CPU path, ~130 us more per model. Fold them into the model's one
+directional light instead, the way R_EntityDynamicLight adds dlights: the
+model brightens toward the flash, tinted by it, instead of per vertex.
+===============
+*/
+static CVAR_DEFINE_AUTO( r_studio_ge_elights, "1", FCVAR_ARCHIVE, "GE studio models: fold entity lights into the model light instead of lighting on the CPU" );
+
+static void R_StudioGEFoldElights( void )
+{
+	if( !g_studio.numlocallights || !r_studio_ge_elights.value )
+		return;
+
+	vec3_t origin, dir;
+	Matrix3x4_OriginFromMatrix( g_studio.rotationmatrix, origin );
+
+	// the light as a vector: direction of travel scaled by its strength
+	vec3_t vec;
+	VectorScale( g_studio.lightvec, g_studio.shadelight, vec );
+	float ambient = g_studio.ambientlight;
+	float base = g_studio.ambientlight + g_studio.shadelight;
+	vec3_t color;
+	VectorScale( g_studio.lightcolor, base, color );
+	float total = base;
+
+	for( int i = 0; i < g_studio.numlocallights; i++ )
+	{
+		const dlight_t *el = g_studio.locallight[i];
+		const int *lc = g_studio.locallightcolor[i]; // linear, 0..1023
+
+		VectorSubtract( origin, el->origin, dir );
+		float d2 = DotProduct( dir, dir );
+		float s = d2 > g_studio.locallightR2[i] ? sqrtf( g_studio.locallightR2[i] / d2 ) : 1.0f;
+		float m = Q_max( Q_max( lc[0], lc[1] ), lc[2] );
+
+		if( m <= 0.0f )
+			continue;
+
+		float e = m * ( 1.0f / 4.0f ) * s; // illumination units, like ambient and shade
+
+		if( d2 > 0.0f )
+			VectorScale( dir, ( e * 0.5f ) / sqrtf( d2 ), dir );
+		else VectorClear( dir );
+		VectorAdd( vec, dir, vec );
+		ambient += e * 0.5f;
+		total += e;
+
+		for( int j = 0; j < 3; j++ )
+			color[j] += lc[j] / m * e;
+	}
+
+	float shade = VectorLength( vec );
+	if( shade > 0.0f )
+		VectorScale( vec, 1.0f / shade, g_studio.lightvec );
+	g_studio.shadelight = shade;
+	g_studio.ambientlight = ambient;
+
+	float cm = Q_max( Q_max( color[0], color[1] ), color[2] );
+	if( cm > 0.0f && total > 0.0f )
+		VectorScale( color, 1.0f / cm, g_studio.lightcolor );
+
+	for( int i = 0; i < m_pStudioHeader->numbones; i++ )
+		Matrix3x4_VectorIRotate( g_studio.lighttransform[i], g_studio.lightvec, g_studio.blightvec[i] );
+
+	g_studio.numlocallights = 0;
+}
+#endif
+
 static qboolean R_StudioGEAllowed( void )
 {
-	if( !r_studio_ge.value || g_studio.numlocallights || g_nForceFaceFlags )
+	if( !r_studio_ge.value || g_nForceFaceFlags )
 		return false;
 	if( g_studio.rendermode != kRenderNormal || RI.currententity->curstate.renderfx == kRenderFxGlowShell )
 		return false;
 	if( glState.isFogEnabled || r_lightmap->value || r_fullbright->value )
 		return false;
 	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ))
+		return false;
+#if XASH_PSP
+	// only once the GE path is otherwise allowed: the CPU path needs the lights as they are
+	R_StudioGEFoldElights();
+#endif
+	if( g_studio.numlocallights )
 		return false;
 	return true;
 }
