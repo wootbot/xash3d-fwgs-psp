@@ -837,6 +837,92 @@ StudioSetupBones
 
 ====================
 */
+#if XASH_PSP
+/*
+====================
+R_StudioConcat
+
+Matrix3x4_ConcatTransforms on the VFPU: a scalar product chain is ~2 us a bone
+on the PSP's FPU. Rows of the 3x4 matrices load as columns (the transposes,
+with 0 0 0 1 as the fourth column), and out^T = in2^T * in1^T. Which operand
+order vmmul wants is checked against the C version on first use; if neither
+matches, the C version is used. Matrices 1-3 only (ref_gu keeps state in 6, 7).
+====================
+*/
+static int r_vfpu_concat = -1; // -1 untested, 0 C, 1 or 2 the vmmul operand order
+
+static void R_StudioConcatVFPU( int order, matrix3x4 out, const matrix3x4 in1, const matrix3x4 in2 )
+{
+	if( order == 1 )
+	{
+		__asm__ volatile(
+			"ulv.q   C100, 0(%1)\n"
+			"ulv.q   C110, 16(%1)\n"
+			"ulv.q   C120, 32(%1)\n"
+			"vidt.q  C130\n"
+			"ulv.q   C200, 0(%2)\n"
+			"ulv.q   C210, 16(%2)\n"
+			"ulv.q   C220, 32(%2)\n"
+			"vidt.q  C230\n"
+			"vmmul.q M300, M200, M100\n"
+			"usv.q   C300, 0(%0)\n"
+			"usv.q   C310, 16(%0)\n"
+			"usv.q   C320, 32(%0)\n"
+			:: "r"( out ), "r"( in1 ), "r"( in2 ) : "memory" );
+	}
+	else
+	{
+		__asm__ volatile(
+			"ulv.q   C100, 0(%1)\n"
+			"ulv.q   C110, 16(%1)\n"
+			"ulv.q   C120, 32(%1)\n"
+			"vidt.q  C130\n"
+			"ulv.q   C200, 0(%2)\n"
+			"ulv.q   C210, 16(%2)\n"
+			"ulv.q   C220, 32(%2)\n"
+			"vidt.q  C230\n"
+			"vmmul.q M300, M100, M200\n"
+			"usv.q   C300, 0(%0)\n"
+			"usv.q   C310, 16(%0)\n"
+			"usv.q   C320, 32(%0)\n"
+			:: "r"( out ), "r"( in1 ), "r"( in2 ) : "memory" );
+	}
+}
+
+static qboolean R_StudioConcatMatches( int order )
+{
+	static const matrix3x4 a = { { 0.36f, -0.48f, 0.8f, 10.0f }, { 0.8f, 0.6f, 0.0f, -20.0f }, { -0.48f, 0.64f, 0.6f, 30.0f } };
+	static const matrix3x4 b = { { 0.6f, 0.0f, -0.8f, 1.5f }, { 0.0f, 1.0f, 0.0f, 2.5f }, { 0.8f, 0.0f, 0.6f, -3.5f } };
+	matrix3x4 ref, out;
+
+	Matrix3x4_ConcatTransforms( ref, a, b );
+	R_StudioConcatVFPU( order, out, a, b );
+
+	for( int i = 0; i < 3; i++ )
+	{
+		for( int j = 0; j < 4; j++ )
+		{
+			if( fabsf( ref[i][j] - out[i][j] ) > 1e-4f )
+				return false;
+		}
+	}
+	return true;
+}
+
+static inline void R_StudioConcat( matrix3x4 out, const matrix3x4 in1, const matrix3x4 in2 )
+{
+	if( unlikely( r_vfpu_concat < 0 ))
+	{
+		r_vfpu_concat = R_StudioConcatMatches( 1 ) ? 1 : R_StudioConcatMatches( 2 ) ? 2 : 0;
+		gEngfuncs.Con_Printf( "studio: VFPU bone matrices %s\n", r_vfpu_concat ? "on" : "off (didn't match the FPU)" );
+	}
+
+	if( r_vfpu_concat )
+		R_StudioConcatVFPU( r_vfpu_concat, out, in1, in2 );
+	else Matrix3x4_ConcatTransforms( out, in1, in2 );
+}
+#endif
+
 static void R_StudioSetupBones( cl_entity_t *e )
 {
 	static vec3_t	pos[MAXSTUDIOBONES];
@@ -957,6 +1043,25 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		}
 	}
 
+#if XASH_PSP
+	// without these effects the light transforms are the bone transforms:
+	// one chain of products and a copy instead of two chains
+	if( e->curstate.renderfx != kRenderFxDistort && e->curstate.renderfx != kRenderFxHologram && e->curstate.renderfx != kRenderFxExplode )
+	{
+		const int numbones = m_pStudioHeader->numbones;
+
+		for( int i = 0; i < numbones; i++ )
+		{
+			matrix3x4 bonematrix;
+			Matrix3x4_FromOriginQuat( bonematrix, q[i], pos[i] );
+
+			const int parent = pbones[i].parent;
+			R_StudioConcat( g_studio.bonestransform[i], parent == -1 ? g_studio.rotationmatrix : g_studio.bonestransform[parent], bonematrix );
+		}
+		memcpy( g_studio.lighttransform, g_studio.bonestransform, numbones * sizeof( g_studio.bonestransform[0] ));
+		return;
+	}
+#endif
 	for( int i = 0; i < m_pStudioHeader->numbones; i++ )
 	{
 		matrix3x4 bonematrix;
