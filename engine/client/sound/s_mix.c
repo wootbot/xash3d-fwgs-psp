@@ -44,11 +44,14 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 #if XASH_PSP
 // the PSP's FPU is single precision only: double math in these per-sample loops
 // is emulated in software and made mixing the most expensive part of a firefight.
-// Step through the source with a 32-bit fixed point fraction instead
+// Step through the source with a 32-bit fixed point fraction instead: the caller
+// passes the position's fraction and the step in 32.32 fixed point
+typedef struct { uint i; uint32_t f; } s_fixstep_t;
+
 #define S_FIXED_STEP( offset_frac, rate_scale ) \
-	uint step_int = (uint)( rate_scale ); \
-	uint32_t step_frac = (uint32_t)(( (float)( rate_scale ) - (float)step_int ) * 4294967296.0f ); \
-	uint32_t frac = (uint32_t)( (float)( offset_frac ) * 4294967296.0f ); \
+	const uint step_int = ( rate_scale ).i; \
+	const uint32_t step_frac = ( rate_scale ).f; \
+	uint32_t frac = ( offset_frac ); \
 	uint sample_idx = 0
 
 #define S_FIXED_ADVANCE( shift ) \
@@ -58,7 +61,7 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 #define S_FIXED_LERP( a, b ) ( (a) + (int)((( (int)(b) - (int)(a) ) * (int)( frac >> 16 )) >> 16 ))
 
 #define S_MakeMixMonoPitch( x ) \
-	static void S_MixMonoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	static void S_MixMonoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, uint32_t offset_frac, s_fixstep_t rate_scale, int num_samples ) \
 	{ \
 		const int##x##_t *data = buf; \
 		S_FIXED_STEP( offset_frac, rate_scale ); \
@@ -71,7 +74,7 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 	} \
 
 #define S_MakeMixStereoPitch( x ) \
-	static void S_MixStereoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	static void S_MixStereoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, uint32_t offset_frac, s_fixstep_t rate_scale, int num_samples ) \
 	{ \
 		const int##x##_t *data = buf; \
 		S_FIXED_STEP( offset_frac, rate_scale ); \
@@ -84,7 +87,7 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 	} \
 
 #define S_MakeMixMonoLerp( x ) \
-	static void S_MixMonoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	static void S_MixMonoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, uint32_t offset_frac, s_fixstep_t rate_scale, int num_samples ) \
 	{ \
 		const int##x##_t *data = buf; \
 		S_FIXED_STEP( offset_frac, rate_scale ); \
@@ -98,7 +101,7 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 	} \
 
 #define S_MakeMixStereoLerp( x ) \
-	static void S_MixStereoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, double offset_frac, double rate_scale, int num_samples ) \
+	static void S_MixStereoLerp ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, uint32_t offset_frac, s_fixstep_t rate_scale, int num_samples ) \
 	{ \
 		const int##x##_t *data = buf; \
 		S_FIXED_STEP( offset_frac, rate_scale ); \
@@ -179,6 +182,16 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 
 #endif // !XASH_PSP
 
+#if XASH_PSP
+typedef uint32_t s_mixfrac_t;
+typedef s_fixstep_t s_mixstep_t;
+#define S_MIX_UNIT_RATE( frac, rate ) ( (rate).i == 1 && !(rate).f && !(frac) )
+#else
+typedef double s_mixfrac_t;
+typedef double s_mixstep_t;
+#define S_MIX_UNIT_RATE( frac, rate ) ( Q_equal( rate, 1.0 ) && Q_equal( frac, 0.0 ))
+#endif
+
 S_MakeMixMono( 8 )
 S_MakeMixMono( 16 )
 S_MakeMixStereo( 8 )
@@ -192,9 +205,9 @@ S_MakeMixMonoLerp( 16 )
 S_MakeMixStereoLerp( 8 )
 S_MakeMixStereoLerp( 16 )
 
-static void S_MixAudio( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, double offset_frac, double rate_scale, int num_samples, qboolean lerp )
+static void S_MixAudio( portable_samplepair_t *pbuf, const int *pvol, const void *buf, int channels, int width, s_mixfrac_t offset_frac, s_mixstep_t rate_scale, int num_samples, qboolean lerp )
 {
-	if( Q_equal( rate_scale, 1.0 ) && Q_equal( offset_frac, 0.0 ))
+	if( S_MIX_UNIT_RATE( offset_frac, rate_scale ))
 	{
 		if( channels == 1 )
 		{
@@ -247,6 +260,7 @@ static void S_MixAudio( portable_samplepair_t *pbuf, const int *pvol, const void
 	}
 }
 
+#if !XASH_PSP
 static int S_AdjustNumSamples( channel_t *chan, int num_samples, double rate, double timecompress_rate )
 {
 	if( FBitSet( chan->flags, FL_CHAN_FINISHED ))
@@ -268,6 +282,154 @@ static int S_AdjustNumSamples( channel_t *chan, int num_samples, double rate, do
 
 	return num_samples;
 }
+#endif // !XASH_PSP
+
+#if XASH_PSP
+typedef float s_pitch_t;
+
+static s_fixstep_t S_FixedStep( float rate )
+{
+	s_fixstep_t s;
+
+	s.i = (uint)rate;
+	s.f = (uint32_t)(( rate - (float)s.i ) * 4294967296.0f );
+	return s;
+}
+
+static inline void S_FixedAdvance( uint32_t *pos, uint32_t *frac, s_fixstep_t step, uint n )
+{
+	const uint64_t f = (uint64_t)*frac + (uint64_t)step.f * n;
+
+	*pos += step.i * n + (uint32_t)( f >> 32 );
+	*frac = (uint32_t)f;
+}
+
+// source sample (relative to the start) the mixer reads for output sample n - 1
+static inline uint S_FixedLastRead( uint32_t frac, s_fixstep_t step, uint n )
+{
+	return step.i * ( n - 1 ) + (uint)(( (uint64_t)frac + (uint64_t)step.f * ( n - 1 )) >> 32 );
+}
+
+/*
+the same as the generic version below, but the source position is stepped in 32.32
+fixed point: with no double precision FPU, its double math cost ~30 us per channel
+and paint call (~60 software calls), a third of all mixing in a firefight.
+chan->sample stays a double for the rest of the engine, converted once each way
+*/
+static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, s_pitch_t pitch, int offset, int timecompress )
+{
+	const int initial_offset = offset;
+	const int pvol[2] =
+	{
+		bound( 0, chan->leftvol, 255 ),
+		bound( 0, chan->rightvol, 255 ),
+	};
+	const wavdata_t *wav = chan->sfx->cache;
+	const float rate = pitch * (float)wav->rate / (float)out_rate;
+	uint64_t forced_end_bits;
+
+	// timecompress at 100% is skipping the entire sfx, so mark as finished and exit
+	if( timecompress >= 100 )
+	{
+		SetBits( chan->flags, FL_CHAN_FINISHED );
+		return 0;
+	}
+
+	if( FBitSet( chan->flags, FL_CHAN_FINISHED ) || !( rate > 0.0f ))
+		return 0;
+
+	// the read position advances by rate per output sample, the channel by rate * timecompress
+	const float advance = timecompress ? rate / ( 1.0f - timecompress * 0.01f ) : rate;
+	const s_fixstep_t read_step = S_FixedStep( rate );
+	const s_fixstep_t pos_step = timecompress ? S_FixedStep( advance ) : read_step;
+
+	// if channel is set to end at specific sample, detect if it's the last mixing pass
+	// and truncate (rare: test the bits, a double compare is a software call too)
+	memcpy( &forced_end_bits, &chan->forced_end, sizeof( forced_end_bits ));
+	if( forced_end_bits << 1 )
+	{
+		double end_sample = chan->sample + (double)advance * num_samples;
+
+		if( end_sample >= chan->forced_end )
+		{
+			SetBits( chan->flags, FL_CHAN_FINISHED );
+			num_samples = floor(( chan->forced_end - chan->sample ) / advance );
+		}
+	}
+
+	if( num_samples <= 0 )
+		return 0;
+
+	uint32_t pos = (uint32_t)chan->sample;
+	uint32_t frac = (uint32_t)(( chan->sample - (double)pos ) * 4294967296.0 );
+
+	// linear interpolation needs one sample of lookahead beyond the last read position
+	const int lookahead = s_lerping.value ? 1 : 0;
+
+	while( num_samples > 0 )
+	{
+		// get total amount of samples we want, up to the last position, including lookahead
+		uint32_t end_pos = pos, end_frac = frac;
+		S_FixedAdvance( &end_pos, &end_frac, pos_step, num_samples );
+		int request_num_samples = (int)( end_pos - pos ) + ( end_frac ? 1 : 0 ) + lookahead;
+
+		// get sample pointer and also amount of samples available
+		const void *audio = NULL;
+		int available = S_RetrieveAudioSamples( wav, &audio, pos, request_num_samples, FBitSet( chan->flags, FL_CHAN_USE_LOOP ));
+
+		// no samples available, exit
+		if( !available )
+			break;
+
+		// can interpolate only when at least two source samples are available
+		qboolean lerp = lookahead && available >= 2;
+
+		// this is how much data we output
+		int out_count = num_samples;
+		if( request_num_samples > available )
+		{
+			const float sample_frac = frac * ( 1.0f / 4294967296.0f );
+
+			// lerp needs sample_idx + 1 to stay within available, so cap by available - 1
+			if( lerp )
+				out_count = (int)floorf(( available - 1 - sample_frac ) / rate );
+			else
+				out_count = (int)ceilf(( available - sample_frac ) / rate );
+
+			if( out_count > num_samples )
+				out_count = num_samples;
+
+			// float rounding: back off until the last read is within available
+			while( out_count > 0 && S_FixedLastRead( frac, read_step, out_count ) + lerp >= (uint)available )
+				out_count--;
+		}
+
+		// near a buffer boundary (e.g. just before a loop wrap) lerp may yield zero;
+		// fall back to nearest for one sample to keep the position advancing
+		if( out_count <= 0 )
+		{
+			lerp = false;
+			out_count = 1;
+		}
+
+		S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, frac, read_step, out_count, lerp );
+
+		S_FixedAdvance( &pos, &frac, pos_step, out_count );
+		offset += out_count;
+		num_samples -= out_count;
+	}
+
+	chan->sample = (double)pos + (double)frac * ( 1.0 / 4294967296.0 );
+
+	// samples couldn't be retrieved, mark as finished
+	if( num_samples > 0 )
+		SetBits( chan->flags, FL_CHAN_FINISHED );
+
+	// total amount of samples mixed
+	return offset - initial_offset;
+}
+#else // !XASH_PSP
+typedef double s_pitch_t;
 
 static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch, int offset, int timecompress )
 {
@@ -353,8 +515,9 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 	// total amount of samples mixed
 	return offset - initial_offset;
 }
+#endif // !XASH_PSP
 
-static int VOX_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, double pitch )
+static int VOX_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, s_pitch_t pitch )
 {
 	int	offset = 0;
 
@@ -466,7 +629,7 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 			}
 		}
 
-		double pitch = VOX_ModifyPitch( ch, ch->basePitch * 0.01 ) * pitch_mult;
+		s_pitch_t pitch = VOX_ModifyPitch( ch, ch->basePitch * 0.01f ) * pitch_mult;
 
 		num_mixed_channels++;
 
