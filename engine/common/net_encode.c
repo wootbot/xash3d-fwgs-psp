@@ -1052,7 +1052,7 @@ Delta_PreMultiplyInteger
 */
 static uint Delta_PreMultiplyInteger( const delta_t *pField, uint iValue, qboolean bSigned )
 {
-	if( Q_equal( pField->multiplier, 1.0 ))
+	if( Q_equal( pField->multiplier, 1.0f ))
 		return iValue;
 
 	return Delta_IntegerFromDouble( Delta_IntegerToDouble( iValue, bSigned ) * pField->multiplier, bSigned );
@@ -1066,15 +1066,15 @@ Delta_PostMultiplyInteger
 */
 static uint Delta_PostMultiplyInteger( const delta_t *pField, uint iValue, qboolean bSigned )
 {
-	if( Q_equal( pField->multiplier, 1.0 ) && Q_equal( pField->post_multiplier, 1.0 ))
+	if( Q_equal( pField->multiplier, 1.0f ) && Q_equal( pField->post_multiplier, 1.0f ))
 		return iValue;
 
 	double value = Delta_IntegerToDouble( iValue, bSigned );
 
-	if( !Q_equal( pField->multiplier, 1.0 ))
+	if( !Q_equal( pField->multiplier, 1.0f ))
 		value /= pField->multiplier;
 
-	if( !Q_equal( pField->post_multiplier, 1.0 ))
+	if( !Q_equal( pField->post_multiplier, 1.0f ))
 		value *= pField->post_multiplier;
 
 	return Delta_IntegerFromDouble( value, bSigned );
@@ -1461,10 +1461,10 @@ static void Delta_ReadField_( sizebuf_t *msg, delta_t *pField, void *to, double 
 		else
 			flValue = iValue;
 
-		if( !Q_equal( pField->multiplier, 1.0 ))
+		if( !Q_equal( pField->multiplier, 1.0f ))
 			flValue /= pField->multiplier;
 
-		if( !Q_equal( pField->post_multiplier, 1.0 ))
+		if( !Q_equal( pField->post_multiplier, 1.0f ))
 			flValue *= pField->post_multiplier;
 
 		*(float *)((byte *)to + pField->offset ) = flValue;

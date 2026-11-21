@@ -46,6 +46,13 @@ CONSTANTS AND HELPER MACROS
 #define M_PI_F  ((float)(M_PI))
 #define M_PI2_F ((float)(M_PI2))
 
+#if XASH_PSP
+// no double precision FPU: a double conversion is three software calls (extend, multiply,
+// truncate) for every angle of every entity's transform, and the result is a float anyway
+#define RAD2DEG( x ) ((float)(x) * (float)(180.0 / M_PI))
+#define DEG2RAD( x ) ((float)(x) * (float)(M_PI / 180.0))
+#endif
+
 #ifndef RAD2DEG
 #define RAD2DEG( x ) ((double)(x) * (double)(180.0 / M_PI))
 #endif

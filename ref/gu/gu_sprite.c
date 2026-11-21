@@ -494,7 +494,7 @@ void R_DrawSpriteModel( cl_entity_t *e )
 	}
 	case SPR_FWD_PARALLEL_ORIENTED:
 	{
-		float angle = e->angles[ROLL] * (M_PI2 / 360.0f);
+		float angle = e->angles[ROLL] * (M_PI2_F / 360.0f);
 		float sr, cr;
 		SinCos( angle, &sr, &cr );
 		for( int i = 0; i < 3; i++ )

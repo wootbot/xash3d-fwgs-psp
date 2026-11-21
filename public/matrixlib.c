@@ -18,6 +18,12 @@ GNU General Public License for more details.
 #include "com_model.h"
 #include "xash3d_mathlib.h"
 
+#if XASH_PSP
+#define DEG2RAD_MUL ( M_PI2_F / 360.0f ) // float: no double precision FPU
+#else
+#define DEG2RAD_MUL ( M_PI2 / 360.0f )
+#endif
+
 /*
 ========================================================================
 
@@ -86,11 +92,11 @@ void Matrix3x4_CreateFromEntity( matrix3x4 out, const vec3_t angles, const vec3_
 	{
 		float angle, sr, sp, sy, cr, cp, cy;
 
-		angle = angles[YAW] * ( M_PI2 / 360.0f );
+		angle = angles[YAW] * DEG2RAD_MUL;
 		SinCos( angle, &sy, &cy );
-		angle = angles[PITCH] * ( M_PI2 / 360.0f );
+		angle = angles[PITCH] * DEG2RAD_MUL;
 		SinCos( angle, &sp, &cp );
-		angle = angles[ROLL] * ( M_PI2 / 360.0f );
+		angle = angles[ROLL] * DEG2RAD_MUL;
 		SinCos( angle, &sr, &cr );
 
 		out[0][0] = ( cp * cy ) * scale;
@@ -110,9 +116,9 @@ void Matrix3x4_CreateFromEntity( matrix3x4 out, const vec3_t angles, const vec3_
 	{
 		float angle, sp, sy, cp, cy;
 
-		angle = angles[YAW] * ( M_PI2 / 360.0f );
+		angle = angles[YAW] * DEG2RAD_MUL;
 		SinCos( angle, &sy, &cy );
-		angle = angles[PITCH] * ( M_PI2 / 360.0f );
+		angle = angles[PITCH] * DEG2RAD_MUL;
 		SinCos( angle, &sp, &cp );
 
 		out[0][0] = ( cp * cy ) * scale;
@@ -132,7 +138,7 @@ void Matrix3x4_CreateFromEntity( matrix3x4 out, const vec3_t angles, const vec3_
 	{
 		float angle, sy, cy;
 
-		angle = angles[YAW] * ( M_PI2 / 360.0f );
+		angle = angles[YAW] * DEG2RAD_MUL;
 		SinCos( angle, &sy, &cy );
 
 		out[0][0] = (cy)*scale;
@@ -215,11 +221,11 @@ void Matrix4x4_CreateFromEntity( matrix4x4 out, const vec3_t angles, const vec3_
 	{
 		float angle, sr, sp, sy, cr, cp, cy;
 
-		angle = angles[YAW] * ( M_PI2 / 360.0f );
+		angle = angles[YAW] * DEG2RAD_MUL;
 		SinCos( angle, &sy, &cy );
-		angle = angles[PITCH] * ( M_PI2 / 360.0f );
+		angle = angles[PITCH] * DEG2RAD_MUL;
 		SinCos( angle, &sp, &cp );
-		angle = angles[ROLL] * ( M_PI2 / 360.0f );
+		angle = angles[ROLL] * DEG2RAD_MUL;
 		SinCos( angle, &sr, &cr );
 
 		out[0][0] = ( cp * cy ) * scale;
@@ -243,9 +249,9 @@ void Matrix4x4_CreateFromEntity( matrix4x4 out, const vec3_t angles, const vec3_
 	{
 		float angle, sp, sy, cp, cy;
 
-		angle = angles[YAW] * ( M_PI2 / 360.0f );
+		angle = angles[YAW] * DEG2RAD_MUL;
 		SinCos( angle, &sy, &cy );
-		angle = angles[PITCH] * ( M_PI2 / 360.0f );
+		angle = angles[PITCH] * DEG2RAD_MUL;
 		SinCos( angle, &sp, &cp );
 
 		out[0][0] = ( cp * cy ) * scale;
@@ -269,7 +275,7 @@ void Matrix4x4_CreateFromEntity( matrix4x4 out, const vec3_t angles, const vec3_
 	{
 		float angle, sy, cy;
 
-		angle = angles[YAW] * ( M_PI2 / 360.0f );
+		angle = angles[YAW] * DEG2RAD_MUL;
 		SinCos( angle, &sy, &cy );
 
 		out[0][0] = (cy)*scale;
