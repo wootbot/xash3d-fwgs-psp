@@ -1760,6 +1760,50 @@ static void R_WorldSurfsDrawLightmaps( int page )
 
 	ws_lmhead[page] = WS_NONE;
 }
+
+/*
+=================
+R_WorldSurfChainBrush
+
+a visible surface of a static brush model (R_DrawStaticBrushModels) into the
+chains of R_WorldSurfsDrawTextures and R_WorldSurfsDrawLightmaps; false when
+it needs R_RenderBrushPoly. R_RenderBrushPoly was ~8 us a surface, ~60 a frame
+in a firefight: texture binds, the clip test from the surface's extra data,
+the decal and lightmap checks.
+=================
+*/
+static qboolean R_WorldSurfChainBrush( const msurface_t *surf )
+{
+	gu_wsurf_t *w = R_WorldSurf( surf );
+
+	if( !w || ws_allslow )
+		return false;
+
+	if( FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ))
+	{
+		// R_RenderBrushPoly updates it now, unless dlit
+		if( !FBitSet( w->texflags, WS_DLIT ))
+			ClearBits( w->texflags, WS_STALE );
+		return false;
+	}
+
+	const vec3_t mins = { w->mins[0], w->mins[1], w->mins[2] };
+	const vec3_t maxs = { w->maxs[0], w->maxs[1], w->maxs[2] };
+
+	if( GU_ClipBoxInside( mins, maxs ))
+		SetBits( w->texflags, WS_NOCLIP );
+	else ClearBits( w->texflags, WS_NOCLIP );
+
+	const int i = w - ws_surfs;
+	const int tex = w->texflags & WS_TEXTURE;
+	if( ws_texhead[tex] == WS_NONE )
+		ws_textures[ws_numtextures++] = tex;
+	w->texnext = ws_texhead[tex];
+	ws_texhead[tex] = i;
+	w->lmnext = ws_lmhead[w->lightmap];
+	ws_lmhead[w->lightmap] = i;
+	return true;
+}
 #endif // XASH_PSP
 
 /*
@@ -2985,6 +3029,21 @@ void R_DrawStaticBrushModels( cl_entity_t **ents, int count )
 	if( gl_polyoffset_bmodels.value )
 		GL_PushPolygonOffset( -0.5f, -gl_polyoffset_bmodels.value );
 
+	// the surfaces that allow it through the world's chains: lightmapped (R_BlendLightmaps
+	// below checks the last entity only), the first texture frames. R_StaticBrushModel
+	// lets kRenderNormal and kRenderTransAlpha through, R_SetRenderMode set the alpha test.
+	qboolean chains = ws_surfs && !r_fullbright->value && WORLDMODEL->lightdata;
+
+	for( int r = 0; r < num_runs && chains; r++ )
+	{
+		if( FBitSet( runs[r].e->curstate.effects, EF_FULLBRIGHT ) || runs[r].e->curstate.frame )
+			chains = false;
+	}
+
+	// the world's lightmap pass emptied them; not after a frame without one
+	if( chains )
+		memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+
 	for( int r = 0; r < num_runs; r++ )
 	{
 		const int end = r + 1 < num_runs ? runs[r + 1].first : num_sorted;
@@ -2994,8 +3053,17 @@ void R_DrawStaticBrushModels( cl_entity_t **ents, int count )
 		RI.currentmodel = RI.currententity->model;
 
 		for( int i = runs[r].first; i < end; i++ )
-			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
+		{
+			msurface_t *surf = gpGlobals->draw_surfaces[i].surf;
+			const int cull = gpGlobals->draw_surfaces[i].cull;
+
+			if( !chains || cull != CULL_VISIBLE || !R_WorldSurfChainBrush( surf ))
+				R_RenderBrushPoly( surf, cull );
+		}
 	}
+
+	if( chains )
+		R_WorldSurfsDrawTextures();
 
 	DrawDecalsBatch();
 
