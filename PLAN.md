@@ -867,3 +867,23 @@ music), launched from the XMB.
   Walk 1.21 (old walk, same build) -> 0.92 ms; screenshots of both identical. Ablations of
   what is left: no surface culling 0.55, no leaf marks 0.64, neither 0.49 (the plane reads
   0.01, efrags 0.04); doing every box test twice costs +0.26.
+- 2026-11-22: **Working tree cleanup.** HEAD couldn't play fight1 (out of memory loading the
+  demo): memory and robustness work from earlier sessions had never been committed and sat in
+  the working tree among the TEMP probes. Committed by theme (`23adbf2c`..`80e5b234`): entity
+  array and packet ring kept between connections, server tables on the heap only for a local
+  server, loopback buffers on first use and fresh sockets on a Wi-Fi retry, bzip2 buffers from
+  the P5 RAM, HTTP connection/receive buffer limits, decoders that give up on a failed
+  allocation, 64 KB file copy buffer and 300 temp entities, textures without data or memory
+  no longer fatal, studio models skipped when the display list is nearly full, the timedemo's
+  slow frame list, and particles with a float client time (bullet impact particles 0.175 ->
+  0.13 ms a frame: each allocation did ~5 software double operations). Older text that HEAD
+  had since cleaned up (comments, stick axes, the yield) was dropped. **The clean build runs
+  fight1 at 54.3 fps all on; the probes cost ~2 ms a frame** (~48-50 with them): measure fps
+  on a clean build, use the probes only for the split. The probes are back in the working
+  tree on top (one `TEMP` per line or block, as before). Floor findings: physents built from
+  the visent copy saved nothing (0.41 -> 0.39), processing the packet in reverse order (states
+  still in cache) saved nothing (the cost is the ~3 KB cl_entity_t, ~15-25 lines an entity a
+  pass), -O2 instead of -Ofast no better (floor 127.6 vs 129.0 fps), the timedemo's svc_tempentity
+  is ~0.34 ms a frame (gunshot decals ~1 ms each: particles, decal, ricochet sound), an
+  explosion sound loads from the stick mid fight (one ~78 ms hitch, by design: sounds load on
+  first use to keep the heap free).
