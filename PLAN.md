@@ -900,3 +900,16 @@ music), launched from the XMB.
   is not what bone setup costs: the per bone float work around it is. Batching bound
   (probe build, `r_abl 4` / `r_abl 1024`): studio models cost 6.6 ms a frame cold, a warm
   repeat of every draw 5.9 ms, so cache misses are ~10% of the studio cost.
+- 2026-11-22: **Brush model surface cull; VFPU bone values tried** (fight1). The static brush
+  models' pass (`bg_sort`, 0.62 ms a frame) was 0.47 ms of R_SortBrushModelSurfaces: ~177
+  surfaces a frame through R_CullSurface (surface, texinfo, texture, plane, extents: ~2.6 us
+  each, cache misses). A 32 byte copy of the plane and extents for the world BSP's brush
+  models, water included, and the frustum planes the model's box is inside dropped per model
+  (`c3d14579`): fight1 53.7-53.9 -> 54.7-54.9 fps on clean builds. Same surfaces and cull
+  types. Bone math: per bone (hgrunt, 31 bones, warm) the decode of the keyframes is 0.46 us,
+  the float values 0.36 us and the lerp/angle tail 0.52 us of 1.34 us. Tried and reverted:
+  the values, lerp and angles on the VFPU, one bone at a time (channels 0-3 and 2-5 as two
+  quads): exact, but slower (1.65 vs 1.3 us a bone): filling the aligned record of keys and
+  controller values alone is 1.0 us, and the VFPU's latencies, ulv.q and reading the result
+  back cost ~0.6 us. Four bones a pass would hide the latency, but the per bone gather costs
+  as much as it saves. The bench's "getanim" figure included a calcrot loop (it's ~4 us).
