@@ -20,6 +20,60 @@ GNU General Public License for more details.
 #include "protocol.h"
 #if !XASH_DEDICATED
 #include <bzlib.h>
+
+#if XASH_PSP
+#include "platform/platform.h"
+
+// bzip2 allocates for the block size the stream declares (up to 900k, 2.25 MB with
+// small=1) even for a few hundred bytes of data, and in game the heap has no such hole:
+// take it from the P5 RAM, which is idle once the level is loaded
+static void *Netchan_BZ2Alloc( void *opaque, int items, int size )
+{
+	void *p = PSP_VolatileAlloc( (size_t)items * size );
+
+	return p ? p : malloc( (size_t)items * size );
+}
+
+static void Netchan_BZ2Free( void *opaque, void *p )
+{
+	if( PSP_IsVolatile( p ))
+		PSP_VolatileFree( p );
+	else free( p );
+}
+
+// BZ2_bzBuffToBuffDecompress with our allocator
+static int Netchan_BZ2Decompress( char *dest, unsigned int *destLen, char *source, unsigned int sourceLen, int small, int verbosity )
+{
+	bz_stream strm = { 0 };
+	int ret;
+
+	strm.bzalloc = Netchan_BZ2Alloc;
+	strm.bzfree = Netchan_BZ2Free;
+
+	if(( ret = BZ2_bzDecompressInit( &strm, verbosity, small )) != BZ_OK )
+		return ret;
+
+	strm.next_in = source;
+	strm.avail_in = sourceLen;
+	strm.next_out = dest;
+	strm.avail_out = *destLen;
+
+	ret = BZ2_bzDecompress( &strm );
+
+	if( ret == BZ_OK )
+		ret = strm.avail_out > 0 ? BZ_UNEXPECTED_EOF : BZ_OUTBUFF_FULL;
+	else if( ret == BZ_STREAM_END )
+	{
+		*destLen -= strm.avail_out;
+		ret = BZ_OK;
+	}
+
+	BZ2_bzDecompressEnd( &strm );
+	return ret;
+}
+
+#define BZ2_bzBuffToBuffDecompress Netchan_BZ2Decompress
+#endif // XASH_PSP
 #endif // !XASH_DEDICATED
 
 #define MAKE_FRAGID( id, count )	((( id & 0xffff ) << 16 ) | ( count & 0xffff ))
