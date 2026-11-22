@@ -48,7 +48,11 @@ typedef struct
 
 typedef struct
 {
+#if XASH_PSP
+	net_loopmsg_t	*msgs; // ~0.5 MB each, allocated on the first loopback send (local games only)
+#else
 	net_loopmsg_t	msgs[MAX_LOOPBACK];
+#endif
 	int		get, send;
 } net_loopback_t;
 
@@ -987,6 +991,10 @@ static qboolean NET_GetLoopPacket( netsrc_t sock, netadr_t *from, byte *data, si
 
 	if( loop->get >= loop->send )
 		return false;
+#if XASH_PSP
+	if( !loop->msgs )
+		return false;
+#endif
 	int i = loop->get & MASK_LOOPBACK;
 	loop->get++;
 
@@ -1007,6 +1015,11 @@ NET_SendLoopPacket
 static void NET_SendLoopPacket( netsrc_t sock, size_t length, const void *data, netadr_t to )
 {
 	net_loopback_t *loop = &net.loopbacks[sock^1];
+
+#if XASH_PSP
+	if( !loop->msgs )
+		loop->msgs = Mem_Malloc( host.mempool, sizeof( *loop->msgs ) * MAX_LOOPBACK );
+#endif
 
 	int i = loop->send & MASK_LOOPBACK;
 	loop->send++;
@@ -1861,6 +1874,14 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 	// retry until that works and then (re)open the sockets and find our address
 	if( multiplayer && !PSP_NetIsConnected( ))
 	{
+		// a retry may restart the stack, which leaves any open socket dead
+		for( int i = 0; i < NS_COUNT; i++ )
+		{
+			if( NET_IsSocketValid( net.ip_sockets[i] ))
+				closesocket( net.ip_sockets[i] );
+			net.ip_sockets[i] = INVALID_SOCKET;
+		}
+
 		if( PSP_NetConnect( ))
 		{
 			old_config = false;
