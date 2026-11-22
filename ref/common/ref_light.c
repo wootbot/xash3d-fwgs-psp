@@ -498,10 +498,11 @@ R_EntitySeesSky
 
 the sky test traces across the whole map, ~45 us per model on the PSP, and
 gives the same answer while the entity stays where it is: remember it per
-entity until the entity is 32 units from where it was traced (or for a
-second at most): a soldier running at 15 units per frame missed an 8 unit
-cache every frame. Then per 16 unit cell of the map, for whatever entity
-comes there next within that second: shells and gibs flying out of a fight
+entity until the entity is 32 units from where it was traced (the trace
+only hits the world, so the answer for a place never changes during a
+map): a soldier running at 15 units per frame missed an 8 unit cache every
+frame. Then per 16 unit cell of the map, for whatever entity comes there
+next: shells and gibs flying out of a fight
 land near each other (about half of the misses that were left, and no
 answer differed from the trace)
 ===============
@@ -516,7 +517,7 @@ typedef struct
 
 static qboolean R_SkyTestValid( const skytest_t *t, const vec3_t skyvec, float time )
 {
-	return t->world == gp_cl->models[1] && VectorCompare( t->skyvec, skyvec ) && time >= t->time && time < t->time + 1.0f;
+	return t->world == gp_cl->models[1] && VectorCompare( t->skyvec, skyvec );
 }
 
 static qboolean R_EntitySeesSky( const cl_entity_t *ent, const vec3_t origin, const vec3_t skyvec, float time, const vec3_t start, const vec3_t end )
