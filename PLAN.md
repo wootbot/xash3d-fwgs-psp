@@ -771,10 +771,23 @@ music), launched from the XMB.
   cache also takes sequences that don't play (`caccbf20`: shells, `w_357`), and
   MOVETYPE_STEP items that don't move. Same build A/B: 40.5 -> 41.0 fps (~5 props a frame
   on the fast path in the demo); the cache extension ~+0.3 fps more. The user checked the
-  props on screen: fine. Note: the "studio" exclusive time (~0.8 ms) is the "client DLL
-  glue" of the last entry only in name: the engine renderer is the default, it is the
-  stage timer's own overhead and the TEMP per-model timers between the stages.
+  props on screen: fine. Note: the "studio" exclusive time (~0.8 ms) isn't client DLL
+  code as the last entry says: the engine renderer is the PSP default. Most likely it is
+  the stage timer's own ticks and the TEMP per-model timers between the stages (not
+  measured).
   Left out of the fast path: moving props (shells in flight), chrome skins (`w_crossbow`:
   the chrome matrix follows the view), animated 1-bone models (`dirtycloths.mdl`, ~0.35 ms,
   ~120 us of it lighting), a light expiry every 0.25 s per prop (2 slow frames each).
   Still the biggest: grunts, ~0.5-0.65 ms each (bones ~150 us, GE output ~230 us).
+  **Lazy bone save** (`afc68a32`): R_StudioSaveBones only keeps a pointer, the names and
+  matrices are copied when a merge reads them. Same build A/B: 41.35 -> 42.3 fps. Not yet
+  seen on screen with a merged model (a player's weapon on the test server).
+  **The user doesn't want animation rate LOD** (bones every other frame for distant
+  models): it makes the scene look low fps. Keep full rate poses.
+  `sm_render` split (stage timer, ~12 models, ~23 body parts, ~3.1 ms with the timer's
+  overhead): merged atlas draws 0.61 (27 us a group), submit loop glue 0.67 (view matrix,
+  ramp, state, restore: 29 us a body part), per mesh draws 0.34 (14 us), render glue 0.47
+  (~40 us a model), pre (GE model, merge lookup, batches, flags) 0.5, light loop 0.2. About
+  150 us a model is set up around the GE commands, per body part again: candidates are
+  one view matrix/ramp/restore per model instead of per body part, and the batched
+  renderer of the plan above.
