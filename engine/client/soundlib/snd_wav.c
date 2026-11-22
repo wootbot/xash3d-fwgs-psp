@@ -322,6 +322,10 @@ qboolean Sound_LoadWAV( const char *name, const byte *buffer, fs_offset_t filesi
 	// Load the data
 	sound.size = sound.samples * sound.width * sound.channels;
 	sound.wav = Mem_Malloc( host.soundpool, sound.size );
+#if XASH_PSP
+	if( !sound.wav ) // out of memory in game, see S_LoadSound
+		return false;
+#endif
 
 	memcpy( sound.wav, buffer + (iff_dataPtr - buffer), sound.size );
 

@@ -30,6 +30,14 @@ static void Sound_Reset( void )
 static MALLOC_LIKE( FS_FreeSound, 1 ) wavdata_t *SoundPack( void )
 {
 	wavdata_t *pack = Mem_Malloc( host.soundpool, sizeof( *pack ) + sound.size );
+#if XASH_PSP
+	if( !pack ) // out of memory in game, see S_LoadSound
+	{
+		Mem_Free( sound.wav );
+		sound.wav = NULL;
+		return NULL;
+	}
+#endif
 
 	pack->size = sound.size;
 	pack->loop_start = sound.loopstart;

@@ -407,6 +407,13 @@ qboolean Sound_LoadMPG( const char *name, const byte *buffer, fs_offset_t filesi
 
 	// add sentinel make sure we not overrun
 	sound.wav = (byte *)Mem_Calloc( host.soundpool, sound.size + padsize );
+#if XASH_PSP
+	if( !sound.wav ) // out of memory in game, see S_LoadSound
+	{
+		close_decoder( mpeg );
+		return false;
+	}
+#endif
 	sound.type = WF_PCMDATA;
 
 	// decompress mpg into pcm wav format
