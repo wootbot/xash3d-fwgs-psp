@@ -895,7 +895,7 @@ texture and per lightmap page through them.
 typedef struct
 {
 	short		mins[3], maxs[3];	// rounded outwards
-	uint16_t	visframe;		// tr.framecount of the last visit of one of its leaves
+	uint16_t	pad0;
 	uint16_t	texflags;
 	gu_vert_t	*verts;		// the texture pass vertices, then the lightmap ones
 	byte		numverts;
@@ -910,6 +910,12 @@ typedef char ws_size_check[sizeof( gu_wsurf_t ) == 32 ? 1 : -1];
 static void		*ws_alloc;
 static gu_wsurf_t	*ws_surfs;		// WORLDMODEL->numsurfaces of them, NULL without
 static int		ws_numsurfs;
+
+// the low bits of tr.framecount when a leaf of the surface was visited: one
+// cache line for 32 surfaces, not 2 (the leaves mark ~700 a frame, the nodes
+// test ~850, ~400 pass)
+static uint16_t		*ws_visframe;
+static int		ws_visfill;		// tr.framecount >> 15 of the last fill
 static int		ws_style0;		// light style 0 of the lightmaps that aren't WS_STALE
 static qboolean		ws_allslow;		// this frame: draw all through R_RenderBrushPoly
 static qboolean		ws_skybox;		// this frame: the sky is a box, not sky polygons
@@ -1008,6 +1014,316 @@ static qboolean R_WorldSurfIsSlow( const model_t *world, const msurface_t *surf 
 
 /*
 =================
+the BSP tree of the world in DFS order, nodes and leaves in 32 bytes each (a
+cache line holds 2): R_RecursiveWorldNode reads mnode_t (56 bytes), its plane
+and a box of floats, ~1 us a node and ~600 nodes a frame, mostly cache misses
+=================
+*/
+#define WN_LEAF		0xfe		// type
+#define WN_SOLID	0xff		// type, a CONTENTS_SOLID leaf
+
+typedef struct
+{
+	short		mins[3], maxs[3];	// rounded outwards
+	uint16_t	pad0;
+	byte		type;		// the plane type, WN_LEAF or WN_SOLID
+	byte		pad;
+	union
+	{
+		float		dist;		// of the plane
+		uint32_t	firstmark;	// leaves: in wn_marks
+	};
+	uint16_t	child[2];		// leaves: the number of marks, the leaf number
+	uint16_t	firstsurf, numsurf;
+	uint16_t	plane;		// WORLDMODEL->planes index, for non axial planes
+	uint16_t	parent;		// WS_NONE for the root
+} gu_wnode_t;
+
+typedef char wn_size_check[sizeof( gu_wnode_t ) == 32 ? 1 : -1];
+
+static void		*wn_alloc;
+static gu_wnode_t	*wn_nodes;		// NULL without
+static int		wn_numnodes, wn_maxnodes;
+static uint16_t		*wn_marks;		// ws_surfs indexes
+static int		wn_nummarks, wn_maxmarks;
+static uint16_t		*wn_leafnode;		// WORLDMODEL->leafs index to wn_nodes index
+static uint16_t		*wn_visframe;		// the low bits of tr.visframecount in the PVS, 0 never
+
+// the frustum side planes ( normal, -dist ), then | normal |, for R_WorldBoxTest
+static float		wn_planes[8][4] __attribute__(( aligned( 16 )));
+
+static int R_WorldNodeAdd( const model_t *world, const mnode_t *node, int parent )
+{
+	if( node->contents < 0 )
+	{
+		const int l = (const mleaf_t *)node - world->leafs;
+
+		// the solid children are all leaf 0, never in the PVS
+		if( l >= 0 && l <= world->numleafs && wn_leafnode[l] != WS_NONE )
+		{
+			if( node->contents == CONTENTS_SOLID )
+				return wn_leafnode[l];
+			return -1;
+		}
+	}
+
+	if( wn_numnodes >= wn_maxnodes )
+		return -1;
+
+	const int n = wn_numnodes++;
+	gu_wnode_t *w = &wn_nodes[n];
+
+	for( int j = 0; j < 3; j++ )
+	{
+		const float mins = floorf( node->minmaxs[j] ), maxs = ceilf( node->minmaxs[j + 3] );
+
+		if( mins < -32768.0f || maxs > 32767.0f )
+			return -1;
+
+		w->mins[j] = mins;
+		w->maxs[j] = maxs;
+	}
+
+	w->parent = parent < 0 ? WS_NONE : parent;
+
+	if( node->contents < 0 )
+	{
+		const mleaf_t *leaf = (const mleaf_t *)node;
+		const int l = leaf - world->leafs;
+
+		if( l < 0 || l > world->numleafs || leaf->nummarksurfaces < 0 || leaf->nummarksurfaces > wn_maxmarks - wn_nummarks )
+			return -1;
+
+		w->type = node->contents == CONTENTS_SOLID ? WN_SOLID : WN_LEAF;
+		w->firstmark = wn_nummarks;
+		w->child[0] = leaf->nummarksurfaces;
+		w->child[1] = l;
+
+		for( int i = 0; i < leaf->nummarksurfaces; i++ )
+		{
+			const int surf = leaf->firstmarksurface[i] - world->surfaces;
+
+			if( surf < 0 || surf >= ws_numsurfs )
+				return -1;
+
+			wn_marks[wn_nummarks++] = surf;
+		}
+
+		wn_leafnode[l] = n;
+		return n;
+	}
+
+	const int first = node_firstsurface( node, world ), num = node_numsurfaces( node, world );
+
+	if( node->plane->type >= WN_LEAF || first < 0 || num < 0 || first + num > ws_numsurfs )
+		return -1;
+
+	w->type = node->plane->type;
+	w->dist = node->plane->dist;
+	w->plane = node->plane - world->planes;
+	w->firstsurf = first;
+	w->numsurf = num;
+
+	for( int side = 0; side < 2; side++ )
+	{
+		const int c = R_WorldNodeAdd( world, node_child( node, side, world ), n );
+
+		if( c < 0 )
+			return -1;
+
+		w = &wn_nodes[n];
+		w->child[side] = c;
+
+		// the clip flags a node leaves hold for its subtree
+		const gu_wnode_t *cw = &wn_nodes[c];
+		if( cw->type != WN_SOLID )
+		{
+			for( int j = 0; j < 3; j++ )
+			{
+				w->mins[j] = Q_min( w->mins[j], cw->mins[j] );
+				w->maxs[j] = Q_max( w->maxs[j], cw->maxs[j] );
+			}
+		}
+	}
+
+	for( int i = first; i < first + num; i++ )
+	{
+		if( !world->surfaces[i].info )
+			continue;
+
+		for( int j = 0; j < 3; j++ )
+		{
+			w->mins[j] = Q_min( w->mins[j], ws_surfs[i].mins[j] );
+			w->maxs[j] = Q_max( w->maxs[j], ws_surfs[i].maxs[j] );
+		}
+	}
+
+	return n;
+}
+
+/*
+=================
+R_WorldNodesBuild
+
+after R_WorldSurfsBuild
+=================
+*/
+static void R_WorldNodesBuild( void )
+{
+	const model_t *world = WORLDMODEL;
+
+	if( wn_alloc )
+		Mem_Free( wn_alloc );
+	wn_alloc = NULL;
+	wn_nodes = NULL;
+	wn_numnodes = wn_nummarks = 0;
+
+	if( !ws_surfs || !world->nodes || world->numplanes > WS_NONE )
+		return;
+
+	wn_maxnodes = world->numnodes + world->numleafs + 1;
+	wn_maxmarks = world->nummarksurfaces;
+
+	if( wn_maxnodes >= WS_NONE )
+		return;
+
+	// on cache lines
+	wn_alloc = Mem_Malloc( r_temppool, sizeof( gu_wnode_t ) * wn_maxnodes + sizeof( uint16_t ) * ( wn_maxmarks + world->numleafs + 1 + wn_maxnodes ) + 63 );
+	wn_nodes = (gu_wnode_t *)((( uintptr_t )wn_alloc + 63 ) & ~(uintptr_t)63 );
+	wn_marks = (uint16_t *)( wn_nodes + wn_maxnodes );
+	wn_leafnode = wn_marks + wn_maxmarks;
+	wn_visframe = wn_leafnode + world->numleafs + 1;
+	memset( wn_visframe, 0, sizeof( uint16_t ) * wn_maxnodes );
+	memset( wn_nodes, 0, sizeof( gu_wnode_t ) * wn_maxnodes );
+	memset( wn_leafnode, 0xff, sizeof( uint16_t ) * ( world->numleafs + 1 ));
+
+	if( R_WorldNodeAdd( world, world->nodes, -1 ) < 0 )
+	{
+		gEngfuncs.Con_Reportf( "%s: doesn't fit, R_RecursiveWorldNode walks it\n", __func__ );
+		Mem_Free( wn_alloc );
+		wn_alloc = NULL;
+		wn_nodes = NULL;
+		return;
+	}
+
+	// mark them in R_MarkLeaves
+	tr.fResetVis = true;
+
+	gEngfuncs.Con_Reportf( "%s: %d nodes and leaves, %d marks\n", __func__, wn_numnodes, wn_nummarks );
+}
+
+/*
+=================
+R_WorldBoxTest
+
+for a box of shorts (mins, maxs) on 16 bytes: the frustum side planes it is
+behind of (bits 0-3), the ones it is in front of (bits 4-7) and the clip planes
+(GU_ClipBoxInside) it is in front of (bits 8-11)
+=================
+*/
+#define WB_GUARD	( 15 << 8 )	// clip flags: the clip planes
+
+static inline int R_WorldBoxTest( const short *box )
+{
+	// the distances as words: their sign bits are the answers (the farthest
+	// corners are never -0, the nearest ones can be: that keeps a plane)
+	uint32_t d[12] __attribute__(( aligned( 16 )));
+
+	__asm__ volatile(
+		".set		push\n"
+		".set		noreorder\n"
+		"lv.q		C000, 0(%1)\n"			// mins, maxs, 2 shorts a word
+		"vs2i.p		C200, C000\n"			// C200 = mins, maxs[0] ( << 16 )
+		"vs2i.p		C210, C002\n"			// C210 = maxs[1], maxs[2], ...
+		"vi2f.q		C200, C200, 16\n"
+		"vi2f.p		C210, C210, 16\n"
+		"vmov.s		S220, S203\n"			// C220 = maxs
+		"vmov.s		S221, S210\n"
+		"vmov.s		S222, S211\n"
+		"vfim.s		S230, 0.5\n"
+		"vadd.t		C020, C200, C220\n"		// C020 = center * 2
+		"vsub.t		C030, C220, C200\n"		// C030 = extents * 2
+		"vscl.t		C020, C020, S230\n"		// C020 = center
+		"vscl.t		C030, C030, S230\n"		// C030 = extents
+		"vzero.s	S033\n"
+		"lv.q		C300,  0(%2)\n"			// M300 = the side planes
+		"lv.q		C310, 16(%2)\n"
+		"lv.q		C320, 32(%2)\n"
+		"lv.q		C330, 48(%2)\n"
+		"lv.q		C100, 64(%2)\n"			// M100 = | normals |
+		"lv.q		C110, 80(%2)\n"
+		"lv.q		C120, 96(%2)\n"
+		"lv.q		C130, 112(%2)\n"
+		"vhtfm4.q	C200, M300, C020\n"		// C200 = plane distances of the center
+		"vtfm4.q	C210, M100, C030\n"		// C210 = the box's reach along each plane normal
+		"vadd.q		C220, C200, C210\n"		// C220 = distances of the farthest corners
+		"vsub.q		C230, C200, C210\n"		// C230 = distances of the nearest corners
+		"vabs.q		C100, C700\n"			// M100 = | clip planes | (see GU_ClipBoxInside)
+		"vabs.q		C110, C710\n"
+		"vabs.q		C120, C720\n"
+		"vabs.q		C130, C730\n"
+		"vhtfm4.q	C300, M700, C020\n"
+		"vtfm4.q	C310, M100, C030\n"
+		"vsub.q		C320, C300, C310\n"		// distances of the nearest corners
+		"sv.q		C220,  0(%0)\n"
+		"sv.q		C230, 16(%0)\n"
+		"sv.q		C320, 32(%0)\n"
+		".set		pop\n"
+		:
+		: "r"( d ), "r"( box ), "r"( wn_planes )
+		: "memory"
+	);
+
+	uint32_t test = 0;
+
+	for( int i = 0; i < 4; i++ )
+	{
+		test |= ( d[i] >> 31 ) << i;
+		test |= ( ~d[i + 4] >> 31 ) << ( i + 4 );
+		test |= ( ~d[i + 8] >> 31 ) << ( i + 8 );
+	}
+
+	return test;
+}
+
+/*
+=================
+R_WorldBoxClip
+
+the clip flags left for the box, -1 when it is culled
+=================
+*/
+static int R_WorldBoxClip( const short *box, uint clipflags )
+{
+	const int test = R_WorldBoxTest( box );
+
+	if( test & clipflags & 15 )
+		return -1;
+
+	clipflags &= ~((( test >> 4 ) & 15 ) | ( test & WB_GUARD ));
+
+	// far and near
+	if( clipflags & ( BIT( 4 )|BIT( 5 )))
+	{
+		const vec3_t mins = { box[0], box[1], box[2] };
+		const vec3_t maxs = { box[3], box[4], box[5] };
+
+		for( int i = 4; i < FRUSTUM_PLANES; i++ )
+		{
+			if( !FBitSet( clipflags, BIT( i )))
+				continue;
+
+			const int clipped = BOX_ON_PLANE_SIDE( mins, maxs, &RI.frustum.planes[i] );
+			if( clipped == 2 ) return -1;
+			if( clipped == 1 ) ClearBits( clipflags, BIT( i ));
+		}
+	}
+
+	return clipflags;
+}
+
+/*
+=================
 R_WorldSurfsBuild
 
 after the polygons and lightmaps of the world are built
@@ -1029,12 +1345,17 @@ static void R_WorldSurfsBuild( void )
 	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
 
 	if( !world || world->numsurfaces <= 0 || world->numsurfaces >= WS_NONE || world->numtextures >= WS_TEXTURE - 1 )
+	{
+		R_WorldNodesBuild();
 		return;
+	}
 
 	// on cache lines
-	ws_alloc = Mem_Malloc( r_temppool, sizeof( gu_wsurf_t ) * world->numsurfaces + 63 );
+	ws_alloc = Mem_Malloc( r_temppool, ( sizeof( gu_wsurf_t ) + sizeof( uint16_t )) * world->numsurfaces + 63 );
 	ws_surfs = (gu_wsurf_t *)((( uintptr_t )ws_alloc + 63 ) & ~(uintptr_t)63 );
 	memset( ws_surfs, 0, sizeof( gu_wsurf_t ) * world->numsurfaces );
+	ws_visframe = (uint16_t *)( ws_surfs + world->numsurfaces );
+	ws_visfill = -1;
 	ws_numsurfs = world->numsurfaces;
 	ws_style0 = g_lightstylevalue[0];
 
@@ -1102,6 +1423,8 @@ static void R_WorldSurfsBuild( void )
 	RI.currententity = ent;
 
 	gEngfuncs.Con_Reportf( "%s: %d surfaces, %d through R_RenderBrushPoly\n", __func__, ws_numsurfs, slow );
+
+	R_WorldNodesBuild();
 }
 
 static gu_wsurf_t *R_WorldSurf( const msurface_t *surf )
@@ -1197,6 +1520,28 @@ static void R_WorldSurfsBeginWalk( void )
 	ws_skyseen = false;
 
 	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+
+	// a value no frame matches before the next fill
+	if(( tr.framecount >> 15 ) != ws_visfill )
+	{
+		ws_visfill = tr.framecount >> 15;
+		const uint16_t fill = ( tr.framecount & 0x8000 ) ^ 0x8000;
+		for( int i = 0; i < ws_numsurfs; i++ )
+			ws_visframe[i] = fill;
+	}
+
+	for( int i = 0; i < 4; i++ )
+	{
+		const mplane_t *p = &RI.frustum.planes[i];
+
+		for( int j = 0; j < 3; j++ )
+		{
+			wn_planes[i][j] = p->normal[j];
+			wn_planes[i + 4][j] = fabsf( p->normal[j] );
+		}
+		wn_planes[i][3] = -p->dist;
+		wn_planes[i + 4][3] = 0.0f;
+	}
 }
 
 /*
@@ -1213,15 +1558,21 @@ static void R_WorldSurfsCull( int first, int count, uint clipflags )
 
 	for( int i = first; i < first + count; i++, w++ )
 	{
-		if( w->visframe != visframe )
+		if( ws_visframe[i] != visframe )
 			continue;
 
-		float box[6] = { w->mins[0], w->mins[1], w->mins[2], w->maxs[0], w->maxs[1], w->maxs[2] };
+		const qboolean slow = FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ) || ws_allslow;
+		int left = 0;
 
-		if( clipflags && GL_FrustumCullBox( &RI.frustum, box, box + 3, clipflags ))
-			continue;
+		if( clipflags )
+		{
+			left = R_WorldBoxClip( w->mins, clipflags );
 
-		if( FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ) || ws_allslow )
+			if( left < 0 )
+				continue;
+		}
+
+		if( slow )
 		{
 			// R_AddSkyBoxSurface cuts each sky polygon at the box edges to find the
 			// part of the box it shows, ~10 us a polygon, ~30 a frame: the box is
@@ -1255,7 +1606,7 @@ static void R_WorldSurfsCull( int first, int count, uint clipflags )
 			continue;
 		}
 
-		if( GU_ClipBoxInside( box, box + 3 ))
+		if( !FBitSet( left, WB_GUARD ))
 			SetBits( w->texflags, WS_NOCLIP );
 		else ClearBits( w->texflags, WS_NOCLIP );
 
@@ -2495,6 +2846,70 @@ void R_DrawStaticBrushModels( cl_entity_t **ents, int count )
 
 =============================================================
 */
+#if XASH_PSP
+/*
+================
+R_WorldNodesWalk
+
+R_RecursiveWorldNode through wn_nodes, for a node in the PVS
+================
+*/
+static void R_WorldNodesWalk( int n, uint clipflags )
+{
+	const uint16_t visframe = tr.visframecount;
+
+	for( ;; )
+	{
+		const gu_wnode_t *w = &wn_nodes[n];
+
+		if( w->type == WN_SOLID )
+			return;
+
+		if( clipflags )
+		{
+			const int left = R_WorldBoxClip( w->mins, clipflags );
+
+			if( left < 0 )
+				return;
+			clipflags = left;
+		}
+
+		if( w->type == WN_LEAF )
+		{
+			const uint16_t *mark = &wn_marks[w->firstmark];
+			const uint16_t framecount = tr.framecount;
+
+			for( int i = 0; i < w->child[0]; i++ )
+				ws_visframe[mark[i]] = framecount;
+
+			// deal with model fragments in this leaf
+			mleaf_t *pleaf = &WORLDMODEL->leafs[w->child[1]];
+			if( pleaf->efrags )
+				gEngfuncs.R_StoreEfrags( &pleaf->efrags, tr.realframecount );
+
+			r_stats.c_world_leafs++;
+			return;
+		}
+
+		// find which side of the node we are on
+		const float dot = ( w->type < 3 ? tr.modelorg[w->type] : DotProduct( tr.modelorg, WORLDMODEL->planes[w->plane].normal )) - w->dist;
+		const int side = ( dot >= 0.0f ) ? 0 : 1;
+
+		// recurse down the children, front side first
+		if( wn_visframe[w->child[side]] == visframe )
+			R_WorldNodesWalk( w->child[side], clipflags );
+
+		if( w->numsurf )
+			R_WorldSurfsCull( w->firstsurf, w->numsurf, clipflags );
+
+		// recurse down the back side
+		n = w->child[!side];
+		if( wn_visframe[n] != visframe )
+			return;
+	}
+}
+#endif
+
 /*
 ================
 R_RecursiveWorldNode
@@ -2537,7 +2952,7 @@ loc0:
 			const uint16_t visframe = tr.framecount;
 
 			for( int i = 0; i < pleaf->nummarksurfaces; i++ )
-				ws_surfs[mark[i] - surfaces].visframe = visframe;
+				ws_visframe[mark[i] - surfaces] = visframe;
 		}
 		else
 #endif
@@ -2567,7 +2982,7 @@ loc0:
 	// draw stuff
 #if XASH_PSP
 	if( ws_surfs )
-		R_WorldSurfsCull( firstsurface, numsurfaces, clipflags );
+		R_WorldSurfsCull( firstsurface, numsurfaces, clipflags|WB_GUARD );
 	else
 #endif
 	for( int i = firstsurface; i < firstsurface + numsurfaces; i++ )
@@ -2763,6 +3178,13 @@ void R_DrawWorld( void )
 	double start = gEngfuncs.pfnTime();
 	if( FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ))
 		R_DrawWorldTopView( WORLDMODEL->nodes, RI.frustum.clipFlags );
+#if XASH_PSP
+	else if( wn_nodes )
+	{
+		if( wn_visframe[0] == (uint16_t)tr.visframecount )
+			R_WorldNodesWalk( 0, ( r_nocull.value ? 0 : RI.frustum.clipFlags )|WB_GUARD );
+	}
+#endif
 	else R_RecursiveWorldNode( WORLDMODEL->nodes, RI.frustum.clipFlags );
 	double end = gEngfuncs.pfnTime();
 
@@ -2868,6 +3290,16 @@ void R_MarkLeaves( void )
 	if( force && !novis )
 		gEngfuncs.R_FatPVS( test, r_pvs_radius->value, RI.visbytes, true, novis );
 
+#if XASH_PSP
+	if( wn_nodes && ( tr.visframecount & 0xffff ) == 0 )
+	{
+		// wn_nodes keep the low bits: none matches a new count
+		for( int i = 0; i < wn_numnodes; i++ )
+			wn_visframe[i] = 0;
+		tr.visframecount++;
+	}
+#endif
+
 	for( int i = 0; i < WORLDMODEL->numleafs; i++ )
 	{
 		if( CHECKVISBIT( RI.visbytes, i ))
@@ -2880,6 +3312,16 @@ void R_MarkLeaves( void )
 				node->visframe = tr.visframecount;
 				node = node->parent;
 			} while( node );
+
+#if XASH_PSP
+			if( wn_nodes )
+			{
+				const uint16_t visframe = tr.visframecount;
+
+				for( int n = wn_leafnode[i + 1]; n != WS_NONE && wn_visframe[n] != visframe; n = wn_nodes[n].parent )
+					wn_visframe[n] = visframe;
+			}
+#endif
 		}
 	}
 }

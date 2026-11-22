@@ -65,8 +65,9 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
       loaded by the renderer only, so server consistency checks still see the original files.
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
 - [~] World: compact copies of the world surfaces for the walk and both passes (done, world
-      3.7 -> 2.0 ms in fight1). Left: the BSP walk itself (~1.1 ms: ~550 nodes and ~700 leaf
-      marks a frame), decals.
+      3.7 -> 2.0 ms in fight1), and a compact BSP tree for the walk (walk ~1.2 -> 0.92 ms).
+      Left: the walk is still ~0.9 ms (~0.45 node traversal, ~0.25 VFPU box tests, the rest
+      leaf marks and surface culling), decals.
 - [ ] The non-render floor: engine-side traces, delta parsing, HUD and client frame (same math).
 
 ---
@@ -850,3 +851,19 @@ music), launched from the XMB.
   world only 83 -> 97 fps, all on ~45 -> ~48. Screenshots of the old and new path at the
   spawn, at the sky and at fresh decals: identical (only the fps counter, console text and
   the view model idle differ). 190 KB for blastcorpse1's 5987 surfaces.
+- 2026-11-22: **BSP walk** (fight1, `r_abl 236`). Per frame: ~530 nodes in the PVS (~140
+  leaves), ~220 children outside it, ~240 node and ~160 surface box tests, ~700 leaf marks.
+  Nodes and leaves are copied in DFS order into 32 byte records (short box, plane type and
+  distance, children, surface range, parent; leaf 0 is shared by all solid children),
+  blastcorpse1: 4302 records, 6250 marks, ~150 KB. Node and surface visframes are 16 bit
+  arrays of their own (refilled when they could wrap), so a child outside the PVS or a
+  surface no visible leaf marked costs no record read. One VFPU test per box gives the
+  frustum side planes it is behind or in front of and the clip planes (GU_ClipBoxInside) it
+  is in front of; the clip planes are clip flags like the frustum ones, so a node inside the
+  guard band spares its subtree the test (node boxes are grown at load to hold their children
+  and surfaces). Pitfalls: reading the VFPU CC with `mfvc` right after `vcmp` gave stale
+  bits (~10% wrong answers), the distances are stored with `sv.q` and their sign bits read
+  instead (`mfv` of the 12 was slower); a check against the scalar tests found no mismatches.
+  Walk 1.21 (old walk, same build) -> 0.92 ms; screenshots of both identical. Ablations of
+  what is left: no surface culling 0.55, no leaf marks 0.64, neither 0.49 (the plane reads
+  0.01, efrags 0.04); doing every box test twice costs +0.26.
