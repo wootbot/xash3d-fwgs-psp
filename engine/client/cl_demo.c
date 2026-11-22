@@ -1181,12 +1181,20 @@ static void CL_TimeDemoReport( void )
 	if( n <= 0 )
 		return;
 
+	// where the slow frames are: frame number and ms of the worst few, before sorting
+	char slow[256];
+	int slowlen = 0;
+	slow[0] = '\0';
+
 	for( int i = 0; i < n; i++ )
 	{
 		total += td_stats.dt[i];
 		if( td_stats.dt[i] > 1.0f / 60.0f ) over16++;
 		if( td_stats.dt[i] > 1.0f / 100.0f ) over10++;
+		if( td_stats.dt[i] > 0.05f && slowlen < (int)sizeof( slow ) - 16 )
+			slowlen += Q_snprintf( slow + slowlen, sizeof( slow ) - slowlen, " %d:%d", i, (int)( td_stats.dt[i] * 1000.0f ));
 	}
+	Con_Printf( "timedemo frames over 50 ms (frame:ms):%s\n", slow );
 
 	qsort( td_stats.dt, n, sizeof( td_stats.dt[0] ), CL_TimeDemoCompare );
 
