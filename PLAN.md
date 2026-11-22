@@ -791,3 +791,13 @@ music), launched from the XMB.
   150 us a model is set up around the GE commands, per body part again: candidates are
   one view matrix/ramp/restore per model instead of per body part, and the batched
   renderer of the plan above.
+  **Bone setup, measured in game** (TEMP `psp_bonebench`: the last soldier drawn, 50 runs
+  warm): it is FPU latency bound, not cache bound (cold only ~20% slower). Soldier, 31 bones,
+  one blend: ~100 us = decode ~50 (channel decode ~1.5 us a bone, ~2 cycles per instruction,
+  already tight code), matrices ~18, light copy 5, the rest; a second blend or a sequence
+  change in progress adds a whole decode pass and an 11 us slerp. Done: bone matrix in
+  locals, slerp by the dot sign, angle interpolation for small keyframe steps (`d3032a77`,
+  41.77 -> 42.0 fps), quaternions 4 bones at a time on the VFPU (`0246fae9`: 15 -> 3.7 us
+  a pass, exact, below the timedemo noise). What's left would need fewer decodes (a per
+  entity cache of the decoded keyframe pair, which changes only when the integer frame
+  does) rather than faster ones.
