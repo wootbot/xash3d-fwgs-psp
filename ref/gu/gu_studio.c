@@ -927,6 +927,33 @@ static qboolean R_StudioConcatMatches( int order )
 	return true;
 }
 
+/*
+Matrix3x4_FromOriginQuat with the quaternion in locals: the generic version
+reloads it for every element (out may alias it) and chains the products,
+~0.86 us a bone on the PSP's FPU
+*/
+static inline void R_StudioBoneMatrix( matrix3x4 out, const vec4_t q, const vec3_t origin )
+{
+	const float x = q[0], y = q[1], z = q[2], w = q[3];
+	const float x2 = x + x, y2 = y + y, z2 = z + z;
+	const float xx = x * x2, yy = y * y2, zz = z * z2;
+	const float xy = x * y2, xz = x * z2, yz = y * z2;
+	const float wx = w * x2, wy = w * y2, wz = w * z2;
+
+	out[0][0] = 1.0f - ( yy + zz );
+	out[0][1] = xy - wz;
+	out[0][2] = xz + wy;
+	out[0][3] = origin[0];
+	out[1][0] = xy + wz;
+	out[1][1] = 1.0f - ( xx + zz );
+	out[1][2] = yz - wx;
+	out[1][3] = origin[1];
+	out[2][0] = xz - wy;
+	out[2][1] = yz + wx;
+	out[2][2] = 1.0f - ( xx + yy );
+	out[2][3] = origin[2];
+}
+
 static inline void R_StudioConcat( matrix3x4 out, const matrix3x4 in1, const matrix3x4 in2 )
 {
 	if( unlikely( r_vfpu_concat < 0 ))
@@ -1071,7 +1098,7 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		for( int i = 0; i < numbones; i++ )
 		{
 			matrix3x4 bonematrix;
-			Matrix3x4_FromOriginQuat( bonematrix, q[i], pos[i] );
+			R_StudioBoneMatrix( bonematrix, q[i], pos[i] );
 
 			const int parent = pbones[i].parent;
 			R_StudioConcat( g_studio.bonestransform[i], parent == -1 ? g_studio.rotationmatrix : g_studio.bonestransform[parent], bonematrix );

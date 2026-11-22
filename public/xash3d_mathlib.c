@@ -484,14 +484,19 @@ static void PSP_StudioAngleQuaternion( const float *angles, vec4_t q )
 
 static void PSP_StudioQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt )
 {
-	vec4_t q2;
-
-	QuaternionAlign( p, q, q2 );
-
-	const float cosom = p[0] * q2[0] + p[1] * q2[1] + p[2] * q2[2] + p[3] * q2[3];
+	// QuaternionAlign flips q when |p - q| > |p + q|, which is when dot( p, q ) < 0
+	const float p0 = p[0], p1 = p[1], p2 = p[2], p3 = p[3];
+	float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
+	float cosom = p0 * q0 + p1 * q1 + p2 * q2 + p3 * q3;
 	float sclp, sclq;
 
-	// q2 is aligned with p, so cosom >= 0. Below ~2 degrees the VFPU asin is
+	if( cosom < 0.0f )
+	{
+		q0 = -q0; q1 = -q1; q2 = -q2; q3 = -q3;
+		cosom = -cosom;
+	}
+
+	// q is aligned with p now, so cosom >= 0. Below ~2 degrees the VFPU asin is
 	// too coarse for sin( omega ), and a plain lerp is off by less than 2e-4 there
 	if(( 1.0f - cosom ) > 0.0005f )
 	{
@@ -522,8 +527,10 @@ static void PSP_StudioQuaternionSlerp( const vec4_t p, const vec4_t q, float t, 
 		sclq = t;
 	}
 
-	for( int i = 0; i < 4; i++ )
-		qt[i] = sclp * p[i] + sclq * q2[i];
+	qt[0] = sclp * p0 + sclq * q0;
+	qt[1] = sclp * p1 + sclq * q1;
+	qt[2] = sclp * p2 + sclq * q2;
+	qt[3] = sclp * p3 + sclq * q3;
 }
 #endif
 
@@ -596,6 +603,16 @@ void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const ms
 			vec4_t q1, q2;
 
 #if XASH_PSP
+			// neighbouring keyframes are a few degrees apart: interpolating the
+			// angles is within ~0.5 degrees of the slerp below 0.25 rad steps,
+			// for one quaternion instead of two and a slerp
+			const float d0 = v2[3] - v1[3], d1 = v2[4] - v1[4], d2 = v2[5] - v1[5];
+			if( fabsf( d0 ) < 0.25f && fabsf( d1 ) < 0.25f && fabsf( d2 ) < 0.25f )
+			{
+				const vec3_t a = { v1[3] + s * d0, v1[4] + s * d1, v1[5] + s * d2 };
+				PSP_StudioAngleQuaternion( a, q );
+				return;
+			}
 			PSP_StudioAngleQuaternion( &v1[3], q1 );
 			PSP_StudioAngleQuaternion( &v2[3], q2 );
 			PSP_StudioQuaternionSlerp( q1, q2, s, q );
