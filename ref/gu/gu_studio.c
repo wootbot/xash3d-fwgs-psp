@@ -157,7 +157,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_atlas;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas;
 #endif
 
 void R_StudioInit( void )
@@ -177,6 +177,7 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_propcache );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_proplist );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_geplan );
 #endif
 #endif
 
@@ -2627,6 +2628,7 @@ typedef struct
 	int		nummesh;
 	gemesh_t		*meshes;
 	gemerge_t		*merges;	// R_StudioGEGetMerge, by skin family
+	struct geplan_s	*plans;		// R_StudioGEDrawPlan, by skin family
 	void		**blocks;		// batch memory, freed with the model
 	int		numblocks;
 } gemodel_t;
@@ -2660,6 +2662,12 @@ static void R_StudioGEFreeModel( gemodel_t *gm )
 			free( m->groups[i].batches );
 		free( m->merged );
 		free( m );
+	}
+	while( gm->plans )
+	{
+		struct geplan_s *pl = gm->plans;
+		gm->plans = *(struct geplan_s **)pl; // next is the first field
+		free( pl );
 	}
 	free( gm->blocks );
 	free( gm->meshes );
@@ -3779,6 +3787,162 @@ static qboolean R_StudioGEAllowed( void )
 
 /*
 ===============
+GE draw plans
+
+What R_StudioDrawPoints sends for a submodel the GE draws all of is the same
+every frame but for the bones and the light: per batch its bones, the skin
+block, the batch, the light block and the batch again. A plan keeps that list
+per skin family (the batches and which skin and light block each needs), so
+a draw is the view matrix, the ramp and the list, without the mesh loops,
+merge and batch lookups, texture flags and sizes. ~150 us of mostly cache
+misses per model before, for every body part.
+===============
+*/
+static CVAR_DEFINE_AUTO( r_studio_geplan, "1", FCVAR_ARCHIVE, "draw the GE submodels from a list built once per skin family" );
+
+typedef struct
+{
+	const gebatch_t		*batches;
+	int			numbatches;
+	const mstudiotexture_t	*ptex;		// for R_StudioGESkinBlock
+	int			skinindex;
+	int			bindtex;		// an atlas page, 0: the skin's texture
+	qboolean		flat;
+	qboolean		chrome;
+} geplanitem_t;
+
+typedef struct geplan_s
+{
+	struct geplan_s	*next;		// first, see R_StudioGEFreeModel
+	int		skin;		// skin family
+	int		atlas;		// r_studio_atlas it was built with
+	qboolean		usable;		// false: some mesh needs R_StudioDrawPoints
+	int		polys;
+	int		numitems;
+	geplanitem_t	items[];
+} geplan_t;
+
+static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
+{
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	const gemerge_t *merge = r_studio_atlas.value ? R_StudioGEGetMerge( gm, skin, ptexture, pskinref ) : NULL;
+	geplan_t *pl = calloc( 1, sizeof( *pl ) + sizeof( geplanitem_t ) * ( ATLAS_MAX_PAGES + gm->nummesh ));
+
+	if( !pl )
+		return NULL;
+
+	pl->skin = skin;
+	pl->atlas = r_studio_atlas.value;
+	pl->usable = !gm->cpumeshes;
+	pl->next = gm->plans;
+	gm->plans = pl;
+
+	// as R_StudioDrawPoints: the atlas pages first, then the other meshes in order
+	for( int g = 0; merge && g < merge->numgroups; g++ )
+	{
+		geplanitem_t *it = &pl->items[pl->numitems++];
+		it->batches = merge->groups[g].batches;
+		it->numbatches = merge->groups[g].numbatches;
+		it->ptex = &ge_atlas_ptex;
+		it->bindtex = merge->groups[g].atlas;
+	}
+
+	for( int j = 0; j < gm->nummesh; j++ )
+	{
+		pl->polys += pmesh[j].numtris;
+		if( merge && merge->merged[j] )
+			continue;
+
+		const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[j].skinref]];
+		R_StudioGEMeshBatches( gm, j );
+
+		// masked and additive meshes change the state around them, sorted by R_StudioMeshCompare
+		if( !gm->meshes[j].numbatches || FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
+		{
+			pl->usable = false;
+			continue;
+		}
+
+		geplanitem_t *it = &pl->items[pl->numitems++];
+		it->batches = gm->meshes[j].batches;
+		it->numbatches = gm->meshes[j].numbatches;
+		it->ptex = ptex;
+		it->skinindex = pskinref[pmesh[j].skinref];
+		it->flat = FBitSet( ptex->flags, STUDIO_NF_FLATSHADE ) ? true : false;
+		it->chrome = FBitSet( ptex->flags, STUDIO_NF_CHROME ) ? true : false;
+	}
+	return pl;
+}
+
+// true when the submodel was drawn from its plan
+static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
+{
+	geplan_t *pl;
+
+	for( pl = gm->plans; pl; pl = pl->next )
+	{
+		if( pl->skin == skin && pl->atlas == (int)r_studio_atlas.value )
+			break;
+	}
+	if( !pl && !( pl = R_StudioGEBuildPlan( gm, skin, ptexture, pskinref )))
+		return false;
+	if( !pl->usable )
+		return false;
+
+	if( glState.faceCull != GL_NONE )
+	{
+		if( R_AllowFlipViewModel( RI.currententity ))
+		{
+			tr.fFlipViewModel = true;
+			GL_Cull( GL_NONE );
+		}
+		else
+		{
+			tr.fFlipViewModel = false;
+			GL_Cull( GL_FRONT );
+		}
+	}
+
+	R_StudioGEViewMatrix( true );
+	const uint *ramp = R_StudioGERamp();
+	const uint *skinblock = NULL;
+	ge_slots_valid = 0;
+
+	for( int i = 0; i < pl->numitems; i++ )
+	{
+		const geplanitem_t *it = &pl->items[i];
+
+		// both may build their block in the display list: before the commands
+		skinblock = R_StudioGESkinBlock( it->ptex, it->skinindex, it->bindtex );
+		const uint *lightblock = R_StudioGELightBlock( ramp, it->flat );
+		uint *p = extGuCmdBegin();
+
+		for( int k = 0; k < it->numbatches; k++ )
+		{
+			const gebatch_t *b = &it->batches[k];
+
+			p = R_StudioGEBones( p, b, RI.rvp.vieworigin );
+			if( it->chrome )
+				p = R_StudioGEChromeMatrix( p, b, it->ptex );
+			p = R_StudioGECall( p, skinblock );
+			p = R_StudioGECall( p, b->cmds );
+			p = R_StudioGECall( p, lightblock );
+			p = R_StudioGECall( p, b->cmds );
+		}
+		extGuCmdEnd( p );
+	}
+
+	ge_last_skinblock = skinblock;
+	R_StudioGERestore();
+	R_StudioGEViewMatrix( false );
+	extGuUpdateStall();
+
+	r_stats.c_studio_polys += pl->polys;
+	return true;
+}
+
+/*
+===============
 R_StudioSubmitMesh
 
 ===============
@@ -3835,6 +3999,8 @@ static void R_StudioDrawPoints( void )
 	const int numnorms = m_pSubModel->numnorms;
 
 	gemodel_t *gm = R_StudioGEAllowed() ? R_StudioGEGetModel() : NULL;
+	if( gm && r_studio_geplan.value && !m_fDoRemap && R_StudioGEDrawPlan( gm, m_skinnum, ptexture, pskinref ))
+		return;
 	// meshes in atlas pages are drawn as one per page, the others need their own batches
 	const gemerge_t *merge = NULL;
 	if( gm && r_studio_atlas.value && !m_fDoRemap )
