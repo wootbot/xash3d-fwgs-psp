@@ -479,6 +479,8 @@ void R_DrawWorld( void );
 void R_DrawWaterSurfaces( void );
 void R_StaticWaterClear( void );
 void R_DrawBrushModel( cl_entity_t *e );
+qboolean R_StaticBrushModel( const cl_entity_t *e );
+void R_DrawStaticBrushModels( cl_entity_t **ents, int count );
 void GL_SubdivideSurface( model_t *mod, msurface_t *fa );
 void GL_SetupFogColorForSurfaces( void );
 void R_DrawAlphaTextureChains( void );

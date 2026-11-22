@@ -1750,9 +1750,11 @@ static void R_SetRenderMode( cl_entity_t *e )
 	}
 }
 
-static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
+static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins, int first )
 {
 	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
+	sortedface_t *draw_surfaces = gpGlobals->draw_surfaces + first;
+	const int max_surfaces = gpGlobals->max_surfaces - first;
 	int num_sorted = 0;
 
 	for( int i = 0; i < clmodel->nummodelsurfaces; i++ )
@@ -1782,17 +1784,17 @@ static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mi
 			}
 		}
 
-		if( num_sorted < gpGlobals->max_surfaces )
+		if( num_sorted < max_surfaces )
 		{
-			gpGlobals->draw_surfaces[num_sorted].surf = psurf;
-			gpGlobals->draw_surfaces[num_sorted].cull = cull_type;
+			draw_surfaces[num_sorted].surf = psurf;
+			draw_surfaces[num_sorted].cull = cull_type;
 			num_sorted++;
 		}
 	}
 
 	// sort faces if needs
 	if( !FBitSet( clmodel->flags, MODEL_LIQUID ) && e->curstate.rendermode == kRenderTransTexture && !gl_nosort.value )
-		qsort( gpGlobals->draw_surfaces, num_sorted, sizeof( sortedface_t ), R_SurfaceCompare );
+		qsort( draw_surfaces, num_sorted, sizeof( sortedface_t ), R_SurfaceCompare );
 
 	return num_sorted;
 }
@@ -1866,7 +1868,7 @@ void R_DrawBrushModel( cl_entity_t *e )
 
 	GL_SetupFogColorForSurfaces ();
 
-	int num_sorted = R_SortBrushModelSurfaces( e, clmodel, mins );
+	int num_sorted = R_SortBrushModelSurfaces( e, clmodel, mins, 0 );
 
 	// draw bmodels with a polyoffset to avoid flickering when they are too close to world
 	if( gl_polyoffset_bmodels.value )
@@ -1908,6 +1910,119 @@ void R_DrawBrushModel( cl_entity_t *e )
 
 	R_LoadIdentity();	// restore worldmatrix
 	GU_ClipRestoreWorldFrustum();
+}
+
+/*
+=================
+R_StaticBrushModel
+
+brush models that sit at the world origin unrotated (func_wall and friends) and
+draw without blending: R_DrawStaticBrushModels draws a row of them in one go
+=================
+*/
+qboolean R_StaticBrushModel( const cl_entity_t *e )
+{
+	if( !e->model || e->model->type != mod_brush || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+		return false;
+
+	if( !VectorIsNull( e->origin ) || !VectorIsNull( e->angles ))
+		return false;
+
+	if( FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) || r_showhull->value > 0.0f )
+		return false;
+
+	return e->curstate.rendermode == kRenderNormal || e->curstate.rendermode == kRenderTransAlpha;
+}
+
+/*
+=================
+R_DrawStaticBrushModels
+
+R_DrawBrushModel for models that pass R_StaticBrushModel and share a render mode:
+they need no model matrix or frustum, and the render state, decal, lightmap,
+fullbright and detail passes are set up once for all of them. They write depth
+and don't blend, so drawing them before the translucent entities sorted
+between them gives the same picture.
+=================
+*/
+void R_DrawStaticBrushModels( cl_entity_t **ents, int count )
+{
+	static struct { cl_entity_t *e; int first; } runs[MAX_VISIBLE_PACKET];
+	int num_runs = 0, num_sorted = 0;
+
+	if( count <= 0 )
+		return;
+
+	cl_entity_t *e0 = ents[0];
+
+	memset( gl_lms.lightmap_surfaces, 0, sizeof( gl_lms.lightmap_surfaces ));
+	gl_lms.dynamic_surfaces = NULL;
+
+	R_LoadIdentity();
+	VectorCopy( RI.cullorigin, tr.modelorg );
+
+	for( int i = 0; i < count && num_runs < MAX_VISIBLE_PACKET; i++ )
+	{
+		cl_entity_t *e = ents[i];
+		model_t *clmodel = e->model;
+
+		// R_DrawStaticBrushGroup keeps the sum of nummodelsurfaces within max_surfaces
+		if( num_sorted + clmodel->nummodelsurfaces > gpGlobals->max_surfaces )
+			break;
+
+		if( R_CullBox( clmodel->mins, clmodel->maxs ))
+			continue;
+
+		e->visframe = tr.realframecount; // visible
+		R_PushDlightsForBmodel( clmodel, tr.dlightframecount, RI.objectMatrix );
+
+		RI.currententity = e;
+		RI.currentmodel = clmodel;
+		const int n = R_SortBrushModelSurfaces( e, clmodel, clmodel->mins, num_sorted );
+		if( !n )
+			continue;
+
+		runs[num_runs].e = e;
+		runs[num_runs].first = num_sorted;
+		num_runs++;
+		num_sorted += n;
+	}
+
+	if( !num_runs )
+		return;
+
+	R_SetRenderMode( e0 );
+	GL_SetupFogColorForSurfaces();
+
+	if( gl_polyoffset_bmodels.value )
+		GL_PushPolygonOffset( -0.5f, -gl_polyoffset_bmodels.value );
+
+	for( int r = 0; r < num_runs; r++ )
+	{
+		const int end = r + 1 < num_runs ? runs[r + 1].first : num_sorted;
+
+		// texture animation reads the entity's frame
+		RI.currententity = runs[r].e;
+		RI.currentmodel = RI.currententity->model;
+
+		for( int i = runs[r].first; i < end; i++ )
+			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
+	}
+
+	DrawDecalsBatch();
+
+	GL_ResetFogColor();
+	R_BlendLightmaps();
+	R_RenderFullbrights();
+	R_RenderDetails();
+
+	if( gl_polyoffset_bmodels.value )
+		GL_PopPolygonOffset();
+
+	sceGuDisable( GU_ALPHA_TEST );
+	sceGuAlphaFunc( GU_GREATER, DEFAULT_ALPHATEST, 0xff );
+	sceGuDisable( GU_BLEND );
+	sceGuDepthMask( GU_FALSE );
 }
 
 /*

@@ -805,12 +805,56 @@ void R_DrawFog( void )
 
 /*
 =============
+R_DrawStaticBrushGroup
+
+draws list[start] and the static brush models after it in the list that share
+its render mode (R_StaticBrushModel) in one go, marks them in grouped[]
+=============
+*/
+static void R_DrawStaticBrushGroup( cl_entity_t **list, int count, int start, byte *grouped, qboolean trans )
+{
+	static cl_entity_t *ents[MAX_VISIBLE_PACKET];
+	const int rendermode = list[start]->curstate.rendermode;
+	int n = 0, surfs = 0;
+
+	for( int i = start; i < count; i++ )
+	{
+		cl_entity_t *e = list[i];
+
+		if( grouped[i] || !R_StaticBrushModel( e ) || e->curstate.rendermode != rendermode )
+			continue;
+
+		grouped[i] = true;
+
+		// skipped like the translucent loop does
+		if( trans && rendermode != kRenderNormal && CL_FxBlend( e ) <= 0 )
+			continue;
+
+		if( n && surfs + e->model->nummodelsurfaces > gpGlobals->max_surfaces )
+		{
+			R_DrawStaticBrushModels( ents, n );
+			n = surfs = 0;
+		}
+
+		ents[n++] = e;
+		surfs += e->model->nummodelsurfaces;
+	}
+
+	R_DrawStaticBrushModels( ents, n );
+}
+
+/*
+=============
 R_DrawEntitiesOnList
 =============
 */
 static void R_DrawEntitiesOnList( void )
 {
 	static byte solid_culled[MAX_VISIBLE_PACKET], trans_culled[MAX_VISIBLE_PACKET];
+	static byte solid_grouped[MAX_VISIBLE_PACKET], trans_grouped[MAX_VISIBLE_PACKET];
+
+	memset( solid_grouped, 0, tr.draw_list->num_solid_entities );
+	memset( trans_grouped, 0, tr.draw_list->num_trans_entities );
 
 	tr.blend = 1.0f;
 
@@ -836,7 +880,11 @@ static void R_DrawEntitiesOnList( void )
 		switch( RI.currentmodel->type )
 		{
 		case mod_brush:
-			R_DrawBrushModel( RI.currententity );
+			if( solid_grouped[i] )
+				break;
+			if( R_StaticBrushModel( RI.currententity ))
+				R_DrawStaticBrushGroup( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, i, solid_grouped, false );
+			else R_DrawBrushModel( RI.currententity );
 			break;
 		case mod_alias:
 			R_DrawAliasModel( RI.currententity );
@@ -896,6 +944,15 @@ static void R_DrawEntitiesOnList( void )
 	{
 		RI.currententity = tr.draw_list->trans_entities[i];
 		RI.currentmodel = RI.currententity->model;
+
+		if( trans_grouped[i] )
+			continue;
+
+		if( R_StaticBrushModel( RI.currententity ))
+		{
+			R_DrawStaticBrushGroup( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, i, trans_grouped, true );
+			continue;
+		}
 
 		// handle studiomodels with custom rendermodes on texture
 		if( RI.currententity->curstate.rendermode != kRenderNormal )
