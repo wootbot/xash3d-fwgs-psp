@@ -84,11 +84,21 @@ void CL_SetLastUpdate( void )
 CL_RedoPrediction
 ===============
 */
+#if XASH_PSP
+static qboolean CL_ReusePrediction( void );
+#endif
+
 void CL_RedoPrediction( void )
 {
 	if ( cls.netchan.incoming_sequence != cls.lastupdate_sequence )
 	{
 #if XASH_PSP
+		if( CL_ReusePrediction( ))
+		{
+			CL_CheckPredictionError();
+			return;
+		}
+
 		// predict against this packet's entities, like CL_CreateCmd does, so the results can be reused
 		CL_SetSolidEntities();
 #endif
@@ -1069,6 +1079,119 @@ static void CL_SkipUsercmdTime( int msec, double *time )
 	}
 	*time += (double)msec / 1000.0;
 }
+
+/*
+=================
+CL_ReusePrediction
+
+A packet acknowledges some of the commands predicted so far. When the server's state after the
+newest of them is what the prediction had, the predicted states of the commands after it are
+still good: move them to where this packet's prediction keeps them instead of simulating them
+all again (~0.3 ms a player move, the whole unacknowledged window after every packet).
+Moving entities that changed since are only seen on the next mismatch, and a full prediction
+runs at least every PRED_REUSE_MAXTIME seconds for the state not compared here.
+=================
+*/
+#define PRED_REUSE_MAXTIME 1.0
+static double pred_redotime;
+
+static qboolean CL_PredFloatsMatch( const float *a, const float *b, int n, float eps )
+{
+	for( int i = 0; i < n; i++ )
+	{
+		if( fabsf( a[i] - b[i] ) > eps )
+			return false;
+	}
+	return true;
+}
+
+static qboolean CL_PredictionMatches( const local_state_t *p, const frame_t *frame )
+{
+	const clientdata_t *a = &p->client, *b = &frame->clientdata;
+	const entity_state_t *pa = &p->playerstate, *pb = &frame->playerstate[cl.playernum];
+
+	// the tolerances are above the precision the server sends these with
+	if( !CL_PredFloatsMatch( a->origin, b->origin, 3, 0.1f ) || !CL_PredFloatsMatch( pa->origin, pb->origin, 3, 0.2f )
+		|| !CL_PredFloatsMatch( a->velocity, b->velocity, 3, 0.5f ) || !CL_PredFloatsMatch( a->punchangle, b->punchangle, 3, 0.3f )
+		|| !CL_PredFloatsMatch( a->view_ofs, b->view_ofs, 3, 0.5f ))
+		return false;
+
+	if( a->flags != b->flags || a->waterlevel != b->waterlevel || a->watertype != b->watertype || a->bInDuck != b->bInDuck
+		|| a->viewmodel != b->viewmodel || a->weaponanim != b->weaponanim || a->m_iId != b->m_iId || a->deadflag != b->deadflag
+		|| a->weapons != b->weapons || pa->usehull != pb->usehull || pa->movetype != pb->movetype )
+		return false;
+
+	if( a->ammo_shells != b->ammo_shells || a->ammo_nails != b->ammo_nails || a->ammo_cells != b->ammo_cells || a->ammo_rockets != b->ammo_rockets
+		|| a->iuser1 != b->iuser1 || a->iuser2 != b->iuser2 || a->iuser3 != b->iuser3 || a->iuser4 != b->iuser4 )
+		return false;
+
+	if( abs( a->flTimeStepSound - b->flTimeStepSound ) > 2 || abs( a->flDuckTime - b->flDuckTime ) > 2
+		|| abs( a->flSwimTime - b->flSwimTime ) > 2 || abs( a->waterjumptime - b->waterjumptime ) > 2 )
+		return false;
+
+	if( fabsf( a->health - b->health ) > 0.5f || fabsf( a->maxspeed - b->maxspeed ) > 0.5f || fabsf( a->fov - b->fov ) > 0.5f
+		|| fabsf( a->m_flNextAttack - b->m_flNextAttack ) > 0.01f || !CL_PredFloatsMatch( &a->fuser1, &b->fuser1, 4, 0.01f ))
+		return false;
+
+	for( int i = 0; i < pred_weaponslots; i++ )
+	{
+		const weapon_data_t *wa = &p->weapondata[i], *wb = &frame->weapondata[i];
+
+		if( wa->m_iId != wb->m_iId || wa->m_iClip != wb->m_iClip || wa->m_fInReload != wb->m_fInReload
+			|| wa->m_fInSpecialReload != wb->m_fInSpecialReload || wa->m_fInZoom != wb->m_fInZoom
+			|| wa->m_iWeaponState != wb->m_iWeaponState || wa->iuser1 != wb->iuser1 || wa->iuser2 != wb->iuser2
+			|| wa->iuser3 != wb->iuser3 || wa->iuser4 != wb->iuser4 )
+			return false;
+
+		if( fabsf( wa->m_flNextPrimaryAttack - wb->m_flNextPrimaryAttack ) > 0.01f
+			|| fabsf( wa->m_flNextSecondaryAttack - wb->m_flNextSecondaryAttack ) > 0.01f
+			|| fabsf( wa->m_flTimeWeaponIdle - wb->m_flTimeWeaponIdle ) > 0.01f
+			|| fabsf( wa->m_flNextReload - wb->m_flNextReload ) > 0.01f
+			|| fabsf( wa->m_flPumpTime - wb->m_flPumpTime ) > 0.01f
+			|| fabsf( wa->m_fReloadTime - wb->m_fReloadTime ) > 0.01f
+			|| !CL_PredFloatsMatch( &wa->fuser1, &wb->fuser1, 4, 0.01f ))
+			return false;
+	}
+	return true;
+}
+
+static qboolean CL_ReusePrediction( void )
+{
+	const uint ack = cls.netchan.incoming_acknowledged;
+	const int dparse = cl.parsecount - pred_parsecount;
+	const int dack = (int)( ack - pred_ack );
+	const int shift = dparse - dack; // slot of a command, this packet minus the last prediction
+	const frame_t *frame = &cl.frames[cl.parsecountmod];
+
+	if( pred_parsecount < 0 || cls.state != ca_active || cls.spectator || !CL_IsPredicted( ) || !cl.validsequence || !frame->valid )
+		return false;
+	if( host.realtime - pred_redotime > PRED_REUSE_MAXTIME || host.realtime < pred_redotime )
+		return false;
+
+	// the acknowledged command must be one the last prediction ran, its slot not reused since
+	if( dparse <= 0 || dack < 0 || (int)( ack - pred_done ) > 0 || dparse + (int)( pred_done - pred_ack ) >= CL_UPDATE_MASK )
+		return false;
+
+	CL_CountWeaponSlots( frame->weapondata );
+	if( !CL_PredictionMatches( &cl.predicted_frames[( pred_parsecount + dack ) & CL_UPDATE_MASK], frame ))
+		return false;
+
+	// the commands after the acknowledged one, to their slots for this packet
+	if( shift < 0 )
+	{
+		for( uint c = ack + 1; (int)( c - pred_done ) <= 0; c++ )
+			CL_CopyLocalState( &cl.predicted_frames[( cl.parsecount + (int)( c - ack )) & CL_UPDATE_MASK], &cl.predicted_frames[( pred_parsecount + (int)( c - pred_ack )) & CL_UPDATE_MASK] );
+	}
+	else if( shift > 0 )
+	{
+		for( uint c = pred_done; (int)( c - ack ) > 0; c-- )
+			CL_CopyLocalState( &cl.predicted_frames[( cl.parsecount + (int)( c - ack )) & CL_UPDATE_MASK], &cl.predicted_frames[( pred_parsecount + (int)( c - pred_ack )) & CL_UPDATE_MASK] );
+	}
+
+	pred_parsecount = cl.parsecount;
+	pred_ack = ack;
+	return true;
+}
 #endif
 
 /*
@@ -1137,6 +1260,12 @@ void CL_PredictMovement( qboolean repredicting )
 
 	time = frame->time;
 	stoppoint = ( repredicting ) ? 0 : 1;
+#if XASH_PSP
+	// a demo's newest command is recorded: when its events already ran, simulate it here so
+	// CL_CreateCmd doesn't run it once more
+	if( repredicting && cls.demoplayback && cl.commands[cls.netchan.outgoing_sequence & CL_UPDATE_MASK].processedfuncs )
+		stoppoint = 1;
+#endif
 	cl.local.repredicting = repredicting;
 	cl.local.onground = -1;
 
@@ -1183,10 +1312,15 @@ void CL_PredictMovement( qboolean repredicting )
 	}
 
 #if XASH_PSP
-	// the newest command isn't sent yet and can still change
+	// the newest command isn't sent yet and can still change, but a demo's are all recorded
+	// (and as long as the frames were when recording, ~4 player moves each in fight1)
 	pred_parsecount = cl.parsecount;
 	pred_ack = cls.netchan.incoming_acknowledged;
-	pred_done = (int)( last_done - cls.netchan.outgoing_sequence ) < 0 ? last_done : cls.netchan.outgoing_sequence - 1;
+	if( repredicting )
+		pred_redotime = host.realtime;
+	if( cls.demoplayback || (int)( last_done - cls.netchan.outgoing_sequence ) < 0 )
+		pred_done = last_done;
+	else pred_done = cls.netchan.outgoing_sequence - 1;
 #endif
 
 #if XASH_PSP
