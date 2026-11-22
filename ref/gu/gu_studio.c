@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #include "studio.h"
 #include "pm_local.h"
 #include "gu_extension.h"
+#include <stdio.h>
 #include <malloc.h>
 #include <pspkernel.h>
 
@@ -6067,6 +6068,19 @@ void R_DrawStudioModel( cl_entity_t *e )
 {
 	if( FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
 		return;
+
+	// the display list is fixed size and the GE runs it as it's written:
+	// overflowing it makes the GE execute garbage and hangs the console
+	if( extGuListUsed() > guRender.context_list_size - 128 * 1024 )
+	{
+		static double last;
+		if( gp_cl->time > last + 1.0 || gp_cl->time < last )
+		{
+			last = gp_cl->time;
+			printf( "GULIST: %u KB used, skipping %s\n", extGuListUsed() >> 10, e->model ? e->model->name : "?" );
+		}
+		return;
+	}
 
 	R_StudioSetupTimings();
 
