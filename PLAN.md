@@ -55,12 +55,13 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [~] Benchmark that measures what matters: `timedemo` now also prints the in-game frames only
       (no level load), the 1% low, the minimum and how many frames were under 60 / 100 fps.
       Still to do: a stress scene with many bots and monsters on the test server.
-- [ ] Batched studio renderer in the engine: run each phase (transform + cull, bones,
+- [-] Batched studio renderer in the engine: run each phase (transform + cull, bones,
       lighting, GE output) for all models in a row instead of the whole pipeline per model.
-      First check with the TEMP `r_abl 8192` experiment whether warm repeats of bone setup and
-      lighting are much cheaper than cold ones (I-cache/D-cache misses), which is what batching
-      would buy.
-- [ ] Animation: decode only the bones that matter (reduced skeletons), cache decoded frames.
+      Checked first (2026-11-22): drawing every studio model a second time right after the
+      first (warm caches) costs 5.9 ms a frame vs 6.6 ms for the cold draws, so batching
+      could buy ~0.7 ms at best. Not worth the rewrite for now.
+- [ ] Animation: decode only the bones that matter (reduced skeletons). A cache of decoded
+      keyframes was tried twice and saves almost nothing (see the progress log).
 - [ ] PSP model variants generated offline (fewer bones, decimated meshes, small textures),
       loaded by the renderer only, so server consistency checks still see the original files.
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
@@ -887,3 +888,15 @@ music), launched from the XMB.
   is ~0.34 ms a frame (gunshot decals ~1 ms each: particles, decal, ricochet sound), an
   explosion sound loads from the stick mid fight (one ~78 ms hitch, by design: sounds load on
   first use to keep the heap free).
+- 2026-11-22: **Clean floor/content split, keyframe cache, batching bound** (fight1).
+  `r_drawworld` (`42ca6b89`) with `r_drawentities`, `r_drawviewmodel` and
+  `r_draw{particles,beams,tracers}` splits the timedemo on a build without probes: all on
+  53.5-54.0 fps (18.6 ms), all 3D off 139.2 (7.18 ms), world only 104.0 (world 2.43 ms),
+  everything but entities 94.8 (10.55 ms: entities 8.05 ms), world off 61.5. At 100 fps the
+  3D content has ~2.8 ms, against 11.4 ms now. Tried and reverted: a cache of each
+  animation's decoded keyframe pair at an integer frame (2-way, 32 entries of 64 bones,
+  48 KB): ~52% hits, but bone setup only 1.65 -> 1.61 ms (most lookups are small models; a
+  hit saves ~5 us), fps unchanged (53.3 vs 53.75 all on, 60.7 vs 61.5 world off). The decode
+  is not what bone setup costs: the per bone float work around it is. Batching bound
+  (probe build, `r_abl 4` / `r_abl 1024`): studio models cost 6.6 ms a frame cold, a warm
+  repeat of every draw 5.9 ms, so cache misses are ~10% of the studio cost.
