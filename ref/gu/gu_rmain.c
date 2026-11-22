@@ -1030,6 +1030,9 @@ void R_RenderScene( void )
 	// begin a new frame
 	tr.framecount++;
 
+#if XASH_PSP
+	GU_WorldSurfsNewFrame();
+#endif
 	tr.dlightframecount = R_PushDlights( WORLDMODEL, tr.framecount );
 
 	R_SetupFrustum();

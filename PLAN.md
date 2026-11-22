@@ -64,7 +64,9 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [ ] PSP model variants generated offline (fewer bones, decimated meshes, small textures),
       loaded by the renderer only, so server consistency checks still see the original files.
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
-- [ ] World: prebuilt GE display lists per visible area, fewer state changes.
+- [~] World: compact copies of the world surfaces for the walk and both passes (done, world
+      3.7 -> 2.0 ms in fight1). Left: the BSP walk itself (~1.1 ms: ~550 nodes and ~700 leaf
+      marks a frame), decals.
 - [ ] The non-render floor: engine-side traces, delta parsing, HUD and client frame (same math).
 
 ---
@@ -829,3 +831,22 @@ music), launched from the XMB.
   get the CPU, the map load stalled and the watchdog could not get through.
   World alone (`r_abl 236`): 3.7 ms = BSP walk 1.33, texture chains 1.51 (~350 surfaces,
   two passes each, ~4.3 us a surface), lightmaps 0.48, decals 0.19.
+- 2026-11-22: **World surfaces** (fight1, `r_abl 236` = world only). Per frame the walk visits
+  ~550 nodes, ~880 node surfaces, ~470 of them not marked by a visible leaf (the back faces
+  too: a node's own surfaces are tested before its back side's leaves mark them, so the
+  backface test never culls one), ~380 drawn. Switching parts off showed the cost is the
+  cache misses on the scattered per surface structures (msurface_t, mextrasurf_t, texinfo,
+  texture, polygon), not GE commands: the texture draw ~0.3 ms, the guard band box test
+  0.29 (mostly reading `info`), the lightmap chain and pass ~0.6. Now each world surface has a
+  32 byte copy (short box, vertices, texture, lightmap page, flags) that the leaves mark and
+  the visible ones are chained through per texture and per lightmap page; random tiling
+  textures get their frame at load, animated ones once per texture per frame. Dlit, decal,
+  light style, fullbright/detail, water, conveyor surfaces still go through
+  R_RenderBrushPoly (~10 a frame). Light style 0 arrives from the server after the
+  lightmaps are built: every copy is marked stale then and redrawn the old way once, which
+  updates its lightmap. The sky polygons (~30 a frame, ~10 us each cutting them at the box
+  edges) only mark the sky as seen, and the box faces are drawn whole behind the world.
+  World 3.7 -> 2.0 ms (walk 1.33 -> 1.07, chains 1.51 -> 0.35, lightmaps 0.48 -> 0.22),
+  world only 83 -> 97 fps, all on ~45 -> ~48. Screenshots of the old and new path at the
+  spawn, at the sky and at fresh decals: identical (only the fps counter, console text and
+  the view model idle differ). 190 KB for blastcorpse1's 5987 surfaces.

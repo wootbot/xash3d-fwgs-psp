@@ -867,6 +867,458 @@ static void DrawGLPoly( gu_poly_t *p, float xScale, float yScale )
 		GL_SetupFogColorForSurfaces();
 }
 
+#if XASH_PSP
+/*
+=============================================================
+
+COMPACT WORLD SURFACES
+
+The world walk and the two passes of a plain surface (one polygon, static lightmap
+with the normal style, no decals, extra passes or animation) read a 32 byte copy of
+it instead of msurface_t, its mextrasurf_t, texinfo, texture and polygon: those are
+in different places and cost a cache miss each on the PSP, ~4 us a surface for
+~350 surfaces a frame in a firefight. The other surfaces still go through
+R_RenderBrushPoly. Leaves mark the copies, and the visible ones are chained per
+texture and per lightmap page through them.
+
+=============================================================
+*/
+#define WS_TEXTURE	0x07ff		// WORLDMODEL->textures index
+#define WS_STALE	BIT( 11 )		// the lightmap has an old light style 0
+#define WS_SLOW		BIT( 12 )		// drawn by R_RenderBrushPoly
+#define WS_NOCLIP	BIT( 13 )		// this frame: the box is inside the clip planes
+#define WS_DLIT		BIT( 14 )		// dlights reach it this frame
+#define WS_DECALS	BIT( 15 )		// has decals
+#define WS_SKY		( WS_SLOW|( WS_TEXTURE - 1 ))	// a sky surface
+#define WS_NONE		0xffff		// end of a chain
+
+typedef struct
+{
+	short		mins[3], maxs[3];	// rounded outwards
+	uint16_t	visframe;		// tr.framecount of the last visit of one of its leaves
+	uint16_t	texflags;
+	gu_vert_t	*verts;		// the texture pass vertices, then the lightmap ones
+	byte		numverts;
+	byte		lightmap;
+	uint16_t	texnext;		// the next visible one with this texture
+	uint16_t	lmnext;		// the next visible one on this lightmap page
+	uint16_t	pad[3];
+} gu_wsurf_t;
+
+typedef char ws_size_check[sizeof( gu_wsurf_t ) == 32 ? 1 : -1];
+
+static void		*ws_alloc;
+static gu_wsurf_t	*ws_surfs;		// WORLDMODEL->numsurfaces of them, NULL without
+static int		ws_numsurfs;
+static int		ws_style0;		// light style 0 of the lightmaps that aren't WS_STALE
+static qboolean		ws_allslow;		// this frame: draw all through R_RenderBrushPoly
+static qboolean		ws_skybox;		// this frame: the sky is a box, not sky polygons
+static qboolean		ws_skyseen;		// this frame: a sky surface is visible
+static uint16_t		ws_texhead[WS_TEXTURE + 1];
+static uint16_t		ws_textures[WS_TEXTURE + 1];	// the textures with a chain
+static int		ws_numtextures;
+static uint16_t		ws_lmhead[MAX_LIGHTMAPS];
+
+#define WS_MAX_DLIT	1024
+static uint16_t		ws_dlit[WS_MAX_DLIT];
+static int		ws_numdlit;
+static qboolean		ws_dlit_overflow;
+
+/*
+=================
+R_WorldTextureIsSlow
+
+R_TextureAnimation picks a frame by time for the world (it has frame 0, no
+alternate frames), the same for all of its surfaces, or by the position of
+the surface for random tiling ones, which doesn't change. Extra passes are
+per frame.
+=================
+*/
+static qboolean R_WorldTextureIsSlow( const texture_t *base )
+{
+	const texture_t *t = base;
+	for( int i = 0; t && i <= MOD_FRAMES; i++ )
+	{
+		if( t->fb_texturenum || t->dt_texturenum )
+			return true;
+
+		t = t->anim_next;
+		if( t == base )
+			break;
+	}
+
+	return false;
+}
+
+/*
+=================
+R_WorldTextureFrame
+
+R_TextureAnimation for a world texture that R_WorldTextureIsSlow passed,
+random tiling ones are picked in R_WorldSurfsBuild
+=================
+*/
+static const texture_t *R_WorldTextureFrame( const texture_t *base )
+{
+	if( !base->anim_total || base->name[0] == '-' )
+		return base;
+
+	// Quake1 textures uses 10 frames per second
+	const int speed = FBitSet( R_GetTexture( base->gl_texturenum )->flags, TF_QUAKEPAL ) ? 10 : 20;
+	const int reletive = (int)( gp_cl->time * speed ) % base->anim_total;
+	const texture_t *t = base;
+	int count = 0;
+
+	while( t->anim_min > reletive || t->anim_max <= reletive )
+	{
+		t = t->anim_next;
+
+		if( !t || ++count > MOD_FRAMES )
+			return base;
+	}
+
+	return t;
+}
+
+static qboolean R_WorldSurfIsSlow( const model_t *world, const msurface_t *surf )
+{
+	const texture_t *t = surf->texinfo ? surf->texinfo->texture : NULL;
+	const gu_poly_t *p = GU_POLYS( surf );
+
+	if( !t || !p || p->next || p->numverts < 3 || p->numverts > 255 )
+		return true;
+
+	if( FBitSet( surf->flags, SURF_DRAWSKY|SURF_DRAWTURB|SURF_DRAWTILED|SURF_CONVEYOR ))
+		return true;
+
+	// R_DrawTextureChains draws these later
+	if( FBitSet( surf->flags, SURF_TRANSPARENT ) && FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
+		return true;
+
+	if( R_WorldTextureIsSlow( t ))
+		return true;
+
+	// R_CheckLightMap: styles other than the normal one change
+	if( !world->lightdata || surf->lightmaptexturenum < 0 || surf->lightmaptexturenum >= MAX_LIGHTMAPS
+		|| surf->styles[0] != 0 || ( MAXLIGHTMAPS > 1 && surf->styles[1] != 255 ))
+		return true;
+
+	return false;
+}
+
+/*
+=================
+R_WorldSurfsBuild
+
+after the polygons and lightmaps of the world are built
+=================
+*/
+static void R_WorldSurfsBuild( void )
+{
+	const model_t *world = WORLDMODEL;
+
+	if( ws_alloc )
+		Mem_Free( ws_alloc );
+	ws_alloc = NULL;
+	ws_surfs = NULL;
+	ws_numsurfs = 0;
+	ws_numdlit = 0;
+	ws_dlit_overflow = false;
+	ws_numtextures = 0;
+	memset( ws_texhead, 0xff, sizeof( ws_texhead ));
+	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+
+	if( !world || world->numsurfaces <= 0 || world->numsurfaces >= WS_NONE || world->numtextures >= WS_TEXTURE - 1 )
+		return;
+
+	// on cache lines
+	ws_alloc = Mem_Malloc( r_temppool, sizeof( gu_wsurf_t ) * world->numsurfaces + 63 );
+	ws_surfs = (gu_wsurf_t *)((( uintptr_t )ws_alloc + 63 ) & ~(uintptr_t)63 );
+	memset( ws_surfs, 0, sizeof( gu_wsurf_t ) * world->numsurfaces );
+	ws_numsurfs = world->numsurfaces;
+	ws_style0 = g_lightstylevalue[0];
+
+	// no alternate frames in R_TextureAnimation
+	cl_entity_t *ent = RI.currententity;
+	RI.currententity = NULL;
+
+	int slow = 0;
+	for( int i = 0; i < world->numsurfaces; i++ )
+	{
+		const msurface_t *surf = &world->surfaces[i];
+		gu_wsurf_t *w = &ws_surfs[i];
+		int tex = 0;
+
+		w->texnext = w->lmnext = WS_NONE;
+
+		if( surf->info )
+		{
+			for( int j = 0; j < 3; j++ )
+			{
+				w->mins[j] = bound( -32768, (int)floorf( surf->info->mins[j] ) - 1, 32767 );
+				w->maxs[j] = bound( -32768, (int)ceilf( surf->info->maxs[j] ) + 1, 32767 );
+			}
+		}
+
+		if( surf->texinfo && surf->texinfo->texture )
+		{
+			const texture_t *t = surf->texinfo->texture;
+
+			// the frame of a random tiling texture
+			if( t->anim_total && t->name[0] == '-' )
+				t = R_TextureAnimation( (msurface_t *)surf );
+
+			for( tex = 0; tex < world->numtextures; tex++ )
+			{
+				if( world->textures[tex] == t )
+					break;
+			}
+		}
+
+		if( FBitSet( surf->flags, SURF_DRAWSKY ))
+		{
+			// see R_WorldSurfsCull
+			w->texflags = WS_SKY;
+			slow++;
+			continue;
+		}
+
+		if( !surf->info || tex >= world->numtextures || R_WorldSurfIsSlow( world, surf ))
+		{
+			w->texflags = WS_SLOW|WS_TEXTURE;
+			slow++;
+			continue;
+		}
+
+		const gu_poly_t *p = GU_POLYS( surf );
+		w->texflags = tex;
+		w->verts = (gu_vert_t *)p->verts;
+		w->numverts = p->numverts;
+		w->lightmap = surf->lightmaptexturenum;
+		if( surf->pdecals )
+			SetBits( w->texflags, WS_DECALS );
+	}
+
+	RI.currententity = ent;
+
+	gEngfuncs.Con_Reportf( "%s: %d surfaces, %d through R_RenderBrushPoly\n", __func__, ws_numsurfs, slow );
+}
+
+static gu_wsurf_t *R_WorldSurf( const msurface_t *surf )
+{
+	if( !ws_surfs || surf < WORLDMODEL->surfaces || surf >= WORLDMODEL->surfaces + ws_numsurfs )
+		return NULL;
+	return &ws_surfs[surf - WORLDMODEL->surfaces];
+}
+
+/*
+=================
+GU_WorldSurfDecals
+
+the decals of a surface changed
+=================
+*/
+void GU_WorldSurfDecals( const msurface_t *surf )
+{
+	gu_wsurf_t *w = R_WorldSurf( surf );
+
+	if( !w )
+		return;
+
+	if( surf->pdecals )
+		SetBits( w->texflags, WS_DECALS );
+	else ClearBits( w->texflags, WS_DECALS );
+}
+
+/*
+=================
+GU_WorldSurfDlit
+
+R_MarkLights marked the surface for this frame
+=================
+*/
+void GU_WorldSurfDlit( const msurface_t *surf )
+{
+	gu_wsurf_t *w = R_WorldSurf( surf );
+
+	if( !w || FBitSet( w->texflags, WS_DLIT ))
+		return;
+
+	if( ws_numdlit >= WS_MAX_DLIT )
+	{
+		ws_dlit_overflow = true;
+		return;
+	}
+
+	SetBits( w->texflags, WS_DLIT );
+	ws_dlit[ws_numdlit++] = w - ws_surfs;
+}
+
+/*
+=================
+GU_WorldSurfsNewFrame
+
+before R_PushDlights
+=================
+*/
+void GU_WorldSurfsNewFrame( void )
+{
+	for( int i = 0; i < ws_numdlit; i++ )
+		ClearBits( ws_surfs[ws_dlit[i]].texflags, WS_DLIT );
+
+	ws_numdlit = 0;
+	ws_dlit_overflow = false;
+}
+
+/*
+=================
+R_WorldSurfsBeginWalk
+=================
+*/
+static void R_WorldSurfsBeginWalk( void )
+{
+	// light style 0 changed (it does once after loading, the lightstyles come
+	// from the server): R_CheckLightMap updates each lightmap when its surface
+	// is drawn by R_RenderBrushPoly
+	if( g_lightstylevalue[0] != ws_style0 )
+	{
+		for( int i = 0; i < ws_numsurfs; i++ )
+		{
+			if( !FBitSet( ws_surfs[i].texflags, WS_SLOW ))
+				SetBits( ws_surfs[i].texflags, WS_STALE );
+		}
+		ws_style0 = g_lightstylevalue[0];
+	}
+
+	// dlights the list missed, details on every surface in fog
+	// (R_RenderDetailsForSurface), alternate texture frames
+	ws_allslow = ws_dlit_overflow || ( glState.isFogEnabled && r_detailtextures.value ) || RI.currententity->curstate.frame;
+	ws_skybox = !FBitSet( tr.world->flags, FWORLD_SKYSPHERE ) || FBitSet( tr.world->flags, FWORLD_CUSTOM_SKYBOX );
+	ws_skyseen = false;
+
+	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+}
+
+/*
+=================
+R_WorldSurfsCull
+
+the surfaces of a node in R_RecursiveWorldNode
+=================
+*/
+static void R_WorldSurfsCull( int first, int count, uint clipflags )
+{
+	const uint16_t visframe = tr.framecount;
+	gu_wsurf_t *w = &ws_surfs[first];
+
+	for( int i = first; i < first + count; i++, w++ )
+	{
+		if( w->visframe != visframe )
+			continue;
+
+		float box[6] = { w->mins[0], w->mins[1], w->mins[2], w->maxs[0], w->maxs[1], w->maxs[2] };
+
+		if( clipflags && GL_FrustumCullBox( &RI.frustum, box, box + 3, clipflags ))
+			continue;
+
+		if( FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ) || ws_allslow )
+		{
+			// R_AddSkyBoxSurface cuts each sky polygon at the box edges to find the
+			// part of the box it shows, ~10 us a polygon, ~30 a frame: the box is
+			// drawn behind the world, its visible faces whole show the same
+			if( ws_skybox && w->texflags == WS_SKY )
+			{
+				ws_skyseen = true;
+				continue;
+			}
+
+			msurface_t *surf = &WORLDMODEL->surfaces[i];
+
+			// R_RenderBrushPoly updates it this frame, unless dlit
+			if( !FBitSet( w->texflags, WS_DLIT ))
+				ClearBits( w->texflags, WS_STALE );
+
+			if( !surf->texinfo || !surf->texinfo->texture )
+				continue;
+
+			if( surf->flags & SURF_DRAWSKY )
+			{
+				// make sky chain to right clip the skybox
+				surf->texturechain = skychain;
+				skychain = surf;
+			}
+			else
+			{
+				surf->texturechain = surf->texinfo->texture->texturechain;
+				surf->texinfo->texture->texturechain = surf;
+			}
+			continue;
+		}
+
+		if( GU_ClipBoxInside( box, box + 3 ))
+			SetBits( w->texflags, WS_NOCLIP );
+		else ClearBits( w->texflags, WS_NOCLIP );
+
+		const int tex = w->texflags & WS_TEXTURE;
+		if( ws_texhead[tex] == WS_NONE )
+			ws_textures[ws_numtextures++] = tex;
+		w->texnext = ws_texhead[tex];
+		ws_texhead[tex] = i;
+		w->lmnext = ws_lmhead[w->lightmap];
+		ws_lmhead[w->lightmap] = i;
+	}
+}
+
+static void R_WorldSurfDraw( const gu_wsurf_t *w, gu_vert_t *verts )
+{
+	if( FBitSet( w->texflags, WS_NOCLIP ))
+		extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, w->numverts, verts );
+	else GU_DrawPolyVerts( verts, w->numverts );
+}
+
+/*
+=================
+R_WorldSurfsDrawTextures
+
+the texture pass, in R_DrawTextureChains
+=================
+*/
+static void R_WorldSurfsDrawTextures( void )
+{
+	for( int i = 0; i < ws_numtextures; i++ )
+	{
+		const int tex = ws_textures[i];
+
+		GL_Bind( XASH_TEXTURE0, R_WorldTextureFrame( WORLDMODEL->textures[tex] )->gl_texturenum );
+
+		for( int s = ws_texhead[tex]; s != WS_NONE; s = ws_surfs[s].texnext )
+		{
+			R_WorldSurfDraw( &ws_surfs[s], ws_surfs[s].verts );
+			r_stats.c_world_polys++;
+		}
+
+		ws_texhead[tex] = WS_NONE;
+	}
+
+	ws_numtextures = 0;
+}
+
+/*
+=================
+R_WorldSurfsDrawLightmaps
+
+the lightmap pass of a page, in R_BlendLightmaps
+=================
+*/
+static void R_WorldSurfsDrawLightmaps( int page )
+{
+	for( int s = ws_lmhead[page]; s != WS_NONE; s = ws_surfs[s].lmnext )
+		R_WorldSurfDraw( &ws_surfs[s], ws_surfs[s].verts + ws_surfs[s].numverts );
+
+	ws_lmhead[page] = WS_NONE;
+}
+#endif // XASH_PSP
+
 /*
 =============
 EmitWaterPolys
@@ -1180,12 +1632,19 @@ static void R_BlendLightmaps( void )
 	// render static lightmaps first
 	for( int i = 0; i < MAX_LIGHTMAPS; i++ )
 	{
+#if XASH_PSP
+		if( gl_lms.lightmap_surfaces[i] || ws_lmhead[i] != WS_NONE )
+#else
 		if( gl_lms.lightmap_surfaces[i] )
+#endif
 		{
 			GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[i] );
 
 			for( msurface_t *surf = gl_lms.lightmap_surfaces[i]; surf != NULL; surf = surf->info->lightmapchain )
 				DrawGLPolyChain( GU_POLYS( surf ), 0.0f, 0.0f );
+#if XASH_PSP
+			R_WorldSurfsDrawLightmaps( i );
+#endif
 		}
 	}
 
@@ -1561,6 +2020,10 @@ static void R_DrawTextureChains( void )
 			R_RenderBrushPoly( s, CULL_VISIBLE );
 		t->texturechain = NULL;
 	}
+
+#if XASH_PSP
+	R_WorldSurfsDrawTextures();
+#endif
 }
 
 /*
@@ -2067,6 +2530,17 @@ loc0:
 		mleaf_t *pleaf = (mleaf_t *)node;
 		msurface_t **mark = pleaf->firstmarksurface;
 
+#if XASH_PSP
+		if( ws_surfs )
+		{
+			const msurface_t *surfaces = WORLDMODEL->surfaces;
+			const uint16_t visframe = tr.framecount;
+
+			for( int i = 0; i < pleaf->nummarksurfaces; i++ )
+				ws_surfs[mark[i] - surfaces].visframe = visframe;
+		}
+		else
+#endif
 		for( int i = 0; i < pleaf->nummarksurfaces; i++ )
 			mark[i]->visframe = tr.framecount;
 
@@ -2091,6 +2565,11 @@ loc0:
 	int numsurfaces = node_numsurfaces( node, WORLDMODEL );
 
 	// draw stuff
+#if XASH_PSP
+	if( ws_surfs )
+		R_WorldSurfsCull( firstsurface, numsurfaces, clipflags );
+	else
+#endif
 	for( int i = firstsurface; i < firstsurface + numsurfaces; i++ )
 	{
 		msurface_t *surf = &WORLDMODEL->surfaces[i];
@@ -2276,6 +2755,10 @@ void R_DrawWorld( void )
 	tr.blend = 1.0f;
 
 	R_ClearSkyBox ();
+#if XASH_PSP
+	if( ws_surfs )
+		R_WorldSurfsBeginWalk();
+#endif
 
 	double start = gEngfuncs.pfnTime();
 	if( FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ))
@@ -2297,7 +2780,21 @@ void R_DrawWorld( void )
 		R_RenderFullbrights();
 		R_RenderDetails();
 
-		if( skychain )
+		qboolean sky = skychain != NULL;
+#if XASH_PSP
+		if( ws_skyseen )
+		{
+			// whole faces, see R_WorldSurfsCull
+			for( int i = 0; i < SKYBOX_MAX_SIDES; i++ )
+			{
+				RI.skyMins[0][i] = RI.skyMins[1][i] = -1.0f;
+				RI.skyMaxs[0][i] = RI.skyMaxs[1][i] = 1.0f;
+			}
+			ws_skyseen = false;
+			sky = true;
+		}
+#endif
+		if( sky )
 			R_DrawSkyBox();
 	}
 
@@ -2306,6 +2803,10 @@ void R_DrawWorld( void )
 	r_stats.t_world_draw = end - start;
 	tr.num_draw_decals = 0;
 	skychain = NULL;
+#if XASH_PSP
+	// not drawn when the world has no lightmap pass, not for brush models either
+	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+#endif
 
 	gEngfuncs.R_DrawWorldHull();
 }
@@ -2461,6 +2962,9 @@ void GL_RebuildLightmaps( void )
 			GL_CreateSurfaceLightmap( m->surfaces + j, m );
 	}
 	LM_UploadBlock( false );
+#if XASH_PSP
+	R_WorldSurfsBuild();
+#endif
 
 	if( gEngfuncs.drawFuncs->GL_BuildLightmaps )
 	{
@@ -2540,6 +3044,9 @@ void GL_BuildLightmaps( void )
 	}
 
 	LM_UploadBlock( false );
+#if XASH_PSP
+	R_WorldSurfsBuild();
+#endif
 
 	if( gEngfuncs.drawFuncs->GL_BuildLightmaps )
 	{

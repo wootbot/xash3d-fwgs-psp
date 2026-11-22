@@ -18,6 +18,10 @@ GNU General Public License for more details.
 #include "enginefeatures.h"
 #include "pm_local.h"
 
+#if XASH_PSP
+void GU_WorldSurfDlit( const msurface_t *surf ); // ref/gu/gu_rsurf.c
+#endif
+
 CVAR_DEFINE_AUTO( r_dlight_virtual_radius, "3", FCVAR_GLCONFIG, "increase dlight radius virtually by this amount" );
 CVAR_DEFINE_AUTO( r_lighting_extended, "1", FCVAR_GLCONFIG, "allow to get lighting from world and bmodels" );
 
@@ -153,6 +157,9 @@ start:
 		{
 			surf->dlightbits = bit;
 			surf->dlightframe = dlightframecount;
+#if XASH_PSP
+			GU_WorldSurfDlit( surf );
+#endif
 		}
 		else surf->dlightbits |= bit;
 	}

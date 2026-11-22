@@ -87,6 +87,9 @@ static void R_DecalUnlink( decal_t *pdecal )
 		}
 	}
 
+	if( pdecal->psurface )
+		GU_WorldSurfDecals( pdecal->psurface );
+
 	if( pdecal->polys )
 		Mem_Free( pdecal->polys );
 
@@ -560,6 +563,7 @@ static void R_AddDecalToSurface( decal_t *pdecal, msurface_t *surf, decalinfo_t 
 
 	// tag surface
 	pdecal->psurface = surf;
+	GU_WorldSurfDecals( surf );
 
 	// at this point decal are linked with surface
 	// and will be culled, drawing and sorting
