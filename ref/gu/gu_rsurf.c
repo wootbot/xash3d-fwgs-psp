@@ -1902,6 +1902,17 @@ static qboolean R_StaticWaterDraw( msurface_t *warp, qboolean reverse, const byt
 
 	GL_ResetFogColor();
 	sceGuTexOffset( t, t * 0.5f );
+
+	// the whole surface inside the clip planes: one draw, no test per polygon
+	// (the polygons of a big water surface are ~1 us each to test)
+	if( warp->info && GU_ClipBoxInside( warp->info->mins, warp->info->maxs ))
+	{
+		extGuDrawArrayBatched( GU_TRIANGLES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, w->numverts, w->verts );
+		sceGuTexOffset( 0.0f, 0.0f );
+		GL_SetupFogColorForSurfaces();
+		return true;
+	}
+
 	for( gu_poly_t *p = GU_POLYS( warp ); p; p = p->next, pi++ )
 	{
 		const qboolean ok = p->numverts < 3 || !GU_ClipIsRequired( p->verts, p->numverts );
