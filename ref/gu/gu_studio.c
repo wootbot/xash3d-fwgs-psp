@@ -4927,8 +4927,9 @@ R_StudioDrawModel
 =================
 static props
 
-A prop (a model of at most 2 bones in a sequence of one frame: items, weapons
-on the floor, gibs at rest) that stays where it is keeps its bones and its
+A prop (a model of at most 2 bones and no controllers in a sequence of one
+frame or one that doesn't play: items, weapons on the floor, shells and gibs
+at rest) that stays where it is keeps its bones and its
 light: the bone setup and the light traces run again only when it moves,
 changes, or every 0.25 s for light styles and dynamic lights. fight1: the
 props were ~2.5 ms a frame.
@@ -4945,6 +4946,7 @@ typedef struct
 	const cl_entity_t	*e;
 	const model_t	*model;
 	int		sequence, body, skin;
+	float		frame;
 	double		time;		// of the light
 	matrix3x4		rotation;
 	matrix3x4		bones[PROP_MAXBONES];
@@ -4966,8 +4968,9 @@ static propcache_t *R_StudioPropCache( cl_entity_t *e, qboolean *hit )
 	if( e->curstate.movetype == MOVETYPE_FOLLOW || e->curstate.renderfx != kRenderFxNone || e->curstate.sequence >= m_pStudioHeader->numseq )
 		return NULL;
 
+	// one pose: a sequence of one frame, or one that doesn't play (shells, some items)
 	const mstudioseqdesc_t *pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex) + e->curstate.sequence;
-	if( pseqdesc->numframes > 1 )
+	if(( pseqdesc->numframes > 1 && e->curstate.framerate != 0.0f ) || m_pStudioHeader->numbonecontrollers > 0 )
 		return NULL;
 
 	// two slots to choose from: this entity's, else the free or older one
@@ -4978,7 +4981,7 @@ static propcache_t *R_StudioPropCache( cl_entity_t *e, qboolean *hit )
 		pc = pc2;
 
 	if( pc->valid && pc->e == e && pc->model == RI.currentmodel && pc->sequence == e->curstate.sequence
-		&& pc->body == e->curstate.body && pc->skin == e->curstate.skin
+		&& pc->body == e->curstate.body && pc->skin == e->curstate.skin && pc->frame == e->curstate.frame
 		&& g_studio.time >= pc->time && g_studio.time < pc->time + PROP_LIGHT_TIME
 		&& !memcmp( pc->rotation, g_studio.rotationmatrix, sizeof( matrix3x4 )))
 		*hit = true;
@@ -5013,6 +5016,7 @@ static void R_StudioPropStore( propcache_t *pc, cl_entity_t *e )
 	pc->sequence = e->curstate.sequence;
 	pc->body = e->curstate.body;
 	pc->skin = e->curstate.skin;
+	pc->frame = e->curstate.frame;
 	pc->time = g_studio.time;
 	memcpy( pc->rotation, g_studio.rotationmatrix, sizeof( matrix3x4 ));
 	memcpy( pc->bones, g_studio.bonestransform, n * sizeof( matrix3x4 ));
