@@ -197,6 +197,10 @@ qboolean SphereIntersect( const vec3_t vSphereCenter, float fSphereRadiusSquared
 void QuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt );
 
 void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, vec4_t q );
+#if XASH_PSP
+qboolean PSP_StudioCalcBoneAngles( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, float *ang, vec4_t q );
+void PSP_StudioAnglesToQuaternions( const float (*ang)[4], vec4_t *q, int n );
+#endif
 int BoxOnPlaneSide( const vec3_t emins, const vec3_t emaxs, const mplane_t *p );
 
 static inline int BOX_ON_PLANE_SIDE( const vec3_t emins, const vec3_t emaxs, const mplane_t *p )

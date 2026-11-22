@@ -534,11 +534,9 @@ static void PSP_StudioQuaternionSlerp( const vec4_t p, const vec4_t q, float t, 
 }
 #endif
 
-void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, vec4_t q )
+// the values of a bone's channels at frame and the next one (3: position only)
+static void R_StudioBoneValues( int frame, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, float *v1, float *v2, int max )
 {
-	float v1[6], v2[6];
-	int max = q != NULL ? 6 : 3;
-
 	for( int i = 0; i < max; i++ )
 	{
 		mstudioanimvalue_t *panimvalue = (mstudioanimvalue_t *)((byte *)panim + panim->offset[i] );
@@ -591,6 +589,15 @@ void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const ms
 		v2[i] = pbone->value[i] + v2[i] * pbone->scale[i] + fadj;
 	}
 
+}
+
+void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, vec4_t q )
+{
+	float v1[6], v2[6];
+	int max = q != NULL ? 6 : 3;
+
+	R_StudioBoneValues( frame, pbone, panim, adj, v1, v2, max );
+
 	if( !VectorCompare( v1, v2 ))
 		VectorLerp( v1, s, v2, pos );
 	else
@@ -632,3 +639,165 @@ void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const ms
 		}
 	}
 }
+
+#if XASH_PSP
+/*
+====================
+PSP_StudioCalcBoneAngles
+
+R_StudioCalcBones with the rotation left as angles for
+PSP_StudioAnglesToQuaternions: in ang the half angles in quarter turns
+( a / pi, the VFPU's sin and cos unit ). Keyframes more than 0.25 rad apart
+need the slerp: then q is set and it returns false.
+====================
+*/
+/*
+R_StudioBoneValues with the values loaded as shorts and kept in locals: the
+generic version reads each one bytewise through memcpy (UnalignedShort) and
+the stack. The animation data is 2 byte aligned in practice; a bone whose
+isn't goes the generic way.
+*/
+static void PSP_StudioBoneValues( int frame, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, float *v1, float *v2 )
+{
+	if( (uintptr_t)panim & 1 )
+	{
+		R_StudioBoneValues( frame, pbone, panim, adj, v1, v2, 6 );
+		return;
+	}
+
+	for( int i = 0; i < 6; i++ )
+	{
+		const uint ofs = panim->offset[i];
+		const int ctl = pbone->bonecontroller[i];
+		const float fadj = ( ctl >= 0 && adj != NULL ) ? adj[ctl] : 0.0f;
+		const float value = pbone->value[i];
+
+		if( ofs == 0 )
+		{
+			v1[i] = v2[i] = value + fadj;
+			continue;
+		}
+
+		if( ofs & 1 )
+		{
+			R_StudioBoneValues( frame, pbone, panim, adj, v1, v2, 6 );
+			return;
+		}
+
+		const mstudioanimvalue_t *pv = (const mstudioanimvalue_t *)((const byte *)panim + ofs );
+		int valid = pv->num.valid, total = pv->num.total;
+		int j = total < valid ? 0 : frame;
+
+		while( total <= j )
+		{
+			j -= total;
+			pv += valid + 1;
+			valid = pv->num.valid;
+			total = pv->num.total;
+			if( total < valid )
+				j = 0;
+		}
+
+		int a, b;
+		if( valid > j )
+		{
+			a = pv[j + 1].value;
+			if( valid > j + 1 )
+				b = pv[j + 2].value;
+			else if( total > j + 1 )
+				b = a;
+			else
+				b = pv[valid + 2].value;
+		}
+		else
+		{
+			a = pv[valid].value;
+			b = total > j + 1 ? a : pv[valid + 2].value;
+		}
+
+		const float scale = pbone->scale[i];
+		v1[i] = value + (float)a * scale + fadj;
+		v2[i] = value + (float)b * scale + fadj;
+	}
+}
+
+qboolean PSP_StudioCalcBoneAngles( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, float *ang, vec4_t q )
+{
+	float v1[6], v2[6];
+
+	PSP_StudioBoneValues( frame, pbone, panim, adj, v1, v2 );
+
+	if( !VectorCompare( v1, v2 ))
+		VectorLerp( v1, s, v2, pos );
+	else
+		VectorCopy( v1, pos );
+
+	const float d0 = v2[3] - v1[3], d1 = v2[4] - v1[4], d2 = v2[5] - v1[5];
+
+	if( fabsf( d0 ) < 0.25f && fabsf( d1 ) < 0.25f && fabsf( d2 ) < 0.25f )
+	{
+		ang[0] = ( v1[3] + s * d0 ) * ( 1.0f / M_PI_F );
+		ang[1] = ( v1[4] + s * d1 ) * ( 1.0f / M_PI_F );
+		ang[2] = ( v1[5] + s * d2 ) * ( 1.0f / M_PI_F );
+		return true;
+	}
+
+	vec4_t q1, q2;
+	PSP_StudioAngleQuaternion( &v1[3], q1 );
+	PSP_StudioAngleQuaternion( &v2[3], q2 );
+	PSP_StudioQuaternionSlerp( q1, q2, s, q );
+	return false;
+}
+
+/*
+====================
+PSP_StudioAnglesToQuaternions
+
+PSP_StudioAngleQuaternion for 4 bones at a time on the VFPU: the angles of
+4 bones are the columns of a matrix, so each row is one angle of all 4 and
+one vsin.q or vcos.q covers it, and the products are quad multiplies. One
+bone at a time, the VFPU's latencies and the moves between it and the FPU
+were most of the ~0.5 us a bone. ang: 16 byte aligned, n rounded up to 4
+rows readable, and q that many writable. Uses VFPU matrices 0-5 (ref_gu
+keeps state in 6 and 7).
+====================
+*/
+void PSP_StudioAnglesToQuaternions( const float (*ang)[4], vec4_t *q, int n )
+{
+	for( int i = 0; i < n; i += 4 )
+	{
+		__asm__ volatile(
+			"lv.q    C500, 0(%1)\n"		// columns: bones, rows: roll, pitch, yaw
+			"lv.q    C510, 16(%1)\n"
+			"lv.q    C520, 32(%1)\n"
+			"lv.q    C530, 48(%1)\n"
+			"vsin.q  R400, R500\n"		// sr
+			"vsin.q  R401, R501\n"		// sp
+			"vsin.q  R402, R502\n"		// sy
+			"vcos.q  R300, R500\n"		// cr
+			"vcos.q  R301, R501\n"		// cp
+			"vcos.q  R302, R502\n"		// cy
+			"vmul.q  R200, R301, R302\n"	// cp cy
+			"vmul.q  R201, R401, R402\n"	// sp sy
+			"vmul.q  R202, R301, R402\n"	// cp sy
+			"vmul.q  R203, R401, R302\n"	// sp cy
+			"vmul.q  R100, R400, R200\n"	// x = sr cp cy - cr sp sy
+			"vmul.q  R000, R300, R201\n"
+			"vmul.q  R101, R300, R203\n"	// y = cr sp cy + sr cp sy
+			"vmul.q  R001, R400, R202\n"
+			"vmul.q  R102, R300, R202\n"	// z = cr cp sy - sr sp cy
+			"vmul.q  R002, R400, R203\n"
+			"vmul.q  R103, R300, R200\n"	// w = cr cp cy + sr sp sy
+			"vmul.q  R003, R400, R201\n"
+			"vsub.q  R100, R100, R000\n"
+			"vadd.q  R101, R101, R001\n"
+			"vsub.q  R102, R102, R002\n"
+			"vadd.q  R103, R103, R003\n"
+			"usv.q   C100, 0(%0)\n"		// columns: the bones' quaternions
+			"usv.q   C110, 16(%0)\n"
+			"usv.q   C120, 32(%0)\n"
+			"usv.q   C130, 48(%0)\n"
+			:: "r"( q[i] ), "r"( ang[i] ) : "memory" );
+	}
+}
+#endif

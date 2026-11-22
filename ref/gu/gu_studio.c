@@ -778,8 +778,28 @@ static void R_StudioCalcRotations( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 
 	R_StudioCalcBoneAdj( dadt, adj, e->curstate.controller, e->latched.prevcontroller, e->mouth.mouthopen );
 
+#if XASH_PSP
+	// the rotations as angles, then their quaternions 4 at a time on the VFPU
+	static float ang[MAXSTUDIOBONES][4] __attribute__(( aligned( 16 )));
+	static vec4_t slowq[MAXSTUDIOBONES];
+	static int slowbone[MAXSTUDIOBONES];
+	const int numbones = m_pStudioHeader->numbones;
+	int numslow = 0;
+
+	for( int i = 0; i < numbones; i++, pbone++, panim++ )
+	{
+		if( !PSP_StudioCalcBoneAngles( frame, s, pbone, panim, adj, pos[i], ang[i], slowq[numslow] ))
+			slowbone[numslow++] = i;
+	}
+
+	// q has room for MAXSTUDIOBONES, a multiple of 4
+	PSP_StudioAnglesToQuaternions( (const float (*)[4])ang, q, numbones );
+	for( int i = 0; i < numslow; i++ )
+		Vector4Copy( slowq[i], q[slowbone[i]] );
+#else
 	for( int i = 0; i < m_pStudioHeader->numbones; i++, pbone++, panim++ )
 		R_StudioCalcBones( frame, s, pbone, panim, adj, pos[i], q[i] );
+#endif
 
 	if( pseqdesc->motiontype & STUDIO_X ) pos[pseqdesc->motionbone][0] = 0.0f;
 	if( pseqdesc->motiontype & STUDIO_Y ) pos[pseqdesc->motionbone][1] = 0.0f;
