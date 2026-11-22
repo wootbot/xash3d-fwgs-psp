@@ -761,3 +761,20 @@ music), launched from the XMB.
   atlas pages across map changes.
   **Next:** studio models stay the biggest bucket (bone setup and the client DLL glue);
   the world restructuring above (~1.3 ms); the view model's double bone setup (~0.1 ms).
+- 2026-11-21 (night): **Props from recorded GE commands.** Skipping all small models
+  (TEMP `r_abl 2048`, <= 2 bones) in fight1: 40.75 -> 44.95 fps, so they were ~2.3 ms a
+  frame, ~150 us each even on a prop cache hit (cache misses all along the studio path).
+  Now a prop the cache hits is recorded once (`52ff7a17`, `r_studio_proplist`): bones
+  relative to its origin, its own ramp and light blocks, calls of the persistent skin
+  blocks and batches; later frames test its box, send a view matrix with the origin in
+  the translation and call it, ~30 us (checks ~12 of cache misses, emit ~14). The prop
+  cache also takes sequences that don't play (`caccbf20`: shells, `w_357`), and
+  MOVETYPE_STEP items that don't move. Same build A/B: 40.5 -> 41.0 fps (~5 props a frame
+  on the fast path in the demo); the cache extension ~+0.3 fps more. The user checked the
+  props on screen: fine. Note: the "studio" exclusive time (~0.8 ms) is the "client DLL
+  glue" of the last entry only in name: the engine renderer is the default, it is the
+  stage timer's own overhead and the TEMP per-model timers between the stages.
+  Left out of the fast path: moving props (shells in flight), chrome skins (`w_crossbow`:
+  the chrome matrix follows the view), animated 1-bone models (`dirtycloths.mdl`, ~0.35 ms,
+  ~120 us of it lighting), a light expiry every 0.25 s per prop (2 slow frames each).
+  Still the biggest: grunts, ~0.5-0.65 ms each (bones ~150 us, GE output ~230 us).
