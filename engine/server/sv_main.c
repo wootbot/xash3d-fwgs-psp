@@ -1143,6 +1143,9 @@ void SV_Shutdown( const char *finalmsg )
 
 	// free current level
 	memset( &sv, 0, sizeof( sv ));
+#if XASH_PSP
+	SV_FreeTables();
+#endif
 
 	SV_FreeClients();
 	svs.maxclients = 0;

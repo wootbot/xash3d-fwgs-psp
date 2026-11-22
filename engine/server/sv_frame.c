@@ -25,6 +25,10 @@ typedef struct
 	byte		sended[MAX_EDICTS_BYTES];
 } sv_ents_t;
 
+#if XASH_PSP
+static sv_ents_t *sv_frame_ents;
+#endif
+
 static int	c_fullsend;	// just a debug counter
 static int	c_notsend;
 
@@ -605,7 +609,14 @@ SV_WriteEntitiesToClient
 static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 {
 	client_frame_t	*frame;
+#if XASH_PSP
+	// 0.7 MB, only a local server needs it: on the heap, see SV_FreeFrameEnts
+	if( !sv_frame_ents )
+		sv_frame_ents = Mem_Malloc( host.mempool, sizeof( *sv_frame_ents ));
+#define frame_ents ( *sv_frame_ents )
+#else
 	static sv_ents_t	frame_ents;
+#endif
 	int		send_pings;
 
 	frame = &cl->frames[cl->netchan.outgoing_sequence & SV_UPDATE_MASK];
@@ -659,7 +670,19 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	SV_EmitPacketEntities( cl, frame, msg );
 	SV_EmitEvents( cl, frame, msg );
 	if( send_pings ) SV_EmitPings( msg );
+#if XASH_PSP
+#undef frame_ents
+#endif
 }
+
+#if XASH_PSP
+void SV_FreeFrameEnts( void )
+{
+	if( sv_frame_ents )
+		Mem_Free( sv_frame_ents );
+	sv_frame_ents = NULL;
+}
+#endif
 
 /*
 ===============================================================================

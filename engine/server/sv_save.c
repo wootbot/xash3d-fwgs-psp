@@ -986,7 +986,7 @@ static void ParseSaveTables( SAVERESTOREDATA *pSaveData, SAVE_HEADER *pHeader, i
 		svgame.dllFuncs.pfnSaveReadFields( pSaveData, "ADJACENCY", &pSaveData->levelList[i], gAdjacency, ARRAYSIZE( gAdjacency ));
 
 	if( updateGlobals )
-		memset( sv.lightstyles, 0, sizeof( sv.lightstyles ));
+		memset( sv.lightstyles, 0, sizeof( sv.lightstyles[0] ) * MAX_LIGHTSTYLES );
 
 	for( i = 0; i < pHeader->lightStyleCount; i++ )
 	{

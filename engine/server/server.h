@@ -149,19 +149,35 @@ typedef struct server_s
 	double		lastchecktime;
 	int		lastcheck;	// number of last checked client
 
+#if XASH_PSP
+	// the big tables (~2.2 MB) are on the heap only while a local server
+	// runs, see SV_AllocTables: a client of a remote server doesn't need them
+	char		(*model_precache)[MAX_QPATH];
+	char		(*sound_precache)[MAX_QPATH];
+	char		(*files_precache)[MAX_QPATH];
+	char		(*event_precache)[MAX_QPATH];
+#else
 	char		model_precache[MAX_MODELS][MAX_QPATH];
 	char		sound_precache[MAX_SOUNDS][MAX_QPATH];
 	char		files_precache[MAX_CUSTOM][MAX_QPATH];
 	char		event_precache[MAX_EVENTS][MAX_QPATH];
+#endif
 	byte		model_precache_flags[MAX_MODELS];
 	model_t		*models[MAX_MODELS];
 	int		num_static_entities;
 
 	// run local lightstyles to let SV_LightPoint grab the actual information
+#if XASH_PSP
+	lightstyle_t	*lightstyles;
+
+	consistency_t	*consistency_list;
+	resource_t	*resources;
+#else
 	lightstyle_t	lightstyles[MAX_LIGHTSTYLES];
 
 	consistency_t	consistency_list[MAX_MODELS];
 	resource_t	resources[MAX_RESOURCES];
+#endif
 	int		num_consistency;	// typically check model bounds on this
 	int		num_resources;
 
@@ -182,7 +198,11 @@ typedef struct server_s
 	byte		multicast_buf[MAX_MULTICAST];
 
 	sizebuf_t		signon;
+#if XASH_PSP
+	byte		*signon_buf;
+#else
 	byte		signon_buf[MAX_INIT_MSG];	// need a get to maximum size
+#endif
 
 	sizebuf_t		spec_datagram;
 	byte		spectator_buf[MAX_MULTICAST];
@@ -494,6 +514,11 @@ qboolean SV_ProcessUserAgent( netadr_t from, const char *useragent );
 qboolean SV_InitGame( qboolean silent );
 void SV_ActivateServer( int runPhysics );
 qboolean SV_SpawnServer( const char *server, const char *startspot, qboolean background );
+#if XASH_PSP
+void SV_AllocTables( void );
+void SV_FreeTables( void );
+void SV_FreeFrameEnts( void );
+#endif
 void SV_DeactivateServer( void );
 void SV_FreeTestPacket( void );
 

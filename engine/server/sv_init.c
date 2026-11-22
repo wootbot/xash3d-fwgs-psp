@@ -27,6 +27,51 @@ server_t		sv;	// local server
 server_static_t	svs;	// persistant server info
 svgame_static_t	svgame;	// persistant game info
 
+#if XASH_PSP
+// the big per-level tables of server_t, on the heap while a local server runs
+typedef struct
+{
+	char		model_precache[MAX_MODELS][MAX_QPATH];
+	char		sound_precache[MAX_SOUNDS][MAX_QPATH];
+	char		files_precache[MAX_CUSTOM][MAX_QPATH];
+	char		event_precache[MAX_EVENTS][MAX_QPATH];
+	lightstyle_t	lightstyles[MAX_LIGHTSTYLES];
+	consistency_t	consistency_list[MAX_MODELS];
+	resource_t	resources[MAX_RESOURCES];
+	byte		signon_buf[MAX_INIT_MSG];
+} sv_tables_t;
+
+static sv_tables_t *sv_tables;
+
+// called right after sv is wiped: point it at cleared tables, kept between levels
+void SV_AllocTables( void )
+{
+	if( !sv_tables )
+		sv_tables = Mem_Malloc( host.mempool, sizeof( *sv_tables ));
+
+	memset( sv_tables, 0, sizeof( *sv_tables ));
+
+	sv.model_precache = sv_tables->model_precache;
+	sv.sound_precache = sv_tables->sound_precache;
+	sv.files_precache = sv_tables->files_precache;
+	sv.event_precache = sv_tables->event_precache;
+	sv.lightstyles = sv_tables->lightstyles;
+	sv.consistency_list = sv_tables->consistency_list;
+	sv.resources = sv_tables->resources;
+	sv.signon_buf = sv_tables->signon_buf;
+}
+
+// sv is wiped already (the pointers are NULL)
+void SV_FreeTables( void )
+{
+	if( sv_tables )
+		Mem_Free( sv_tables );
+	sv_tables = NULL;
+
+	SV_FreeFrameEnts();
+}
+#endif
+
 /*
 ==================
 Host_SetServerState
@@ -984,11 +1029,14 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 	}
 
 	memset( &sv, 0, sizeof( sv ));	// wipe the entire per-level structure
+#if XASH_PSP
+	SV_AllocTables();
+#endif
 	sv.time = svgame.globals->time = 1.0f;	// server spawn time it's always 1.0 second
 	sv.background = background;
 
 	// initialize buffers
-	MSG_Init( &sv.signon, "Signon", sv.signon_buf, sizeof( sv.signon_buf ));
+	MSG_Init( &sv.signon, "Signon", sv.signon_buf, MAX_INIT_MSG );
 	MSG_Init( &sv.multicast, "Multicast", sv.multicast_buf, sizeof( sv.multicast_buf ));
 	MSG_Init( &sv.datagram, "Datagram", sv.datagram_buf, sizeof( sv.datagram_buf ));
 	MSG_Init( &sv.reliable_datagram, "Reliable Datagram", sv.reliable_datagram_buf, sizeof( sv.reliable_datagram_buf ));
