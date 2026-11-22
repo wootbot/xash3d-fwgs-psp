@@ -154,7 +154,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_atlas;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_atlas;
 #endif
 
 void R_StudioInit( void )
@@ -173,6 +173,7 @@ void R_StudioInit( void )
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_propcache );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_proplist );
 #endif
 #endif
 
@@ -2545,6 +2546,7 @@ typedef struct
 
 static gemodel_t	*ge_cache[GE_CACHE_SIZE];
 static size_t	ge_cache_bytes;
+static uint	ge_rec_gen = 1;	// recorded prop commands (R_StudioPropRecord) from another one are stale
 
 static inline uint GE_Float( float f )
 {
@@ -2580,6 +2582,7 @@ static void R_StudioGEFreeModel( gemodel_t *gm )
 // Mod_StudioUnloadTextures: the header memory can be reused by another model
 static void R_StudioGEUnload( const studiohdr_t *hdr )
 {
+	ge_rec_gen++; // the batches go
 	for( int i = 0; i < GE_CACHE_SIZE; i++ )
 	{
 		if( ge_cache[i] && ge_cache[i]->hdr == hdr )
@@ -3129,6 +3132,8 @@ R_StudioGERamp
 R_StudioLightMeshFast as a function of dot( normal, lightvec ), as a texture
 ===============
 */
+static void R_StudioGERampFill( uint *ramp );
+
 static uint *R_StudioGERamp( void )
 {
 	static float last[6];
@@ -3142,6 +3147,16 @@ static uint *R_StudioGERamp( void )
 	byte *mem = GU_GetVertexMemory( GE_RAMP_SIZE * 4 + 16 );
 	uint *ramp = (uint *)((((uint)mem ) + 15 ) & ~15u );
 
+	R_StudioGERampFill( ramp );
+	memcpy( last, params, sizeof( last ));
+	lastramp = ramp;
+	lastframe = guRender.vert_frame;
+	return ramp;
+}
+
+// the light ramp of g_studio's light, GE_RAMP_SIZE colors, 16 byte aligned
+static void R_StudioGERampFill( uint *ramp )
+{
 	const float base = g_studio.ambientlight + g_studio.shadelight;
 	const float k = g_studio.shadelight * ( 1.0f / SHADE_LAMBERT );
 	const float off = SHADE_LAMBERT - 1.0f;
@@ -3168,20 +3183,15 @@ static uint *R_StudioGERamp( void )
 
 		ramp[i] = GUCOLOR4UB( (byte)( cr * g ), (byte)( cg * g ), (byte)( cb * g ), 255 );
 	}
-
-	memcpy( last, params, sizeof( last ));
-	lastramp = ramp;
-	lastframe = guRender.vert_frame;
-	return ramp;
 }
 
 // bone of each GE matrix slot, valid for the current entity only
 static byte	ge_slot_bone[GE_MAXBONES];
 static uint	ge_slots_valid;
 
-static uint *R_StudioGEBones( uint *p, const gebatch_t *b )
+// ref: the point the translations are relative to, the eye or a prop's origin
+static uint *R_StudioGEBones( uint *p, const gebatch_t *b, const float *ref )
 {
-	const float *eye = RI.rvp.vieworigin;
 	int next = -1; // slot the GE writes next without a BOFS
 
 	for( int i = 0; i < b->numbones; i++ )
@@ -3203,9 +3213,9 @@ static uint *R_StudioGEBones( uint *p, const gebatch_t *b )
 		*p++ = GE_CMD( 0x2B, GE_Float( m[1][2] ));
 		*p++ = GE_CMD( 0x2B, GE_Float( m[2][2] ));
 		// relative to the eye: the GE's 24-bit floats lose too much at map coordinates
-		*p++ = GE_CMD( 0x2B, GE_Float( m[0][3] - eye[0] ));
-		*p++ = GE_CMD( 0x2B, GE_Float( m[1][3] - eye[1] ));
-		*p++ = GE_CMD( 0x2B, GE_Float( m[2][3] - eye[2] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[0][3] - ref[0] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[1][3] - ref[1] ));
+		*p++ = GE_CMD( 0x2B, GE_Float( m[2][3] - ref[2] ));
 		next = i + 1;
 
 		ge_slot_bone[i] = b->bones[i];
@@ -3264,6 +3274,8 @@ the ramp texture with u = 0.5 + 0.5 * dot( normal, lightvec ), multiplied
 into the frame buffer where the depth matches
 ===============
 */
+static const uint *R_StudioGEBuildLightBlock( const uint *ramp, qboolean flat );
+
 static const uint *R_StudioGELightBlock( const uint *ramp, qboolean flat )
 {
 	static const uint *last[2], *lastramp[2];
@@ -3274,6 +3286,17 @@ static const uint *R_StudioGELightBlock( const uint *ramp, qboolean flat )
 	if( frame[flat] == guRender.vert_frame && ramp == lastramp[flat] && ( flat || VectorCompare( lastvec, g_studio.lightvec )))
 		return last[flat];
 
+	last[flat] = R_StudioGEBuildLightBlock( ramp, flat );
+	lastramp[flat] = ramp;
+	if( !flat )
+		VectorCopy( g_studio.lightvec, lastvec );
+	frame[flat] = guRender.vert_frame;
+	return last[flat];
+}
+
+// the light block as a call block in the display list, ends with a RET
+static const uint *R_StudioGEBuildLightBlock( const uint *ramp, qboolean flat )
+{
 	uint *start = extGuBlockBegin();
 	ScePspFMatrix4 tm;
 
@@ -3310,12 +3333,7 @@ static const uint *R_StudioGELightBlock( const uint *ramp, qboolean flat )
 	sceGuEnable( GU_BLEND );
 
 	glState.texIdentityMatrix = false;
-	last[flat] = extGuBlockEnd( start );
-	lastramp[flat] = ramp;
-	if( !flat )
-		VectorCopy( g_studio.lightvec, lastvec );
-	frame[flat] = guRender.vert_frame;
-	return last[flat];
+	return extGuBlockEnd( start );
 }
 
 /*
@@ -3445,6 +3463,7 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 		uint *mem = memalign( 16, words * sizeof( uint ));
 		if( !mem )
 			return frame_block;
+		ge_rec_gen++; // recorded props call the old block
 		s->block = mem;
 		s->capacity = words;
 	}
@@ -3516,7 +3535,7 @@ static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *p
 	{
 		const gebatch_t *b = &gmesh->batches[i];
 
-		p = R_StudioGEBones( p, b );
+		p = R_StudioGEBones( p, b, RI.rvp.vieworigin );
 		if( chrome )
 			p = R_StudioGEChromeMatrix( p, b, ptex );
 		p = R_StudioGECall( p, skinblock );
@@ -3529,10 +3548,11 @@ static void R_StudioGEDrawMesh( const gemesh_t *gmesh, const mstudiotexture_t *p
 }
 
 // the meshes of an atlas page: texture coordinates in the page, texture scale 1
+static mstudiotexture_t ge_atlas_ptex = { "atlas", 0, 32768, 32768, 0 };
+
 static void R_StudioGEDrawMerged( const gemergegroup_t *g, const uint *ramp )
 {
-	static mstudiotexture_t atlas_ptex = { "atlas", 0, 32768, 32768, 0 };
-	const uint *skinblock = R_StudioGESkinBlock( &atlas_ptex, 0, g->atlas );
+	const uint *skinblock = R_StudioGESkinBlock( &ge_atlas_ptex, 0, g->atlas );
 	const uint *lightblock = R_StudioGELightBlock( ramp, false );
 
 	uint *p = extGuCmdBegin();
@@ -3540,7 +3560,7 @@ static void R_StudioGEDrawMerged( const gemergegroup_t *g, const uint *ramp )
 	{
 		const gebatch_t *b = &g->batches[i];
 
-		p = R_StudioGEBones( p, b );
+		p = R_StudioGEBones( p, b, RI.rvp.vieworigin );
 		p = R_StudioGECall( p, skinblock );
 		p = R_StudioGECall( p, b->cmds );
 		p = R_StudioGECall( p, lightblock );
@@ -4955,6 +4975,20 @@ typedef struct
 	float		ambientlight, shadelight;
 	vec3_t		lightvec, lightcolor, lightspot;
 	qboolean		valid;
+
+	// R_StudioPropRecord: the GE commands of the whole model, bones relative to its origin
+	uint		*rec;		// the light ramp, the light blocks, then the commands
+	uint		rec_cap;		// words
+	const uint	*rec_main;	// what to call
+	const uint	*rec_lastskin;	// for R_StudioGERestore
+	uint		rec_gen;		// ge_rec_gen it was recorded in, 0: none
+	uint		rec_frame;	// guRender.vert_frame it was last called in
+	double		rec_time;		// the light it was recorded with
+	vec3_t		rec_entorigin, rec_entangles;
+	vec3_t		rec_origin;	// the bones are relative to it
+	vec3_t		rec_absmin, rec_absmax;
+	vec3_t		rec_attachment[4];
+	int		rec_polys;
 } propcache_t;
 
 static propcache_t r_propcache[PROP_SLOTS];
@@ -5031,7 +5065,355 @@ static void R_StudioPropStore( propcache_t *pc, cl_entity_t *e )
 
 static void R_StudioPropCacheClear( void )
 {
-	memset( r_propcache, 0, sizeof( r_propcache ));
+	for( int i = 0; i < PROP_SLOTS; i++ )
+	{
+		// the GE may still be drawing a frame that calls them: keep the memory
+		uint *rec = r_propcache[i].rec;
+		uint cap = r_propcache[i].rec_cap;
+
+		memset( &r_propcache[i], 0, sizeof( r_propcache[i] ));
+		r_propcache[i].rec = rec;
+		r_propcache[i].rec_cap = cap;
+	}
+	ge_rec_gen++;
+}
+
+/*
+=================
+recorded props
+
+A cached prop that stays still is drawn from its GE commands, recorded once
+from the bones and light the prop cache keeps: the bones relative to its
+origin, its own light ramp and light blocks, calls of the persistent skin
+blocks and of the batches. Drawing it is then a box test, a view matrix with
+its origin in the translation and one call: ~30 us, against ~150 us of
+mostly cache misses on the whole studio path. Recorded when the prop cache
+hits (the prop stayed still for a frame, so moving ones never are), and so
+again after the cached light runs out (PROP_LIGHT_TIME), the prop moved or
+changed, or a skin block or GE model changed.
+=================
+*/
+static CVAR_DEFINE_AUTO( r_studio_proplist, "1", FCVAR_ARCHIVE, "draw props that keep their bones and light from GE commands recorded once" );
+
+#define PROP_LIGHTBLOCK_MAX	64	// words, the light block is ~35
+#define PROP_MAXITEMS	32
+
+typedef struct
+{
+	const gebatch_t	*batches;
+	int		numbatches;
+	const uint	*skin;
+	int		flat;
+	qboolean		newsubmodel;	// the GE bone slots start over
+} propitem_t;
+
+// the skin block R_StudioGESkinBlock keeps, not this frame's copy of it
+static const uint *R_StudioPropSkinBlock( const mstudiotexture_t *ptex, int skinindex, int bindtex )
+{
+	const int texnum = bindtex ? bindtex : ptex->index;
+	const uint *block = R_StudioGESkinBlock( ptex, skinindex, bindtex );
+
+	if( !ge_skins || texnum <= 0 || texnum >= MAX_TEXTURES || block != ge_skins[texnum].block )
+		return NULL;
+	return block;
+}
+
+// a copy of a light block at *p, NULL if it doesn't fit before end
+static const uint *R_StudioPropLightBlock( uint **p, const uint *end, const uint *ramp, qboolean flat )
+{
+	const uint *block = R_StudioGEBuildLightBlock( ramp, flat );
+	const uint words = extGuCmdBegin() - block; // up to and including the RET
+
+	if( words > PROP_LIGHTBLOCK_MAX || *p + words > end )
+		return NULL;
+
+	uint *dst = *p;
+	memcpy( dst, block, words * sizeof( uint ));
+	*p += words;
+	return dst;
+}
+
+/*
+what R_StudioSetUpTransform builds the transform from: the entity's origin and
+angles, for MOVETYPE_STEP the ones it interpolates between, which have to be
+the same (it doesn't move). false when it moves.
+*/
+static qboolean R_StudioPropPose( const cl_entity_t *e, vec3_t origin, vec3_t angles )
+{
+	if( e->curstate.movetype != MOVETYPE_STEP || FBitSet( gp_host->features, ENGINE_COMPUTE_STUDIO_LERP ))
+	{
+		VectorCopy( e->origin, origin );
+		VectorCopy( e->angles, angles );
+		return true;
+	}
+
+	if( !VectorCompare( e->latched.prevorigin, e->curstate.origin ) || !VectorCompare( e->latched.prevangles, e->curstate.angles ))
+		return false;
+
+	VectorCopy( e->curstate.origin, origin );
+	VectorCopy( e->curstate.angles, angles );
+	return true;
+}
+
+static void R_StudioPropRecordCommands( propcache_t *pc, cl_entity_t *e )
+{
+	propitem_t items[PROP_MAXITEMS];
+	int numitems = 0, polys = 0;
+
+	pc->rec_gen = 0;
+	if( !r_studio_proplist.value || !pc->valid || pc->rec_frame == guRender.vert_frame )
+		return;
+	if( m_fDoRemap || g_studio.rendermode != kRenderNormal || r_drawentities->value != 1 || e->player || !R_StudioPropPose( e, pc->rec_entorigin, pc->rec_entangles ))
+		return;
+	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEINFO ) || !R_StudioGEAllowed( ))
+		return;
+
+	int skinnum = e->curstate.skin;
+
+	if( skinnum <= 0 || skinnum >= m_pStudioHeader->numskinfamilies )
+		skinnum = 0;
+
+	// what R_StudioDrawPoints draws for each body part, if the GE draws all of it
+	for( int i = 0; i < m_pStudioHeader->numbodyparts; i++ )
+	{
+		R_StudioSetupModel( i, (void **)&m_pBodyPart, (void **)&m_pSubModel );
+		if( m_pSubModel->nummesh <= 0 )
+			continue;
+
+		gemodel_t *gm = R_StudioGEGetModel();
+		if( !gm || gm->cpumeshes )
+			return;
+
+		const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->textureindex);
+		const short *pskinref = (const short *)((const byte *)m_pStudioHeader + m_pStudioHeader->skinindex) + skinnum * m_pStudioHeader->numskinref;
+		const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+		const gemerge_t *merge = r_studio_atlas.value ? R_StudioGEGetMerge( gm, skinnum, ptexture, pskinref ) : NULL;
+		qboolean first = true;
+
+		for( int g = 0; merge && g < merge->numgroups; g++ )
+		{
+			if( numitems >= PROP_MAXITEMS )
+				return;
+			propitem_t *it = &items[numitems++];
+			it->batches = merge->groups[g].batches;
+			it->numbatches = merge->groups[g].numbatches;
+			it->skin = R_StudioPropSkinBlock( &ge_atlas_ptex, 0, merge->groups[g].atlas );
+			it->flat = false;
+			it->newsubmodel = first;
+			first = false;
+			if( !it->skin )
+				return;
+		}
+
+		for( int j = 0; j < m_pSubModel->nummesh; j++ )
+		{
+			polys += pmesh[j].numtris;
+			if( merge && merge->merged[j] )
+				continue;
+
+			const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[j].skinref]];
+			if( FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE|STUDIO_NF_CHROME ))
+				return;
+			if( !gm->meshes[j].numbatches || numitems >= PROP_MAXITEMS )
+				return;
+
+			propitem_t *it = &items[numitems++];
+			it->batches = gm->meshes[j].batches;
+			it->numbatches = gm->meshes[j].numbatches;
+			it->skin = R_StudioPropSkinBlock( ptex, pskinref[pmesh[j].skinref], 0 );
+			it->flat = FBitSet( ptex->flags, STUDIO_NF_FLATSHADE ) ? 1 : 0;
+			it->newsubmodel = first;
+			first = false;
+			if( !it->skin )
+				return;
+		}
+	}
+
+	// the ramp, two light blocks, then per batch its bones and four calls, and a RET
+	uint need = GE_RAMP_SIZE + 2 * PROP_LIGHTBLOCK_MAX + 1;
+	for( int i = 0; i < numitems; i++ )
+	{
+		for( int k = 0; k < items[i].numbatches; k++ )
+			need += items[i].batches[k].numbones * 13 + 8;
+	}
+
+	if( need > pc->rec_cap )
+	{
+		// not called this frame (rec_frame), and the GE is done with the last one
+		free( pc->rec );
+		pc->rec = memalign( 16, need * sizeof( uint ));
+		pc->rec_cap = pc->rec ? need : 0;
+		if( !pc->rec )
+			return;
+	}
+
+	uint *ramp = pc->rec, *p = pc->rec + GE_RAMP_SIZE;
+	const uint *end = pc->rec + pc->rec_cap;
+	const uint *light[2] = { NULL, NULL };
+
+	R_StudioGERampFill( ramp );
+	for( int i = 0; i < numitems; i++ )
+	{
+		const int flat = items[i].flat;
+		if( !light[flat] && !( light[flat] = R_StudioPropLightBlock( &p, end, ramp, flat )))
+			return;
+	}
+
+	vec3_t origin;
+	Matrix3x4_OriginFromMatrix( g_studio.rotationmatrix, origin );
+
+	pc->rec_main = p;
+	pc->rec_lastskin = NULL;
+	for( int i = 0; i < numitems; i++ )
+	{
+		const propitem_t *it = &items[i];
+
+		if( it->newsubmodel )
+			ge_slots_valid = 0;
+		for( int k = 0; k < it->numbatches; k++ )
+		{
+			const gebatch_t *b = &it->batches[k];
+
+			p = R_StudioGEBones( p, b, origin );
+			p = R_StudioGECall( p, it->skin );
+			p = R_StudioGECall( p, b->cmds );
+			p = R_StudioGECall( p, light[it->flat] );
+			p = R_StudioGECall( p, b->cmds );
+		}
+		pc->rec_lastskin = it->skin;
+	}
+	*p++ = GE_CMD( 0x0B, 0 ); // RET
+	sceKernelDcacheWritebackRange( pc->rec, ( p - pc->rec ) * sizeof( uint ));
+
+	vec3_t bbox[8];
+	R_StudioComputeBBox( bbox );
+	ClearBounds( pc->rec_absmin, pc->rec_absmax );
+	for( int i = 0; i < 8; i++ )
+		AddPointToBounds( bbox[i], pc->rec_absmin, pc->rec_absmax );
+
+	VectorCopy( origin, pc->rec_origin );
+	memcpy( pc->rec_attachment, e->attachment, sizeof( pc->rec_attachment ));
+	pc->rec_polys = polys;
+	pc->rec_time = pc->time;
+	pc->rec_gen = ge_rec_gen;
+}
+
+static void R_StudioPropRecord( propcache_t *pc, cl_entity_t *e )
+{
+	const uint savedtex = glState.currentTexture; // the skin block lookups set it
+
+	pc->rec_gen = 0;
+	R_StudioPropRecordCommands( pc, e );
+	ge_slots_valid = 0;
+	glState.currentTexture = savedtex;
+}
+
+// the view matrix with the prop's origin in the translation: its bones are relative to it
+static uint *R_StudioPropViewMatrix( uint *p, const vec3_t org )
+{
+	static ScePspFMatrix4 view;
+	static matrix4x4 from;
+	static uint frame = ~0u;
+
+	if( frame != guRender.vert_frame || memcmp( from, RI.worldviewMatrix, sizeof( from )))
+	{
+		Matrix4x4_ToFMatrix4( RI.worldviewMatrix, &view );
+		memcpy( from, RI.worldviewMatrix, sizeof( from ));
+		frame = guRender.vert_frame;
+	}
+
+	const float t[3] =
+	{
+		view.x.x * org[0] + view.y.x * org[1] + view.z.x * org[2] + view.w.x,
+		view.x.y * org[0] + view.y.y * org[1] + view.z.y * org[2] + view.w.y,
+		view.x.z * org[0] + view.y.z * org[1] + view.z.z * org[2] + view.w.z,
+	};
+
+	// as sceGuSetMatrix( GU_VIEW ): VMS, then the 4 columns of 3
+	*p++ = GE_CMD( 0x3C, 0 );
+	*p++ = GE_CMD( 0x3D, GE_Float( view.x.x ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.x.y ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.x.z ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.y.x ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.y.y ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.y.z ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.z.x ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.z.y ));
+	*p++ = GE_CMD( 0x3D, GE_Float( view.z.z ));
+	*p++ = GE_CMD( 0x3D, GE_Float( t[0] ));
+	*p++ = GE_CMD( 0x3D, GE_Float( t[1] ));
+	*p++ = GE_CMD( 0x3D, GE_Float( t[2] ));
+	return p;
+}
+
+// true when the entity was handled from its recorded commands (drawn or culled)
+static qboolean R_StudioPropDrawRecorded( cl_entity_t *e )
+{
+	if( !r_studio_proplist.value || !r_studio_propcache.value || e->player || e == tr.viewent )
+		return false;
+
+	const uint h = ((uint)(uintptr_t)e * 2654435761u ) >> 26;
+	propcache_t *pc = &r_propcache[h];
+
+	if( pc->e != e && ( pc = &r_propcache[( h + 1 ) & ( PROP_SLOTS - 1 )] )->e != e )
+		return false;
+
+	if( !pc->valid || pc->rec_gen != ge_rec_gen || pc->rec_time != pc->time || pc->rec_frame == guRender.vert_frame )
+		return false;
+	if( pc->model != e->model || pc->sequence != e->curstate.sequence || pc->body != e->curstate.body || pc->skin != e->curstate.skin || pc->frame != e->curstate.frame )
+		return false;
+	if( g_studio.time < pc->time || g_studio.time >= pc->time + PROP_LIGHT_TIME )
+		return false;
+
+	vec3_t origin, angles;
+	if( !R_StudioPropPose( e, origin, angles ) || !VectorCompare( pc->rec_entorigin, origin ) || !VectorCompare( pc->rec_entangles, angles ))
+		return false;
+	if( e->curstate.movetype == MOVETYPE_FOLLOW || e->curstate.renderfx != kRenderFxNone || e->curstate.rendermode != kRenderNormal )
+		return false;
+	if( glState.isFogEnabled || r_lightmap->value || r_fullbright->value || !r_studio_ge.value || r_drawentities->value != 1 || !r_studio_builtin_renderer.value || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+		return false;
+
+	pc->rec_frame = guRender.vert_frame;
+	if( R_CullBox( pc->rec_absmin, pc->rec_absmax ))
+		return true;
+
+	r_stats.c_studio_models_drawn++;
+	r_stats.c_studio_polys += pc->rec_polys;
+	g_studio.framecount++;
+
+	memcpy( e->attachment, pc->rec_attachment, sizeof( pc->rec_attachment ));
+	if( e->index > 0 )
+	{
+		cl_entity_t *ent = CL_GetEntityByIndex( e->index );
+		if( ent && ent != e )
+			memcpy( ent->attachment, pc->rec_attachment, sizeof( pc->rec_attachment ));
+	}
+
+	// R_StudioSetupRenderer, R_StudioDrawPoints and R_StudioRestoreRenderer for it
+	g_studio.rendermode = kRenderNormal;
+	sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
+	sceGuDisable( GU_ALPHA_TEST );
+	sceGuShadeModel( GU_SMOOTH );
+	if( glState.faceCull != GL_NONE )
+	{
+		tr.fFlipViewModel = false;
+		GL_Cull( GL_FRONT );
+	}
+
+	uint *p = R_StudioPropViewMatrix( extGuCmdBegin(), pc->rec_origin );
+	p = R_StudioGECall( p, pc->rec_main );
+	extGuCmdEnd( p );
+	glState.texIdentityMatrix = false;
+
+	ge_last_skinblock = pc->rec_lastskin;
+	R_StudioGERestore();
+	R_StudioGEViewMatrix( false );
+	extGuUpdateStall();
+
+	sceGuTexFunc( GU_TFX_REPLACE, GU_TCC_RGBA );
+	sceGuShadeModel( GU_FLAT );
+	m_fDoRemap = false;
+	return true;
 }
 #endif
 
@@ -5106,6 +5488,10 @@ static int R_StudioDrawModel( int flags )
 		g_nBottomColor = (RI.currententity->curstate.colormap & 0xFF00) >> 8;
 		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
 		R_StudioRenderModel();
+
+		// it stayed still since the last frame: draw it from recorded commands next time
+		if( flags & STUDIO_EVENTS )
+			R_StudioPropRecord( prop, RI.currententity );
 		return 1;
 	}
 #endif
@@ -5373,6 +5759,8 @@ void R_DrawStudioModel( cl_entity_t *e )
 	{
 #if XASH_PSP
 		if( !g_precull.active && R_StudioPreCull( e ))
+			return;
+		if( R_StudioPropDrawRecorded( e ))
 			return;
 #endif
 		R_StudioDrawModelInternal( e, STUDIO_RENDER|STUDIO_EVENTS );
