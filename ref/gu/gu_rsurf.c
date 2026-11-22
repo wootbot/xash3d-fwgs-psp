@@ -1324,6 +1324,96 @@ static int R_WorldBoxClip( const short *box, uint clipflags )
 
 /*
 =================
+the surfaces of the brush models in the world BSP ( *1, *2, ... ) for
+R_SortBrushModelSurfaces, in 32 bytes each: R_CullSurface reads the surface,
+its texinfo, texture, plane and extents, ~2.5 us a surface and ~180 a frame in
+a firefight, mostly cache misses. The plane is flipped for SURF_PLANEBACK.
+=================
+*/
+#define BS_SLOW		BIT( 0 )		// R_CullSurface and the water checks decide
+#define BS_TURB		BIT( 1 )		// SURF_DRAWTURB
+#define BS_PLANEZ	BIT( 2 )		// the plane is PLANE_Z
+#define BS_PLANEBACK	BIT( 3 )		// SURF_PLANEBACK: the plane's dist is -dist
+
+typedef struct
+{
+	vec3_t		normal;
+	float		dist;
+	short		mins[3], maxs[3];	// rounded outwards
+	uint16_t	flags;
+	uint16_t	pad;
+} gu_bsurf_t;
+
+typedef char bs_size_check[sizeof( gu_bsurf_t ) == 32 ? 1 : -1];
+
+static void		*bs_alloc;
+static gu_bsurf_t	*bs_surfs;		// for the surfaces from bs_first on, NULL without
+static int		bs_first, bs_numsurfs;
+
+static void R_BrushSurfsBuild( void )
+{
+	const model_t *world = WORLDMODEL;
+
+	if( bs_alloc )
+		Mem_Free( bs_alloc );
+	bs_alloc = NULL;
+	bs_surfs = NULL;
+	bs_first = bs_numsurfs = 0;
+
+	if( !world || !world->surfaces )
+		return;
+
+	// the world's own surfaces come first
+	bs_first = world->firstmodelsurface + world->nummodelsurfaces;
+	bs_numsurfs = world->numsurfaces - bs_first;
+	if( bs_first < 0 || bs_numsurfs <= 0 )
+	{
+		bs_first = bs_numsurfs = 0;
+		return;
+	}
+
+	bs_alloc = Mem_Malloc( r_temppool, sizeof( gu_bsurf_t ) * bs_numsurfs + 63 );
+	bs_surfs = (gu_bsurf_t *)((( uintptr_t )bs_alloc + 63 ) & ~(uintptr_t)63 );
+	memset( bs_surfs, 0, sizeof( gu_bsurf_t ) * bs_numsurfs );
+
+	for( int i = 0; i < bs_numsurfs; i++ )
+	{
+		const msurface_t *surf = &world->surfaces[bs_first + i];
+		gu_bsurf_t *b = &bs_surfs[i];
+
+		if( !surf->info || !surf->plane || !surf->texinfo || !surf->texinfo->texture || VectorIsNull( surf->plane->normal ))
+		{
+			b->flags = BS_SLOW;
+			continue;
+		}
+
+		if( FBitSet( surf->flags, SURF_DRAWTURB ))
+			SetBits( b->flags, BS_TURB );
+		if( surf->plane->type == PLANE_Z )
+			SetBits( b->flags, BS_PLANEZ );
+
+		if( FBitSet( surf->flags, SURF_PLANEBACK ))
+		{
+			SetBits( b->flags, BS_PLANEBACK );
+			VectorNegate( surf->plane->normal, b->normal );
+			b->dist = -surf->plane->dist;
+		}
+		else
+		{
+			VectorCopy( surf->plane->normal, b->normal );
+			b->dist = surf->plane->dist;
+		}
+
+		for( int j = 0; j < 3; j++ )
+		{
+			b->mins[j] = bound( -32768, (int)floorf( surf->info->mins[j] ) - 1, 32767 );
+			b->maxs[j] = bound( -32768, (int)ceilf( surf->info->maxs[j] ) + 1, 32767 );
+		}
+	}
+}
+
+/*
+=================
 R_WorldSurfsBuild
 
 after the polygons and lightmaps of the world are built
@@ -1332,6 +1422,8 @@ after the polygons and lightmaps of the world are built
 static void R_WorldSurfsBuild( void )
 {
 	const model_t *world = WORLDMODEL;
+
+	R_BrushSurfsBuild();
 
 	if( ws_alloc )
 		Mem_Free( ws_alloc );
@@ -2570,10 +2662,81 @@ static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mi
 	sortedface_t *draw_surfaces = gpGlobals->draw_surfaces + first;
 	const int max_surfaces = gpGlobals->max_surfaces - first;
 	int num_sorted = 0;
+	const gu_bsurf_t *bs = NULL;
+
+	// R_CullSurface through bs_surfs: for a brush model of the world BSP that
+	// isn't the world, with culling on and no overview
+	if( bs_surfs && clmodel->surfaces == WORLDMODEL->surfaces && e != CL_GetEntityByIndex( 0 )
+		&& clmodel->firstmodelsurface >= bs_first && clmodel->firstmodelsurface + clmodel->nummodelsurfaces <= bs_first + bs_numsurfs
+		&& !r_nocull.value && !FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ))
+		bs = &bs_surfs[clmodel->firstmodelsurface - bs_first];
+
+	// only static ents can be culled by frustum
+	uint clipflags = R_StaticEntity( e ) ? RI.frustum.clipFlags : 0;
+
+	// the surfaces of a model inside a plane are too
+	if( bs && clipflags )
+	{
+		for( int i = 0; i < FRUSTUM_PLANES; i++ )
+		{
+			const mplane_t *p = &RI.frustum.planes[i];
+			vec3_t near;
+
+			if( !FBitSet( clipflags, BIT( i )))
+				continue;
+
+			for( int j = 0; j < 3; j++ )
+				near[j] = p->normal[j] >= 0.0f ? clmodel->mins[j] : clmodel->maxs[j];
+
+			if( DotProduct( p->normal, near ) >= p->dist )
+				ClearBits( clipflags, BIT( i ));
+		}
+	}
+	const float front = glState.faceCull == GL_FRONT ? 1.0f : -1.0f;
 
 	for( int i = 0; i < clmodel->nummodelsurfaces; i++ )
 	{
 		msurface_t *psurf = &clmodel->surfaces[clmodel->firstmodelsurface + i];
+
+		if( bs && !FBitSet( bs[i].flags, BS_SLOW ))
+		{
+			const gu_bsurf_t *b = &bs[i];
+			const qboolean turb = FBitSet( b->flags, BS_TURB ) ? true : false;
+			int cull_type = CULL_VISIBLE;
+
+			if( turb && !quake_compatible )
+			{
+				if( !FBitSet( b->flags, BS_PLANEZ ) && !FBitSet( e->curstate.effects, EF_WATERSIDES ))
+					continue;
+
+				if( mins[2] + 1.0f >= ( FBitSet( b->flags, BS_PLANEBACK ) ? -b->dist : b->dist ))
+					continue;
+			}
+
+			if( glState.faceCull != GL_NONE && front * ( DotProduct( tr.modelorg, b->normal ) - b->dist ) <= BACKFACE_EPSILON )
+			{
+				// kept for water and the decals of kRenderTransTexture
+				if( !turb && !( psurf->pdecals && e->curstate.rendermode == kRenderTransTexture ))
+					continue;
+				cull_type = CULL_BACKSIDE;
+			}
+			else if( clipflags )
+			{
+				const vec3_t mins = { b->mins[0], b->mins[1], b->mins[2] };
+				const vec3_t maxs = { b->maxs[0], b->maxs[1], b->maxs[2] };
+
+				if( GL_FrustumCullBox( &RI.frustum, mins, maxs, clipflags ))
+					continue;
+			}
+
+			if( num_sorted < max_surfaces )
+			{
+				draw_surfaces[num_sorted].surf = psurf;
+				draw_surfaces[num_sorted].cull = cull_type;
+				num_sorted++;
+			}
+			continue;
+		}
 
 		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !quake_compatible )
 		{
