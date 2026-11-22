@@ -201,6 +201,24 @@ static int HTTP_FileDecompress( httpfile_t *file );
 static httpserver_t *HTTP_ParseURL( const char *url_, qboolean full_path );
 static qboolean HTTP_FileRedirect( httpfile_t *file, const char *location );
 
+#if XASH_PSP
+// all PSP sockets share one small network memory pool (see net_psp.c): a few parallel
+// downloads with full receive buffers, or closed connections waiting in TIME_WAIT,
+// use it up and then even the game connection can't send (ENOBUFS)
+#define HTTP_PSP_MAX_CONNECTIONS 2
+#define HTTP_PSP_RCVBUF          ( 16 * 1024 )
+#endif
+
+static void HTTP_CloseSocket( int s )
+{
+#if XASH_PSP
+	// abortive close, so the connection doesn't hold on to pool memory after we are done
+	struct linger l = { 1, 0 };
+	setsockopt( s, SOL_SOCKET, SO_LINGER, (char *)&l, sizeof( l ));
+#endif
+	closesocket( s );
+}
+
 /*
 ==============
 HTTP_FreeFile
@@ -228,7 +246,7 @@ static void HTTP_FreeFile( httpfile_t *file, qboolean error )
 
 	if( file->socket != -1 )
 	{
-		closesocket( file->socket );
+		HTTP_CloseSocket( file->socket );
 		http.active_count--;
 	}
 
@@ -388,6 +406,11 @@ static int HTTP_FileCreateSocket( httpfile_t *file )
 	if( http.active_count >= http_maxconnections.value )
 		return 0;
 
+#if XASH_PSP
+	if( http.active_count >= HTTP_PSP_MAX_CONNECTIONS )
+		return 0;
+#endif
+
 	if( file->to_memory )
 		Con_Reportf( "HTTP: Starting in-memory GET %s\n", file->url );
 	else
@@ -408,6 +431,11 @@ static int HTTP_FileCreateSocket( httpfile_t *file )
 		HTTP_FreeFile( file, true );
 		return 0;
 	}
+
+#if XASH_PSP
+	int rcvbuf = HTTP_PSP_RCVBUF;
+	setsockopt( file->socket, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbuf, sizeof( rcvbuf ));
+#endif
 
 	if( !file->buf )
 		file->buf = Mem_Calloc( http_mempool, MAX_HTTP_BUFFER_SIZE + 1 );
@@ -1512,7 +1540,7 @@ static qboolean HTTP_FileRedirect( httpfile_t *file, const char *location )
 
 	if( file->socket != -1 )
 	{
-		closesocket( file->socket );
+		HTTP_CloseSocket( file->socket );
 		http.active_count--;
 		file->socket = -1;
 	}
@@ -1613,7 +1641,7 @@ static void HTTP_Clear_f( void )
 			HTTP_TlsFree( file->tls );
 
 		if( file->socket != -1 )
-			closesocket( file->socket );
+			HTTP_CloseSocket( file->socket );
 
 		if( file->buf )
 			Mem_Free( file->buf );
