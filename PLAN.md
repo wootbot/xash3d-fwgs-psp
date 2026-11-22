@@ -687,7 +687,7 @@ music), launched from the XMB.
   meshes per model (texture atlas per model, palettes are the problem); half rate animation
   for distant models (fidelity, ~0.5 ms).
 - 2026-11-21 (afternoon): **The GE became the limit; deferred GE wait + studio texture atlas
-  (NOT COMMITTED yet, work in progress in the working tree).** fight1 breakdown before
+  (committed later: `17d26a33`, `9f972138`; the to-do list below is done up to (3)).** fight1 breakdown before
   (26 ms a frame, 38.5 fps): SCR_UpdateScreen 17.1 (studio 8.0 for 19 models, world 3.9,
   ~5.2 not split yet: brush models, effects, HUD, view model), CL_ReadPackets 2.6, sound 2.0,
   CL_EmitEntities 1.8, CL_Move 1.2, prediction 0.7.
@@ -730,3 +730,34 @@ music), launched from the XMB.
   split the ~5.2 ms of unattributed rendering, then the world restructuring above.
   (4) Watch the GE budget: it has ~25 ms now instead of ~17, but heavier GE work (more
   passes, unswizzled textures) can make it the limit again; `gpu_wait` shows it.
+- 2026-11-21 (evening): **Render time split, brush models grouped.** The user checked the
+  atlas and the deferred GE wait on screen (fine). Committed by hand from the mixed working
+  tree, in order: deferred GE wait (`17d26a33`, without the `gu_deferred_sync` switch),
+  upload scratch buffers from the P5 RAM (`43c1124a`, older uncommitted work the atlas
+  needs), studio atlas (`9f972138`, the load log is now a `Con_Reportf`), static brush model
+  grouping (`66e0c2ec`). Method that works: list `git diff -U0` hunks, apply the chosen ones
+  to the index with `git apply --cached --unidiff-zero` (recompute each hunk's `+` start from
+  the selected hunks only, or insertions land on the wrong lines), then fix the mixed hunks on
+  the staged blob (`git show :file`, `git hash-object -w`, `git update-index --cacheinfo`).
+  Some working tree hunks are older text that HEAD has since cleaned up (comments,
+  `R_StaticWaterClear` prototype, `r_studio_ge`): leave those out.
+  **Render breakdown** (fight1 timedemo, `psp_stagetime`, exclusive stage times, ms a frame,
+  16.9 before the grouping): studio models 7.7 (bone setup 1.8, mesh submit 1.7, client DLL
+  glue between the engine callbacks ~0.8 over ~20 models, prop cache render 0.6, dynamic light
+  0.5, bbox 0.4, bone save 0.4), world 3.7 (chains 1.5, node walk 1.3, lightmaps 0.5),
+  **brush models 2.9**, entity loops and glue 0.7, 2D (HUD 0.24, console 0.13) 0.5,
+  effects/sprites/tris 0.5, frame setup and precull 0.5, view model 0.4 (its bones are set up
+  twice: once for the view model events in `R_RunViewmodelEvents`, ~0.11 ms).
+  **Brush models:** ~17 drawn a frame, all but 2 alpha-tested func_walls at the world origin
+  (rendermode 4, 6-10 surfaces, ~3 visible), ~170 us each, nearly all fixed cost (matrix and
+  model frustum ~19 us, own lightmap/fullbright/detail passes ~24, cull and sort ~27, restore
+  ~10). Now the ones at the origin, unrotated, normal or alpha test, are drawn together
+  (`R_StaticBrushModel`, `R_DrawStaticBrushGroup`, `R_DrawStaticBrushModels`): state and
+  passes once, no matrix. 2.9 -> 1.6 ms; same build A/B 39.6 -> 41.6 fps (TEMP switch
+  `r_abl 8388608` = old path). The user checked the walls on screen: fine. What's left
+  there: cull and sort ~35 us a model (`R_CullSurface` misses on ~10 surfaces, dlight push).
+  Note: the demo load once ran out of memory (256 KB TGA in `img_tga.c`) after a long
+  session with many map loads; a restart fixed it. Watch for heap fragmentation from the
+  atlas pages across map changes.
+  **Next:** studio models stay the biggest bucket (bone setup and the client DLL glue);
+  the world restructuring above (~1.3 ms); the view model's double bone setup (~0.1 ms).
