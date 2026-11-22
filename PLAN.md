@@ -811,3 +811,21 @@ music), launched from the XMB.
   sceKernelDelayThread per frame for the network threads): 100 us gives 107.8 -> 117.4 fps
   on the floor; 0 starves the network threads (debug console commands get lost). 100 still
   needs a check in multiplayer. `cl_predict 0` changes nothing in a timedemo.
+  Correction: the committed yield is 200 us; the TEMP cvar had overridden it with 1000, so
+  the floor above is ~0.8 ms too high.
+- 2026-11-22: **Floor work** (fight1, all 3D content off = `r_abl 252`). The timedemo ran ~8
+  player moves a frame: after every packet the whole unacknowledged window (~280 ms of
+  commands in fight1) was simulated again, and the recorded newest command (~160 ms, 4
+  moves) every frame. Prediction reuse when the server agrees with it (`0193bc4a`): all on
+  42.8 -> 44.5 fps, the redo is left for damage punches and the like. Floor now 129.5 fps
+  (7.7 ms), all on ~45 (22 ms): the 3D content costs ~14.5 ms, 100 fps leaves 2.3 ms for it.
+  Note the timedemo has a packet in ~90% of its frames (recorded at ~40 fps); at 100 fps in
+  real play only every 3rd-5th frame gets one, so parsing and the redo count 3-4x more
+  there than in a game. What is left of the floor is spread thin: entity state copies into
+  cl_entity_t ~5 us an entity (cache misses on two 340 byte structs, 0.49 ms), physents
+  0.41, delta decode 0.64, the emit loop 1.2 (every frame), HUD 0.3, console 0.14,
+  particles 0.15, beams 0.14, the newest player move ~0.5. Dropping the main thread below
+  the network threads (instead of the yield) locks the game up: they busy-poll once they
+  get the CPU, the map load stalled and the watchdog could not get through.
+  World alone (`r_abl 236`): 3.7 ms = BSP walk 1.33, texture chains 1.51 (~350 surfaces,
+  two passes each, ~4.3 us a surface), lightmaps 0.48, decals 0.19.
