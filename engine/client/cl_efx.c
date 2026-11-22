@@ -170,7 +170,11 @@ particle_t * GAME_EXPORT R_AllocParticle( void (*callback)( particle_t*, float )
 		return NULL;
 
 	// never alloc particles when we not in game
+#if XASH_PSP
+	if( CL_ClientTimeStopped( )) return NULL;
+#else
 	if( cl_clientframetime() == 0.0 ) return NULL;
+#endif
 
 	if( !cl_free_particles )
 	{
@@ -193,7 +197,11 @@ particle_t * GAME_EXPORT R_AllocParticle( void (*callback)( particle_t*, float )
 	VectorClear( p->vel );
 	VectorClear( p->org );
 	p->unused = 0;
+#if XASH_PSP
+	p->die = CL_ClientTimeFloat();
+#else
 	p->die = cl.time;
+#endif
 	p->color = 0;
 	p->ramp = 0;
 
@@ -221,7 +229,11 @@ static particle_t *R_AllocTracer( const vec3_t org, const vec3_t vel, float life
 		return NULL;
 
 	// never alloc particles when we not in game
+#if XASH_PSP
+	if( CL_ClientTimeStopped( )) return NULL;
+#else
 	if( cl_clientframetime() == 0.0 ) return NULL;
+#endif
 
 	if( !cl_free_particles )
 	{
@@ -243,7 +255,11 @@ static particle_t *R_AllocTracer( const vec3_t org, const vec3_t vel, float life
 	p->type = pt_static;
 	VectorCopy( org, p->org );
 	VectorCopy( vel, p->vel );
+#if XASH_PSP
+	p->die = CL_ClientTimeFloat() + life;
+#else
 	p->die = cl.time + life;
+#endif
 	p->ramp = tracerlength.value;
 	p->color = TRACER_COLORINDEX_DEFAULT; // select custom color
 	p->unused = 255; // alpha
@@ -1741,7 +1757,11 @@ void GAME_EXPORT R_BulletImpactParticles( const vec3_t pos )
 		p->vel[2] = COM_RandomFloat( -1.0f, 1.0f );
 		VectorScale( p->vel, COM_RandomFloat( 50.0f, 100.0f ), p->vel );
 
+#if XASH_PSP
+		p->die = CL_ClientTimeFloat() + 0.5f;
+#else
 		p->die = cl.time + 0.5;
+#endif
 		p->color = 3 - color;
 		p->type = pt_grav;
 	}

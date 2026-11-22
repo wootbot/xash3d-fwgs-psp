@@ -682,6 +682,33 @@ extern client_static_t	cls;
 extern clgame_static_t	clgame;
 extern gameui_static_t	gameui;
 
+#if XASH_PSP
+// the PSP FPU has no doubles: the effects allocate particles in loops, so they get cl.time as a
+// float and the "client time didn't advance" test without software double math
+static inline qboolean CL_ClientTimeStopped( void )
+{
+	uint64_t t, o;
+	memcpy( &t, &cl.time, sizeof( t ));
+	memcpy( &o, &cl.oldtime, sizeof( o ));
+	return t == o;
+}
+
+static inline float CL_ClientTimeFloat( void )
+{
+	static uint64_t key;
+	static float value;
+	uint64_t t;
+
+	memcpy( &t, &cl.time, sizeof( t ));
+	if( t != key )
+	{
+		key = t;
+		value = cl.time;
+	}
+	return value;
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif
