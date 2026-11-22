@@ -107,6 +107,17 @@ void GL_Bind( int tmu, unsigned int texnum )
 
 	texture = &gl_textures[texnum];
 
+	// a freed or never uploaded slot: the GE would read from address 0
+	// (or a stale pointer) and can hang the whole console
+	if( !texture->dstTexture || (( texture->format == GU_PSM_T8 || texture->format == GU_PSM_T4 ) && !texture->dstPalette ))
+	{
+		gEngfuncs.Con_Printf( S_ERROR "GL_Bind: texture %d \"%s\" has no data\n", texnum, texture->name );
+		texnum = tr.defaultTexture;
+		if( glState.currentTexture == texnum )
+			return;
+		texture = &gl_textures[texnum];
+	}
+
 	// Set palette
 	if( texture->format == GU_PSM_T8 )
 	{
@@ -1038,7 +1049,12 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	{
 		tex->dstTexture = GL_AllocTextureData( tex, texSize );
 		if( !tex->dstTexture )
-			gEngfuncs.Host_Error( "GL_UploadTexture: %s out of memory for texture ( %u )\n", tex->name, (uint)texSize );
+		{
+			// don't drop the whole game (and the server connection) for one texture,
+			// the caller falls back to the default texture
+			gEngfuncs.Con_Printf( S_ERROR "GL_UploadTexture: %s out of memory for texture ( %u )\n", tex->name, (uint)texSize );
+			return false;
+		}
 	}
 
 	if( ImageCompressed( pic->type ) )
@@ -1522,7 +1538,7 @@ int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 
 	if( !GL_UploadTexture( tex, pic ))
 	{
-		memset( tex, 0, sizeof( gl_texture_t ));
+		GL_DeleteTexture( tex ); // unlink from the hash table, free the palette
 		gEngfuncs.FS_FreeImage( pic ); // release source texture
 		return 0;
 	}
@@ -1578,7 +1594,7 @@ int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags
 
 	if( !GL_UploadTexture( tex, pic ))
 	{
-		memset( tex, 0, sizeof( gl_texture_t ));
+		GL_DeleteTexture( tex ); // unlink from the hash table, free the palette
 		return 0;
 	}
 
@@ -1752,6 +1768,12 @@ void GL_FreeTexture( unsigned int texnum )
 	R_WaitFrame(); // the GE may still be reading it
 	// number 0 it's already freed
 	if( texnum <= 0 ) return;
+
+	if( texnum >= MAX_TEXTURES )
+	{
+		gEngfuncs.Con_Printf( S_ERROR "%s: bad texture number %u\n", __func__, texnum );
+		return;
+	}
 
 	GL_DeleteTexture( &gl_textures[texnum] );
 }
