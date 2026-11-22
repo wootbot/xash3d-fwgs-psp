@@ -999,6 +999,28 @@ void CL_ClearWorld( void )
 	clgame.numStatics = 0;
 }
 
+#if XASH_PSP
+// the entity array is ~2.7 MB with 2047 edicts: keep it between connections,
+// after a game the heap is too fragmented to get one block that big again
+static cl_entity_t *cl_entities_cache;
+static int cl_entities_cache_count;
+
+static void CL_FreeEntitiesCache( void )
+{
+	if( cl_entities_cache )
+		Mem_Free( cl_entities_cache );
+	cl_entities_cache = NULL;
+	cl_entities_cache_count = 0;
+}
+
+static void CL_FreePacketEntities( void )
+{
+	if( cls.packet_entities )
+		Z_Free( cls.packet_entities );
+	cls.packet_entities = NULL;
+}
+#endif
+
 void CL_InitEdicts( int maxclients )
 {
 	Assert( clgame.entities == NULL );
@@ -1015,7 +1037,22 @@ void CL_InitEdicts( int maxclients )
 	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
 #endif
 	cls.packet_entities = Mem_Realloc( clgame.mempool, cls.packet_entities, sizeof( entity_state_t ) * cls.num_client_entities );
+#if XASH_PSP
+	if( cl_entities_cache && cl_entities_cache_count == clgame.maxEntities )
+	{
+		clgame.entities = cl_entities_cache;
+		memset( clgame.entities, 0, sizeof( cl_entity_t ) * clgame.maxEntities );
+	}
+	else
+	{
+		CL_FreeEntitiesCache();
+		clgame.entities = Mem_Calloc( clgame.mempool, sizeof( cl_entity_t ) * clgame.maxEntities );
+		cl_entities_cache = clgame.entities;
+		cl_entities_cache_count = clgame.maxEntities;
+	}
+#else
 	clgame.entities = Mem_Calloc( clgame.mempool, sizeof( cl_entity_t ) * clgame.maxEntities );
+#endif
 	clgame.static_entities = NULL; // will be initialized later
 	clgame.numStatics = 0;
 
@@ -1033,18 +1070,24 @@ void CL_FreeEdicts( void )
 {
 	ref.dllFuncs.R_ProcessEntData( false, NULL, 0 );
 
+#if !XASH_PSP // kept in cl_entities_cache
 	if( clgame.entities )
 		Mem_Free( clgame.entities );
+#endif
 	clgame.entities = NULL;
 
 	if( clgame.static_entities )
 		Mem_Free( clgame.static_entities );
 	clgame.static_entities = NULL;
 
+#if !XASH_PSP
+	// PSP: keep the ~1.3 MB ring too, CL_InitEdicts reallocs it to the same
+	// size (a no-op); CL_UnloadProgs frees it
 	if( cls.packet_entities )
 		Z_Free( cls.packet_entities );
 
 	cls.packet_entities = NULL;
+#endif
 	cls.num_client_entities = 0;
 	cls.next_client_entities = 0;
 	clgame.numStatics = 0;
@@ -3905,6 +3948,10 @@ void CL_UnloadProgs( void )
 	if( !clgame.hInstance ) return;
 
 	CL_FreeEdicts();
+#if XASH_PSP
+	CL_FreeEntitiesCache();
+	CL_FreePacketEntities();
+#endif
 	CL_FreeTempEnts();
 	CL_FreeViewBeams();
 	CL_FreeParticles();
