@@ -3390,7 +3390,74 @@ static const uint *R_StudioGELightBlock( const uint *ramp, qboolean flat )
 }
 
 // the light block as a call block in the display list, ends with a RET
+static const uint *R_StudioGEBuildLightBlock_( const uint *ramp, qboolean flat );
+
+/*
+the light block differs between models only in the ramp address and the
+texture matrix (the light vector): build it once with the sceGu calls, then
+copy it and patch those words. ~15 sceGu calls per model before.
+*/
 static const uint *R_StudioGEBuildLightBlock( const uint *ramp, qboolean flat )
+{
+	static uint *tmpl[2];
+	static uint words[2];
+	static int tbp[2], tbw[2], tmd[2]; // word indices, -1: not found
+
+	if( !tmpl[flat] )
+	{
+		const uint *block = R_StudioGEBuildLightBlock_( ramp, flat );
+		const uint n = extGuCmdBegin() - block; // up to and including the RET
+		uint *t = malloc( n * sizeof( uint ));
+
+		if( !t )
+			return block;
+
+		memcpy( t, block, n * sizeof( uint ));
+		tbp[flat] = tbw[flat] = tmd[flat] = -1;
+		for( uint i = 0; i < n; i++ )
+		{
+			const uint cmd = t[i] >> 24;
+			if( cmd == 0xA0 && tbp[flat] < 0 ) tbp[flat] = i;	// TBP0
+			else if( cmd == 0xA8 && tbw[flat] < 0 ) tbw[flat] = i;	// TBW0
+			else if( cmd == 0x41 && tmd[flat] < 0 ) tmd[flat] = i;	// TMD, 12 in a row after the TMS
+		}
+		if( tbp[flat] < 0 || tbw[flat] < 0 || tmd[flat] < 0 || tmd[flat] + 12 > (int)n )
+		{
+			gEngfuncs.Con_Printf( S_WARN "%s: unexpected light block, built each time\n", __func__ );
+			free( t );
+			tmpl[flat] = NULL;
+			return block;
+		}
+		words[flat] = n;
+		tmpl[flat] = t;
+		return block;
+	}
+
+	uint *dst = extGuGetMemoryNoStall( words[flat] * sizeof( uint ));
+	memcpy( dst, tmpl[flat], words[flat] * sizeof( uint ));
+	dst[tbp[flat]] = GE_CMD( 0xA0, (uint)ramp );
+	dst[tbw[flat]] = GE_CMD( 0xA8, ((((uint)ramp ) >> 8 ) & 0x0f0000 ) | GE_RAMP_SIZE );
+
+	if( !flat )
+	{
+		// as below: column x is half the light vector, w = ( 0.5, 0.5, 1 )
+		const float m[12] =
+		{
+			0.5f * g_studio.lightvec[0], 0.0f, 0.0f,
+			0.5f * g_studio.lightvec[1], 0.0f, 0.0f,
+			0.5f * g_studio.lightvec[2], 0.0f, 0.0f,
+			0.5f, 0.5f, 1.0f,
+		};
+		uint *t = &dst[tmd[flat]];
+		for( int i = 0; i < 12; i++ )
+			t[i] = GE_CMD( 0x41, GE_Float( m[i] ));
+	}
+
+	glState.texIdentityMatrix = false;
+	return dst;
+}
+
+static const uint *R_StudioGEBuildLightBlock_( const uint *ramp, qboolean flat )
 {
 	uint *start = extGuBlockBegin();
 	ScePspFMatrix4 tm;
@@ -3822,6 +3889,19 @@ typedef struct geplan_s
 	geplanitem_t	items[];
 } geplan_t;
 
+// the body parts of a model drawn from plans share the view matrix and the end state
+static qboolean ge_plan_open;
+
+static void R_StudioGEPlanClose( void )
+{
+	if( !ge_plan_open )
+		return;
+	ge_plan_open = false;
+	R_StudioGERestore();
+	R_StudioGEViewMatrix( false );
+	extGuUpdateStall();
+}
+
 static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
 {
 	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
@@ -3903,7 +3983,11 @@ static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotextur
 		}
 	}
 
-	R_StudioGEViewMatrix( true );
+	if( !ge_plan_open )
+	{
+		R_StudioGEViewMatrix( true );
+		ge_plan_open = true;
+	}
 	const uint *ramp = R_StudioGERamp();
 	const uint *skinblock = NULL;
 	ge_slots_valid = 0;
@@ -3932,10 +4016,7 @@ static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotextur
 		extGuCmdEnd( p );
 	}
 
-	ge_last_skinblock = skinblock;
-	R_StudioGERestore();
-	R_StudioGEViewMatrix( false );
-	extGuUpdateStall();
+	ge_last_skinblock = skinblock; // R_StudioGEPlanClose restores
 
 	r_stats.c_studio_polys += pl->polys;
 	return true;
@@ -4001,6 +4082,7 @@ static void R_StudioDrawPoints( void )
 	gemodel_t *gm = R_StudioGEAllowed() ? R_StudioGEGetModel() : NULL;
 	if( gm && r_studio_geplan.value && !m_fDoRemap && R_StudioGEDrawPlan( gm, m_skinnum, ptexture, pskinref ))
 		return;
+	R_StudioGEPlanClose(); // the rest assumes the normal state
 	// meshes in atlas pages are drawn as one per page, the others need their own batches
 	const gemerge_t *merge = NULL;
 	if( gm && r_studio_atlas.value && !m_fDoRemap )
@@ -4845,8 +4927,15 @@ static void R_StudioRenderFinal( void )
 
 			GL_StudioSetRenderMode( rendermode );
 			R_StudioDrawPoints();
+#if XASH_PSP
+			if( r_shadows.value )
+				R_StudioGEPlanClose();
+#endif
 			GL_StudioDrawShadow();
 		}
+#if XASH_PSP
+		R_StudioGEPlanClose();
+#endif
 	}
 
 	if( r_drawentities->value == 4 )
