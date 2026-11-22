@@ -801,3 +801,13 @@ music), launched from the XMB.
   a pass, exact, below the timedemo noise). What's left would need fewer decodes (a per
   entity cache of the decoded keyframe pair, which changes only when the integer frame
   does) rather than faster ones.
+- 2026-11-21 (late night): **Whole frame budget, by switching parts off** (fight1 timedemo,
+  one run each, TEMP `r_abl` bits): all on 42.8 fps (23.4 ms); studio models off 58.7
+  (17.0: studio 6.4 ms); also world and brush models off 87.6 (11.4: 5.6 ms); also
+  sprites, temp entity update, mixing off 107.9 (9.3 ms). That floor is nearly the whole
+  100 fps budget: prediction ~3.0 ms (two player move runs a frame), packet parsing 2.4,
+  render work that is left (translucent effects, view model, HUD, setup) 2.1, entity list
+  1.2, the network yield 1.0, sound 0.5. The yield (`net_psp_yield`, TEMP, 1000 us of
+  sceKernelDelayThread per frame for the network threads): 100 us gives 107.8 -> 117.4 fps
+  on the floor; 0 starves the network threads (debug console commands get lost). 100 still
+  needs a check in multiplayer. `cl_predict 0` changes nothing in a timedemo.
