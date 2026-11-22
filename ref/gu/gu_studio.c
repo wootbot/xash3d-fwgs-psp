@@ -82,6 +82,9 @@ typedef struct
 	matrix3x4		cached_lighttransform[MAXSTUDIOBONES];
 	char		cached_bonenames[MAXSTUDIOBONES][32];
 	int		cached_numbones;		// number of bones in cache
+#if XASH_PSP
+	const mstudiobone_t	*cached_bones;	// R_StudioSaveBones: still to copy from bonestransform
+#endif
 
 	sortedmesh_t	meshes[MAXSTUDIOMESHES];	// sorted meshes
 	vec3_t		verts[MAXSTUDIOVERTS];
@@ -789,10 +792,18 @@ StudioMergeBones
 
 ====================
 */
+#if XASH_PSP
+static void R_StudioCopySavedBones( void );
+#endif
+
 static void R_StudioMergeBones( cl_entity_t *e, model_t *m_pSubModel )
 {
 	static vec4_t	q[MAXSTUDIOBONES];
 	static float	pos[MAXSTUDIOBONES][3];
+
+#if XASH_PSP
+	R_StudioCopySavedBones();
+#endif
 
 	if( e->curstate.sequence >=  m_pStudioHeader->numseq )
 		e->curstate.sequence = 0;
@@ -1096,10 +1107,39 @@ StudioSaveBones
 
 ====================
 */
+#if XASH_PSP
+/*
+the copy waits until a merge needs it: most models have nothing that follows
+them, and the names and matrices of ~50 bones are ~25 us a soldier. Nothing
+changes the bone transforms between the save and the merge (the parent of a
+MOVETYPE_FOLLOW model is set up again right before it, a player's weapon
+model right after the player), and every bone setup saves again.
+*/
+static void R_StudioCopySavedBones( void )
+{
+	const mstudiobone_t *pbones = g_studio.cached_bones;
+
+	if( !pbones )
+		return;
+	g_studio.cached_bones = NULL;
+
+	for( int i = 0; i < g_studio.cached_numbones; i++ )
+	{
+		Matrix3x4_Copy( g_studio.cached_bonestransform[i], g_studio.bonestransform[i] );
+		Matrix3x4_Copy( g_studio.cached_lighttransform[i], g_studio.lighttransform[i] );
+		Q_strncpy( g_studio.cached_bonenames[i], pbones[i].name, 32 );
+	}
+}
+#endif
+
 static void R_StudioSaveBones( void )
 {
 	mstudiobone_t *pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex);
 	g_studio.cached_numbones = m_pStudioHeader->numbones;
+#if XASH_PSP
+	g_studio.cached_bones = pbones;
+	return;
+#endif
 
 	for( int i = 0; i < m_pStudioHeader->numbones; i++ )
 	{
