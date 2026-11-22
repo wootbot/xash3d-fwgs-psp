@@ -37,7 +37,12 @@ GNU General Public License for more details.
 #include "filesystem_internal.h"
 #include "common/com_strings.h"
 
+#if XASH_PSP
+// a 1 MB block is often not there in game (hpak writes for sprays copy files)
+#define FILE_COPY_SIZE		(64 * 1024)
+#else
 #define FILE_COPY_SIZE		(1024 * 1024)
+#endif
 
 static void FS_Purge( file_t *file )
 {

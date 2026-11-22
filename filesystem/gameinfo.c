@@ -211,7 +211,11 @@ static void FS_InitGameInfo( gameinfo_t *GameInfo, const char *gamedir, qboolean
 	}
 
 	GameInfo->max_edicts     = DEFAULT_MAX_EDICTS; // default value if not specified
+#if XASH_PSP
+	GameInfo->max_tents      = 300; // the minimum, each one is a whole cl_entity_t (~3 KB)
+#else
 	GameInfo->max_tents      = 500;
+#endif
 	GameInfo->max_beams      = 128;
 	GameInfo->max_particles  = 4096;
 	GameInfo->version        = 1.0f;
