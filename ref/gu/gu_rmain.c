@@ -1044,6 +1044,9 @@ void R_RenderScene( void )
 	R_DrawFog ();
 
 	R_CheckGLFog();
+#if XASH_PSP
+	if( r_drawworld.value )
+#endif
 	R_DrawWorld();
 	R_CheckFog();
 
@@ -1051,6 +1054,9 @@ void R_RenderScene( void )
 
 	R_DrawEntitiesOnList();
 
+#if XASH_PSP
+	if( r_drawworld.value )
+#endif
 	R_DrawWaterSurfaces();
 }
 

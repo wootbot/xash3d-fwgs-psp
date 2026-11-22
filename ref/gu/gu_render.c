@@ -37,6 +37,9 @@ CVAR_DEFINE_AUTO( gl_fog, "1", FCVAR_GLCONFIG, "allow for rendering fog using bu
 CVAR_DEFINE_AUTO( r_lighting_ambient, "0.3", FCVAR_GLCONFIG, "map ambient lighting scale" );
 CVAR_DEFINE_AUTO( r_detailtextures, "0", FCVAR_GLCONFIG, "enable detail textures support" );
 CVAR_DEFINE_AUTO( r_novis, "0", 0, "ignore vis information (perfomance test)" );
+#if XASH_PSP
+CVAR_DEFINE_AUTO( r_drawworld, "1", FCVAR_CHEAT, "draw the world and water surfaces (perfomance test)" );
+#endif
 CVAR_DEFINE_AUTO( r_nocull, "0", 0, "ignore frustrum culling (perfomance test)" );
 CVAR_DEFINE_AUTO( r_lockpvs, "0", FCVAR_CHEAT, "lockpvs area at current point (pvs test)" );
 CVAR_DEFINE_AUTO( r_lockfrustum, "0", FCVAR_CHEAT, "lock frustrum area at current point (cull test)" );
@@ -302,6 +305,9 @@ static void GL_InitCommands( void )
 {
 	gEngfuncs.Cvar_RegisterVariable( &r_lighting_ambient );
 	gEngfuncs.Cvar_RegisterVariable( &r_novis );
+#if XASH_PSP
+	gEngfuncs.Cvar_RegisterVariable( &r_drawworld );
+#endif
 	gEngfuncs.Cvar_RegisterVariable( &r_nocull );
 	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
 	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );

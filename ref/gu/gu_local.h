@@ -750,6 +750,9 @@ extern convar_t	r_lighting_ambient;
 extern convar_t	r_studio_lambert;
 extern convar_t	r_detailtextures;
 extern convar_t	r_novis;
+#if XASH_PSP
+extern convar_t	r_drawworld;
+#endif
 extern convar_t	r_nocull;
 extern convar_t	r_lockpvs;
 extern convar_t	r_lockfrustum;
