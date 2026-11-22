@@ -196,16 +196,56 @@ int R_PushDlights( model_t *model, int framecount )
 
 void R_PushDlightsForBmodel( model_t *model, int framecount, const matrix4x4 object_matrix )
 {
+#if XASH_PSP
+	// the live lights, once a frame: ~17 brush models a frame in a firefight
+	// each compared every light's die time (a software double compare)
+	static int live[MAX_DLIGHTS], numlive, liveframe = -1;
+	static double livetime;
+
+	if( liveframe != framecount || livetime != gp_cl->time )
+	{
+		numlive = 0;
+		for( int i = 0; i < MAX_DLIGHTS; i++ )
+		{
+			if( gp_dlights[i].radius && gp_dlights[i].die >= gp_cl->time )
+				live[numlive++] = i;
+		}
+		liveframe = framecount;
+		livetime = gp_cl->time;
+	}
+
+	for( int k = 0; k < numlive; k++ )
+	{
+		const int i = live[k];
+		dlight_t *l = &gp_dlights[i];
+#else
 	for( int i = 0; i < MAX_DLIGHTS; i++ )
 	{
 		dlight_t *l = &gp_dlights[i];
 
 		if( !l->radius || l->die < gp_cl->time )
 			continue;
+#endif
 
 		vec3_t oldorigin = Vec3( l->origin );
 
 		Matrix4x4_VectorITransform( object_matrix, oldorigin, l->origin );
+#if XASH_PSP
+		// a light that can't reach the model's box marks none of its surfaces
+		// (R_MarkLights walks all of its nodes for that, ~0.5 us a light and model);
+		// a lightmap reaches up to a sample past its surface
+		const float reach = l->radius + 32.0f;
+		float d2 = 0.0f;
+
+		for( int j = 0; j < 3; j++ )
+		{
+			const float d = l->origin[j] < model->mins[j] ? model->mins[j] - l->origin[j]
+				: l->origin[j] > model->maxs[j] ? l->origin[j] - model->maxs[j] : 0.0f;
+			d2 += d * d;
+		}
+
+		if( d2 < reach * reach )
+#endif
 		R_MarkLights( l, 1 << i, model->nodes + model->hulls[0].firstclipnode, model, framecount );
 
 		VectorCopy( oldorigin, l->origin );
