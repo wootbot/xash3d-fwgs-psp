@@ -55,8 +55,28 @@ static float	g_DecalClipVerts2[MAX_DECALCLIPVERT][VERTEXSIZE];
 decal_t	gDecalPool[MAX_RENDER_DECALS];
 static int	gDecalCount;
 
+#if XASH_PSP
+/*
+the decals of shots and blood, on top of the map's own (permanent) ones: each
+is drawn every frame it can be seen, and a firefight leaves hundreds. fight1:
+4096 (r_decals) -> 100 was ~0.35 ms a frame. Its own cvar, r_decals is in
+every config already
+*/
+static CVAR_DEFINE_AUTO( r_decals_max, "100", FCVAR_ARCHIVE, "the most decals shots and blood leave (the map's own come on top)" );
+static int	gDecalPermanent;	// FDECAL_PERMANENT ones in the pool
+static qboolean	gDecalMaxRegistered;
+#endif
+
 void R_ClearDecals( void )
 {
+#if XASH_PSP
+	if( !gDecalMaxRegistered )
+	{
+		gEngfuncs.Cvar_RegisterVariable( &r_decals_max );
+		gDecalMaxRegistered = true;
+	}
+	gDecalPermanent = 0;
+#endif
 	memset( gDecalPool, 0, sizeof( gDecalPool ));
 	gDecalCount = 0;
 }
@@ -106,6 +126,12 @@ static decal_t *R_DecalAlloc( decal_t *pdecal )
 
 	if( r_decals->value < limit )
 		limit = r_decals->value;
+
+#if XASH_PSP
+	// the map's decals are skipped below, they fill the slots first
+	if( gDecalMaxRegistered && r_decals_max.value >= 0.0f && gDecalPermanent + (int)r_decals_max.value < limit )
+		limit = gDecalPermanent + (int)r_decals_max.value;
+#endif
 
 	if( !limit ) return NULL;
 
@@ -584,6 +610,9 @@ static void R_DecalCreate( decalinfo_t *decalinfo, msurface_t *surf, float x, fl
 	decal_t *pdecal = R_DecalAlloc( pold );
 	if( !pdecal ) return; // r_decals == 0 ???
 
+#if XASH_PSP
+	gDecalPermanent += FBitSet( decalinfo->m_Flags, FDECAL_PERMANENT ) - FBitSet( pdecal->flags, FDECAL_PERMANENT );
+#endif
 	pdecal->flags = decalinfo->m_Flags;
 
 	VectorCopy( decalinfo->m_Position, pdecal->position );
