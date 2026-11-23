@@ -200,6 +200,7 @@ void R_StudioCalcBones( int frame, float s, const mstudiobone_t *pbone, const ms
 #if XASH_PSP
 qboolean PSP_StudioCalcBoneAngles( int frame, float s, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, vec3_t pos, float *ang, vec4_t q );
 void PSP_StudioAnglesToQuaternions( const float (*ang)[4], vec4_t *q, int n );
+void PSP_StudioBoneValues( int frame, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, float *v1, float *v2 );
 #endif
 int BoxOnPlaneSide( const vec3_t emins, const vec3_t emaxs, const mplane_t *p );
 

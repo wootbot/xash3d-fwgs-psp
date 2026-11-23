@@ -657,7 +657,7 @@ generic version reads each one bytewise through memcpy (UnalignedShort) and
 the stack. The animation data is 2 byte aligned in practice; a bone whose
 isn't goes the generic way.
 */
-static void PSP_StudioBoneValues( int frame, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, float *v1, float *v2 )
+void PSP_StudioBoneValues( int frame, const mstudiobone_t *pbone, const mstudioanim_t *panim, const float *adj, float *v1, float *v2 )
 {
 	if( (uintptr_t)panim & 1 )
 	{

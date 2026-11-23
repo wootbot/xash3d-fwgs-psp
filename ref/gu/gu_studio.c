@@ -158,7 +158,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
+static convar_t r_studio_me, r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
 #endif
 
 void R_StudioInit( void )
@@ -181,6 +181,7 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_propcache );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_proplist );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_geplan );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_me );
 #endif
 #endif
 
@@ -990,6 +991,489 @@ static inline void R_StudioConcat( matrix3x4 out, const matrix3x4 in1, const mat
 		R_StudioConcatVFPU( r_vfpu_concat, out, in1, in2 );
 	else Matrix3x4_ConcatTransforms( out, in1, in2 );
 }
+
+/*
+====================
+bones on the Media Engine
+
+The ME (engine/platform/psp/me_psp.c) computes the bones of the animated
+models to draw while the main CPU draws the world: R_StudioMeBonesBegin
+gathers what R_StudioSetupBones will need (frames, blend weights, controller
+adjustments, the transform, the animation data) and queues one job for all
+of them. R_StudioSetupBones takes a model's result only if what it sees
+matches what was gathered (R_StudioMeBonesKey), else it computes the bones
+here as before. Players (gait), followers, the view model, small props and
+the random render effects stay here.
+
+The ME has no VFPU: its versions of the bone math are plain float code, with
+their own sine and cosine. It reads the job and the models' data and writes
+only r_mebones.out (each model's in whole cache lines) and the progress
+count, so the main CPU can take a model's bones as soon as they're done.
+====================
+*/
+static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "compute the bones of animated studio models on the Media Engine" );
+
+#define MEBONES_MAXENTS	32
+#define MEBONES_POOL	1024	// bones in the output pool
+
+typedef struct
+{
+	const studiohdr_t	*hdr;
+	double		time;
+	int		interpolate, sequence, prevsequence, renderfx;
+	float		frame, animtime, framerate, prevanimtime, sequencetime, prevframe;
+	byte		controller[4], prevcontroller[4], blending[2], prevblending[2], prevseqblending[2], mouthopen, pad;
+	matrix3x4		rotation;
+} mebones_key_t;
+
+typedef struct
+{
+	const mstudioanim_t	*panim;	// of the first blend
+	const mstudioseqdesc_t	*pseqdesc;
+	float		f;
+	float		s[2];	// blend weights: [0] blends 1-2 and 3-4, [1] between the pairs
+} mebones_seq_t;
+
+typedef struct
+{
+	mebones_key_t	key;
+	const cl_entity_t	*e;
+	float		prevframe;	// what R_StudioSetupBones stores in latched.prevframe, if blendprev is off
+
+	// for the ME
+	const studiohdr_t	*hdr;
+	mebones_seq_t	seq[2];	// the sequence, and the previous one to blend from
+	int		blendprev;
+	float		sprev;
+	float		adj[MAXSTUDIOCONTROLLERS];
+	matrix3x4		rotation;
+	matrix3x4		*out;
+} mebones_ent_t;
+
+typedef struct
+{
+	int		count;
+	mebones_ent_t	*ents;
+	volatile uint32_t	*progress;	// uncached: models done
+} mebones_job_t;
+
+static struct
+{
+	mebones_ent_t	ents[MEBONES_MAXENTS];
+	mebones_job_t	job;
+	uint32_t		ticket;
+	qboolean		local;	// the job ran on this CPU: the results are in its cache
+	int		count;	// valid for this frame's draw
+	uint32_t		hits, misses;
+} r_mebones;
+
+// written by the ME only, read by the main CPU after the progress count says so
+static matrix3x4 r_mebones_out[MEBONES_POOL] __attribute__(( aligned( 64 )));
+static volatile uint32_t r_mebones_progress[16] __attribute__(( aligned( 64 )));
+
+// ME scratch: the rotations of the sequence, its blends, the previous sequence
+static struct
+{
+	vec3_t	pos[5][MAXSTUDIOBONES];
+	vec4_t	q[5][MAXSTUDIOBONES];
+} r_mebones_tmp __attribute__(( aligned( 64 )));
+
+// engine/platform/psp/me_psp.c: the renderer is linked into the engine
+qboolean PSP_MeStart( void );
+uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );
+void PSP_MeWaitFor( uint32_t ticket );
+qboolean PSP_MeDone( uint32_t ticket );
+void PSP_MeFlushDcache( void );
+
+/*
+sine and cosine of x in float, ~1e-7 off: x reduced to [-pi/4, pi/4] around
+a multiple of pi/2 (in two parts), then the minimax polynomials of Cephes' sinf and cosf
+*/
+static void R_MeSinCos( float x, float *s, float *c )
+{
+	const float t = x * ( 2.0f / M_PI_F );
+	const int k = (int)( t >= 0.0f ? t + 0.5f : t - 0.5f );
+	const float r = ( x - (float)k * 1.5703125f ) - (float)k * 4.8382679489659e-4f;
+	const float r2 = r * r;
+	const float sn = r + r * r2 * ( -1.6666654611e-1f + r2 * ( 8.3321608736e-3f + r2 * -1.9515295891e-4f ));
+	const float cs = 1.0f - 0.5f * r2 + r2 * r2 * ( 4.166664568298827e-2f + r2 * ( -1.388731625493765e-3f + r2 * 2.443315711809948e-5f ));
+
+	switch( k & 3 )
+	{
+	case 0: *s = sn; *c = cs; break;
+	case 1: *s = cs; *c = -sn; break;
+	case 2: *s = -sn; *c = -cs; break;
+	default: *s = -cs; *c = sn; break;
+	}
+}
+
+// AngleQuaternion( angles, q, true )
+static void R_MeAngleQuaternion( const float *angles, vec4_t q )
+{
+	float sr, cr, sp, cp, sy, cy;
+
+	R_MeSinCos( angles[0] * 0.5f, &sr, &cr );
+	R_MeSinCos( angles[1] * 0.5f, &sp, &cp );
+	R_MeSinCos( angles[2] * 0.5f, &sy, &cy );
+
+	q[0] = sr * cp * cy - cr * sp * sy;
+	q[1] = cr * sp * cy + sr * cp * sy;
+	q[2] = cr * cp * sy - sr * sp * cy;
+	q[3] = cr * cp * cy + sr * sp * sy;
+}
+
+// QuaternionSlerp: q aligned with p, then a lerp below ~1 degree apart
+static void R_MeQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt )
+{
+	float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
+	float cosom = p[0] * q0 + p[1] * q1 + p[2] * q2 + p[3] * q3;
+	float sclp, sclq;
+
+	if( cosom < 0.0f )
+	{
+		q0 = -q0; q1 = -q1; q2 = -q2; q3 = -q3;
+		cosom = -cosom;
+	}
+
+	if( cosom < 0.99985f )
+	{
+		const float omega = acosf( cosom );
+		float sinom, c, sa, sb;
+
+		R_MeSinCos( omega, &sinom, &c );
+		R_MeSinCos(( 1.0f - t ) * omega, &sa, &c );
+		R_MeSinCos( t * omega, &sb, &c );
+		sclp = sa / sinom;
+		sclq = sb / sinom;
+	}
+	else
+	{
+		sclp = 1.0f - t;
+		sclq = t;
+	}
+
+	qt[0] = sclp * p[0] + sclq * q0;
+	qt[1] = sclp * p[1] + sclq * q1;
+	qt[2] = sclp * p[2] + sclq * q2;
+	qt[3] = sclp * p[3] + sclq * q3;
+}
+
+static void R_MeSlerpBones( int numbones, vec4_t q1[], float pos1[][3], const vec4_t q2[], const float pos2[][3], float s )
+{
+	s = bound( 0.0f, s, 1.0f );
+
+	for( int i = 0; i < numbones; i++ )
+	{
+		R_MeQuaternionSlerp( q1[i], q2[i], s, q1[i] );
+		VectorLerp( pos1[i], s, pos2[i], pos1[i] );
+	}
+}
+
+// R_StudioCalcRotations with the controller adjustments given
+static void R_MeCalcRotations( const studiohdr_t *hdr, float pos[][3], vec4_t *q, const mstudioseqdesc_t *pseqdesc, const mstudioanim_t *panim, float f, const float *adj )
+{
+	const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+
+	if( f > pseqdesc->numframes - 1 )
+		f = 0.0f;
+	else if( f < -0.01f )
+		f = -0.01f;
+
+	const int frame = (int)f;
+	const float s = f - frame;
+
+	for( int i = 0; i < hdr->numbones; i++, pbone++, panim++ )
+	{
+		float v1[6], v2[6];
+
+		PSP_StudioBoneValues( frame, pbone, panim, adj, v1, v2 );
+
+		if( !VectorCompare( v1, v2 ))
+			VectorLerp( v1, s, v2, pos[i] );
+		else VectorCopy( v1, pos[i] );
+
+		// as PSP_StudioCalcBoneAngles: neighbouring keyframes interpolate as angles
+		const float d0 = v2[3] - v1[3], d1 = v2[4] - v1[4], d2 = v2[5] - v1[5];
+		if( fabsf( d0 ) < 0.25f && fabsf( d1 ) < 0.25f && fabsf( d2 ) < 0.25f )
+		{
+			const vec3_t a = { v1[3] + s * d0, v1[4] + s * d1, v1[5] + s * d2 };
+			R_MeAngleQuaternion( a, q[i] );
+		}
+		else
+		{
+			vec4_t qa, qb;
+			R_MeAngleQuaternion( &v1[3], qa );
+			R_MeAngleQuaternion( &v2[3], qb );
+			R_MeQuaternionSlerp( qa, qb, s, q[i] );
+		}
+	}
+
+	if( pseqdesc->motiontype & STUDIO_X ) pos[pseqdesc->motionbone][0] = 0.0f;
+	if( pseqdesc->motiontype & STUDIO_Y ) pos[pseqdesc->motionbone][1] = 0.0f;
+	if( pseqdesc->motiontype & STUDIO_Z ) pos[pseqdesc->motionbone][2] = 0.0f;
+}
+
+// a sequence with its blends, into pos/q[dst], as R_StudioSetupBones; scratch 1-3
+static void R_MeSequence( const mebones_ent_t *m, const mebones_seq_t *seq, int dst, const float *adj )
+{
+	const studiohdr_t *hdr = m->hdr;
+	const int nb = hdr->numbones;
+	const mstudioanim_t *panim = seq->panim;
+	vec3_t *pos = r_mebones_tmp.pos[dst];
+	vec4_t *q = r_mebones_tmp.q[dst];
+
+	R_MeCalcRotations( hdr, pos, q, seq->pseqdesc, panim, seq->f, adj );
+
+	if( seq->pseqdesc->numblends > 1 )
+	{
+		panim += nb;
+		R_MeCalcRotations( hdr, r_mebones_tmp.pos[1], r_mebones_tmp.q[1], seq->pseqdesc, panim, seq->f, adj );
+		R_MeSlerpBones( nb, q, pos, r_mebones_tmp.q[1], r_mebones_tmp.pos[1], seq->s[0] );
+
+		if( seq->pseqdesc->numblends == 4 )
+		{
+			panim += nb;
+			R_MeCalcRotations( hdr, r_mebones_tmp.pos[2], r_mebones_tmp.q[2], seq->pseqdesc, panim, seq->f, adj );
+			panim += nb;
+			R_MeCalcRotations( hdr, r_mebones_tmp.pos[3], r_mebones_tmp.q[3], seq->pseqdesc, panim, seq->f, adj );
+			R_MeSlerpBones( nb, r_mebones_tmp.q[2], r_mebones_tmp.pos[2], r_mebones_tmp.q[3], r_mebones_tmp.pos[3], seq->s[0] );
+			R_MeSlerpBones( nb, q, pos, r_mebones_tmp.q[2], r_mebones_tmp.pos[2], seq->s[1] );
+		}
+	}
+}
+
+static void R_MeBonesModel( const mebones_ent_t *m )
+{
+	const studiohdr_t *hdr = m->hdr;
+	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+	const int nb = hdr->numbones;
+
+	R_MeSequence( m, &m->seq[0], 0, m->adj );
+
+	if( m->blendprev )
+	{
+		R_MeSequence( m, &m->seq[1], 4, m->adj );
+		R_MeSlerpBones( nb, r_mebones_tmp.q[0], r_mebones_tmp.pos[0], r_mebones_tmp.q[4], r_mebones_tmp.pos[4], m->sprev );
+	}
+
+	for( int i = 0; i < nb; i++ )
+	{
+		matrix3x4 bonematrix;
+		const int parent = pbones[i].parent;
+
+		R_StudioBoneMatrix( bonematrix, r_mebones_tmp.q[0][i], r_mebones_tmp.pos[0][i] );
+		Matrix3x4_ConcatTransforms( m->out[i], parent == -1 ? m->rotation : m->out[parent], bonematrix );
+	}
+}
+
+static void R_MeBonesJob( void *arg )
+{
+	mebones_job_t *job = arg;
+
+	for( int i = 0; i < job->count; i++ )
+	{
+		R_MeBonesModel( &job->ents[i] );
+		PSP_MeFlushDcache();
+		*job->progress = i + 1;
+	}
+}
+
+// what R_StudioSetupBones depends on, besides the animation data
+static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e )
+{
+	memset( k, 0, sizeof( *k ));
+	k->hdr = m_pStudioHeader;
+	k->time = g_studio.time;
+	k->interpolate = g_studio.interpolate;
+	k->sequence = e->curstate.sequence;
+	k->prevsequence = e->latched.prevsequence;
+	k->renderfx = e->curstate.renderfx;
+	k->frame = e->curstate.frame;
+	k->animtime = e->curstate.animtime;
+	k->framerate = e->curstate.framerate;
+	k->prevanimtime = e->latched.prevanimtime;
+	k->sequencetime = e->latched.sequencetime;
+	// only the blend from the previous sequence reads it (the first use of the bones sets it)
+	if( g_studio.interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > g_studio.time ) && ( e->latched.prevsequence < m_pStudioHeader->numseq ))
+		k->prevframe = e->latched.prevframe;
+	memcpy( k->controller, e->curstate.controller, 4 );
+	memcpy( k->prevcontroller, e->latched.prevcontroller, 4 );
+	memcpy( k->blending, e->curstate.blending, 2 );
+	memcpy( k->prevblending, e->latched.prevblending, 2 );
+	memcpy( k->prevseqblending, e->latched.prevseqblending, 2 );
+	k->mouthopen = e->mouth.mouthopen;
+	Matrix3x4_Copy( k->rotation, g_studio.rotationmatrix );
+}
+
+// R_StudioSetupBones up to the math, for the ME
+static void R_StudioMeBonesAdd( cl_entity_t *e, int *used )
+{
+	model_t *mod = e->model;
+
+	if( r_mebones.count >= MEBONES_MAXENTS || !mod || mod->type != mod_studio || e->player || e == tr.viewent )
+		return;
+	if( e->curstate.movetype == MOVETYPE_FOLLOW || e->curstate.renderfx == kRenderFxDeadPlayer || e->curstate.renderfx == kRenderFxDistort
+		|| e->curstate.renderfx == kRenderFxHologram || e->curstate.renderfx == kRenderFxExplode )
+		return;
+
+	studiohdr_t *hdr = (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, mod );
+
+	// props of 1 or 2 bones are cheap, or kept (R_StudioPropCache)
+	if( !hdr || hdr->numbones <= 2 || hdr->numbones > MAXSTUDIOBONES || e->curstate.sequence < 0 || e->curstate.sequence >= hdr->numseq )
+		return;
+
+	// whole cache lines: 4 matrices are 3
+	const int nb4 = ( hdr->numbones + 3 ) & ~3;
+	if( *used + nb4 > MEBONES_POOL )
+		return;
+
+	mebones_ent_t *m = &r_mebones.ents[r_mebones.count];
+
+	m_pStudioHeader = hdr;
+	R_StudioSetUpTransform( e );
+	R_StudioMeBonesKey( &m->key, e );
+
+	m->e = e;
+	m->hdr = hdr;
+	Matrix3x4_Copy( m->rotation, g_studio.rotationmatrix );
+	m->out = &r_mebones_out[*used];
+
+	mstudioseqdesc_t *pseqdesc = (mstudioseqdesc_t *)((byte *)hdr + hdr->seqindex) + e->curstate.sequence;
+	const float f = R_StudioEstimateFrame( e, pseqdesc, g_studio.time );
+	const float dadt = R_StudioEstimateInterpolant( e );
+
+	R_StudioCalcBoneAdj( dadt, m->adj, e->curstate.controller, e->latched.prevcontroller, e->mouth.mouthopen );
+
+	m->seq[0].pseqdesc = pseqdesc;
+	m->seq[0].panim = gEngfuncs.R_StudioGetAnim( hdr, mod, pseqdesc );
+	m->seq[0].f = f;
+	m->seq[0].s[0] = (e->curstate.blending[0] * dadt + e->latched.prevblending[0] * (1.0f - dadt)) / 255.0f;
+	m->seq[0].s[1] = (e->curstate.blending[1] * dadt + e->latched.prevblending[1] * (1.0f - dadt)) / 255.0f;
+
+	m->blendprev = g_studio.interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > g_studio.time ) && ( e->latched.prevsequence < hdr->numseq );
+	if( m->blendprev )
+	{
+		pseqdesc = (mstudioseqdesc_t *)((byte *)hdr + hdr->seqindex) + e->latched.prevsequence;
+		m->seq[1].pseqdesc = pseqdesc;
+		m->seq[1].panim = gEngfuncs.R_StudioGetAnim( hdr, mod, pseqdesc );
+		m->seq[1].f = e->latched.prevframe;
+		m->seq[1].s[0] = (e->latched.prevseqblending[0]) / 255.0f;
+		m->seq[1].s[1] = (e->latched.prevseqblending[1]) / 255.0f;
+		m->sprev = 1.0f - ( g_studio.time - e->latched.sequencetime ) / 0.2f;
+	}
+	else m->prevframe = f;
+
+	if( !m->seq[0].panim || ( m->blendprev && !m->seq[1].panim ))
+		return;
+
+	*used += nb4;
+	r_mebones.count++;
+}
+
+/*
+====================
+R_StudioMeBonesBegin
+
+before the world is drawn: the bones of the animated models in the draw lists
+that aren't culled start on the ME
+====================
+*/
+void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, const byte *solid_culled, cl_entity_t **trans, int ntrans, const byte *trans_culled )
+{
+	// the last job still reads ents and writes the pool
+	PSP_MeWaitFor( r_mebones.ticket );
+	r_mebones.ticket = 0;
+	r_mebones.count = 0;
+
+	if( !r_studio_me.value || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || !PSP_MeStart( ))
+		return;
+
+	cl_entity_t *saveent = RI.currententity;
+	model_t *savemodel = RI.currentmodel;
+	studiohdr_t *savehdr = m_pStudioHeader;
+	int used = 0;
+
+	R_StudioSetupTimings();
+
+	for( int i = 0; i < nsolid; i++ )
+	{
+		if( !solid_culled[i] )
+			R_StudioMeBonesAdd( solid[i], &used );
+	}
+
+	for( int i = 0; i < ntrans; i++ )
+	{
+		if( !trans_culled[i] )
+			R_StudioMeBonesAdd( trans[i], &used );
+	}
+
+	RI.currententity = saveent;
+	RI.currentmodel = savemodel;
+	m_pStudioHeader = savehdr;
+
+	if( !r_mebones.count )
+		return;
+
+	r_mebones.job.count = r_mebones.count;
+	r_mebones.job.ents = r_mebones.ents;
+	r_mebones.job.progress = (volatile uint32_t *)( 0x40000000 | (uintptr_t)r_mebones_progress );
+	*r_mebones.job.progress = 0;
+
+	r_mebones.ticket = PSP_MeRun( R_MeBonesJob, &r_mebones.job );
+	r_mebones.local = !r_mebones.ticket;
+}
+
+// the bones of e from the ME, if they were computed from what R_StudioSetupBones sees now
+static qboolean R_StudioMeBonesUse( cl_entity_t *e )
+{
+	int i;
+
+	for( i = 0; i < r_mebones.count; i++ )
+	{
+		if( r_mebones.ents[i].e == e )
+			break;
+	}
+
+	if( i >= r_mebones.count )
+		return false;
+
+	const mebones_ent_t *m = &r_mebones.ents[i];
+	mebones_key_t key;
+
+	R_StudioMeBonesKey( &key, e );
+	if( memcmp( &key, &m->key, sizeof( key )))
+	{
+		r_mebones.misses++;
+		return false;
+	}
+
+	const volatile uint32_t *progress = r_mebones.job.progress;
+	if( *progress <= (uint32_t)i )
+	{
+		for( uint n = 0; *progress <= (uint32_t)i && !PSP_MeDone( r_mebones.ticket ); n++ )
+		{
+			if( n > 1000000 )
+				PSP_MeWaitFor( r_mebones.ticket ); // the ME's timeout
+		}
+
+		if( *progress <= (uint32_t)i ) // the ME was given up on
+			return false;
+	}
+
+	const int nb = m_pStudioHeader->numbones;
+	const size_t size = nb * sizeof( matrix3x4 );
+
+	if( !r_mebones.local )
+		sceKernelDcacheInvalidateRange( m->out, (( nb + 3 ) & ~3 ) * sizeof( matrix3x4 ));
+	memcpy( g_studio.bonestransform, m->out, size );
+	memcpy( g_studio.lighttransform, m->out, size );
+
+	if( !m->blendprev )
+		e->latched.prevframe = m->prevframe;
+
+	r_mebones.hits++;
+	return true;
+}
 #endif
 
 static void R_StudioSetupBones( cl_entity_t *e )
@@ -1005,6 +1489,12 @@ static void R_StudioSetupBones( cl_entity_t *e )
 
 	if( e->curstate.sequence >= m_pStudioHeader->numseq )
 		e->curstate.sequence = 0;
+
+#if XASH_PSP
+	// computed on the ME before the world was drawn
+	if( !m_pPlayerInfo && R_StudioMeBonesUse( e ))
+		return;
+#endif
 
 	mstudioseqdesc_t *pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex) + e->curstate.sequence;
 	float f = R_StudioEstimateFrame( e, pseqdesc, g_studio.time );

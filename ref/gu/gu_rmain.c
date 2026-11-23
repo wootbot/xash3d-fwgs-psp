@@ -843,6 +843,27 @@ static void R_DrawStaticBrushGroup( cl_entity_t **list, int count, int start, by
 	R_DrawStaticBrushModels( ents, n );
 }
 
+static byte solid_culled[MAX_VISIBLE_PACKET], trans_culled[MAX_VISIBLE_PACKET];
+
+/*
+=============
+R_PrepareEntities
+
+before the world: studio models off screen, all in a row, then the bones of
+the others start on the Media Engine while the world is drawn
+=============
+*/
+static void R_PrepareEntities( void )
+{
+	if( FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
+		return;
+
+	R_StudioPreCullList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled );
+	R_StudioPreCullList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
+	R_StudioMeBonesBegin( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled,
+		tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
+}
+
 /*
 =============
 R_DrawEntitiesOnList
@@ -850,20 +871,12 @@ R_DrawEntitiesOnList
 */
 static void R_DrawEntitiesOnList( void )
 {
-	static byte solid_culled[MAX_VISIBLE_PACKET], trans_culled[MAX_VISIBLE_PACKET];
 	static byte solid_grouped[MAX_VISIBLE_PACKET], trans_grouped[MAX_VISIBLE_PACKET];
 
 	memset( solid_grouped, 0, tr.draw_list->num_solid_entities );
 	memset( trans_grouped, 0, tr.draw_list->num_trans_entities );
 
 	tr.blend = 1.0f;
-
-	// studio models off screen, all in a row
-	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
-	{
-		R_StudioPreCullList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled );
-		R_StudioPreCullList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
-	}
 
 	// first draw solid entities
 	for( int i = 0; i < tr.draw_list->num_solid_entities && !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ); i++ )
@@ -1044,6 +1057,7 @@ void R_RenderScene( void )
 	R_DrawFog ();
 
 	R_CheckGLFog();
+	R_PrepareEntities();
 #if XASH_PSP
 	if( r_drawworld.value )
 #endif
