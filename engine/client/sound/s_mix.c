@@ -19,6 +19,35 @@ GNU General Public License for more details.
 
 static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAINTBUFFER_SIZE+1)];
 
+#if XASH_PSP
+// the sample and the volumes in locals: through the pointers the compiler had to
+// load them again after every store into pbuf (it may alias them).
+// 8 bit mono: both products from one multiply, s * ( vl + vr * 65536 ): with
+// |s| <= 128 and volumes <= 255 the left one fits the low 16 bits, signed
+#define S_MIX8_PACKED( pb, s, vp ) \
+	do { const int _p = (s) * (vp); const int _l = (int16_t)_p; ( pb ).left += _l; ( pb ).right += ( _p - _l ) >> 16; } while( 0 )
+
+#define S_MakeMixMono( x ) \
+	static void S_MixMono ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, int num_samples ) \
+	{ \
+		const int##x##_t *data = buf; \
+		const int vl = volume[0], vr = volume[1]; \
+		if( x == 8 ) \
+		{ \
+			const int vp = vl + ( vr << 16 ); \
+			for( int i = 0; i < num_samples; i++ ) \
+				S_MIX8_PACKED( pbuf[i], data[i], vp ); \
+			return; \
+		} \
+		for( int i = 0; i < num_samples; i++ ) \
+		{ \
+			const int s = data[i]; \
+			pbuf[i].left  += ( s * vl ) >> ( x - 8 ); \
+			pbuf[i].right += ( s * vr ) >> ( x - 8 ); \
+		} \
+	} \
+
+#else
 #define S_MakeMixMono( x ) \
 	static void S_MixMono ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, int num_samples ) \
 	{ \
@@ -29,6 +58,8 @@ static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAIN
 			pbuf[i].right += ( data[i] * volume[1] ) >> ( x - 8 ); \
 		} \
 	} \
+
+#endif
 
 #define S_MakeMixStereo( x ) \
 	static void S_MixStereo ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, int num_samples ) \
@@ -64,11 +95,23 @@ typedef struct { uint i; uint32_t f; } s_fixstep_t;
 	static void S_MixMonoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, uint32_t offset_frac, s_fixstep_t rate_scale, int num_samples ) \
 	{ \
 		const int##x##_t *data = buf; \
+		const int vl = volume[0], vr = volume[1]; \
 		S_FIXED_STEP( offset_frac, rate_scale ); \
+		if( x == 8 ) \
+		{ \
+			const int vp = vl + ( vr << 16 ); \
+			for( int i = 0; i < num_samples; i++ ) \
+			{ \
+				S_MIX8_PACKED( pbuf[i], data[sample_idx], vp ); \
+				S_FIXED_ADVANCE( 0 ); \
+			} \
+			return; \
+		} \
 		for( int i = 0; i < num_samples; i++ ) \
 		{ \
-			pbuf[i].left  += ( data[sample_idx] * volume[0] ) >> ( x - 8 ); \
-			pbuf[i].right += ( data[sample_idx] * volume[1] ) >> ( x - 8 ); \
+			const int s = data[sample_idx]; \
+			pbuf[i].left  += ( s * vl ) >> ( x - 8 ); \
+			pbuf[i].right += ( s * vr ) >> ( x - 8 ); \
 			S_FIXED_ADVANCE( 0 ); \
 		} \
 	} \
@@ -77,11 +120,12 @@ typedef struct { uint i; uint32_t f; } s_fixstep_t;
 	static void S_MixStereoPitch ## x( portable_samplepair_t *pbuf, const int *volume, const void *buf, uint32_t offset_frac, s_fixstep_t rate_scale, int num_samples ) \
 	{ \
 		const int##x##_t *data = buf; \
+		const int vl = volume[0], vr = volume[1]; \
 		S_FIXED_STEP( offset_frac, rate_scale ); \
 		for( int i = 0; i < num_samples; i++ ) \
 		{ \
-			pbuf[i].left  += ( data[sample_idx+0] * volume[0] ) >> ( x - 8 ); \
-			pbuf[i].right += ( data[sample_idx+1] * volume[1] ) >> ( x - 8 ); \
+			pbuf[i].left  += ( data[sample_idx+0] * vl ) >> ( x - 8 ); \
+			pbuf[i].right += ( data[sample_idx+1] * vr ) >> ( x - 8 ); \
 			S_FIXED_ADVANCE( 1 ); \
 		} \
 	} \
