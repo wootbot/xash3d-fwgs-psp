@@ -603,6 +603,7 @@ void GU_WorldSurfDlit( const msurface_t *surf );
 void GU_WorldSurfsNewFrame( void );
 void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled );
 void R_StudioPreCullEnd( void );
+void R_StudioDrawBatched( cl_entity_t **list, int count, byte *culled );
 void GU_ClipLoadFrustum( const mplane_t *plane ); // Experimental
 int GU_ClipIsRequired( gu_vert_t *uv, int uvc );
 void GU_Clip( gu_vert_t *uv, int uvc, gu_vert_t **cv, int *cvc );

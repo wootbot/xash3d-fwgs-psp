@@ -158,7 +158,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_batch;
 #endif
 
 void R_StudioInit( void )
@@ -172,6 +172,7 @@ void R_StudioInit( void )
 	Matrix3x4_LoadIdentity( g_studio.rotationmatrix );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_precull );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_batch );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge_elights );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_atlas );
 #if XASH_PSP
@@ -5884,6 +5885,192 @@ static int R_StudioDrawModel( int flags )
 
 	return 1;
 }
+
+#if XASH_PSP
+/*
+=================
+batched studio models
+
+R_StudioDrawModel's work for a whole draw list in two passes: the header,
+transform, bounding box, bones, attachments and events of every model, then
+the light and the GE commands of every model. One model after another, the
+~20 KB of code a model runs didn't fit the 16 KB instruction cache: each
+model fetched most of it again (a small function called twice in a row was
+~4x cheaper the second time). The bones wait in a pool between the passes.
+Players, followers and the bone effects take the old way.
+=================
+*/
+static CVAR_DEFINE_AUTO( r_studio_batch, "1", FCVAR_ARCHIVE, "draw the solid studio models in two passes over the list (faster)" );
+
+#define SB_MAXMODELS	128
+#define SB_MAXBONES	512
+
+typedef struct
+{
+	cl_entity_t	*e;
+	studiohdr_t	*hdr;
+	propcache_t	*prop;
+	qboolean		prop_hit;
+	int		firstbone;
+	matrix3x4		rotation;
+} studiobatch_t;
+
+static studiobatch_t	sb_models[SB_MAXMODELS];
+static matrix3x4		sb_bones[SB_MAXBONES];
+
+static qboolean R_StudioBatchAllowed( const cl_entity_t *e )
+{
+	if( !e->model || e->model->type != mod_studio || e->player || e == tr.viewent )
+		return false;
+
+	if( e->curstate.movetype == MOVETYPE_FOLLOW )
+		return false;
+
+	switch( e->curstate.renderfx )
+	{
+	case kRenderFxDeadPlayer:
+	case kRenderFxDistort:
+	case kRenderFxHologram:
+	case kRenderFxExplode:
+		return false;
+	}
+	return true;
+}
+
+/*
+=================
+R_StudioDrawBatched
+
+the solid list after R_StudioPreCullList: draws the models it can and marks
+them in culled for the solid loop to skip
+=================
+*/
+void R_StudioDrawBatched( cl_entity_t **list, int count, byte *culled )
+{
+	int num = 0, numbones = 0;
+
+	if( !r_studio_batch.value || !r_studio_builtin_renderer.value || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
+		return;
+
+	R_StudioSetupTimings();
+
+	// header, transform, box, bones, attachments, events
+	for( int i = 0; i < count && num < SB_MAXMODELS; i++ )
+	{
+		cl_entity_t *e = list[i];
+
+		if( culled[i] || !R_StudioBatchAllowed( e ))
+			continue;
+
+		// see R_DrawStudioModel_
+		if( extGuListUsed() > guRender.context_list_size - 128 * 1024 )
+			break;
+
+		RI.currententity = e;
+		RI.currentmodel = e->model;
+
+		studiohdr_t *hdr = (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, RI.currentmodel );
+		R_StudioSetHeader( hdr );
+		if( !m_pStudioHeader )
+			continue;
+
+		// R_StudioDrawModel from here on
+		if( m_pStudioHeader->numbones > SB_MAXBONES - numbones )
+			break;
+
+		R_StudioSetUpTransform( e );
+
+		culled[i] = true;
+
+		if( !R_StudioCheckBBox( ))
+			continue;
+
+		r_stats.c_studio_models_drawn++;
+
+		if( m_pStudioHeader->numbodyparts == 0 )
+			continue;
+
+		studiobatch_t *b = &sb_models[num++];
+		b->e = e;
+		b->hdr = hdr;
+		b->prop = R_StudioPropCache( e, &b->prop_hit );
+		b->firstbone = numbones;
+		Matrix3x4_Copy( b->rotation, g_studio.rotationmatrix );
+
+		if( b->prop_hit )
+		{
+			// for the attachments
+			R_StudioPropRestore( b->prop );
+			R_StudioSaveBones();
+			R_StudioCalcAttachments( );
+		}
+		else
+		{
+			R_StudioSetupBones( e );
+			R_StudioSaveBones();
+			R_StudioCalcAttachments( );
+			R_StudioClientEvents( );
+
+			memcpy( &sb_bones[numbones], g_studio.bonestransform, m_pStudioHeader->numbones * sizeof( matrix3x4 ));
+			numbones += m_pStudioHeader->numbones;
+		}
+
+		if( e->index > 0 )
+		{
+			cl_entity_t *ent = CL_GetEntityByIndex( e->index );
+			memcpy( ent->attachment, e->attachment, sizeof( vec3_t ) * 4 );
+		}
+	}
+
+	// light and GE commands
+	for( int i = 0; i < num; i++ )
+	{
+		studiobatch_t *b = &sb_models[i];
+		cl_entity_t *e = b->e;
+
+		if( extGuListUsed() > guRender.context_list_size - 128 * 1024 )
+			break;
+
+		RI.currententity = e;
+		RI.currentmodel = e->model;
+		R_StudioSetHeader( b->hdr );
+		Matrix3x4_Copy( g_studio.rotationmatrix, b->rotation );
+		g_studio.framecount++; // render data cache cookie
+
+		if( b->prop_hit )
+		{
+			R_StudioPropRestore( b->prop );
+		}
+		else
+		{
+			alight_t lighting;
+			vec3_t dir;
+			const size_t size = m_pStudioHeader->numbones * sizeof( matrix3x4 );
+
+			memcpy( g_studio.bonestransform, &sb_bones[b->firstbone], size );
+			memcpy( g_studio.lighttransform, &sb_bones[b->firstbone], size );
+
+			lighting.plightvec = dir;
+			R_EntityDynamicLight( e, &lighting, true, g_studio.time, g_studio.lightspot, g_studio.lightvec );
+			R_StudioEntityLight( &lighting );
+			R_StudioSetupLighting( &lighting );
+		}
+
+		g_nTopColor = e->curstate.colormap & 0xFF;
+		g_nBottomColor = ( e->curstate.colormap & 0xFF00 ) >> 8;
+		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+
+		if( b->prop && !b->prop_hit )
+			R_StudioPropStore( b->prop, e );
+
+		R_StudioRenderModel();
+
+		// it stayed still since the last frame: draw it from recorded commands next time
+		if( b->prop_hit )
+			R_StudioPropRecord( b->prop, e );
+	}
+}
+#endif
 
 /*
 =================
