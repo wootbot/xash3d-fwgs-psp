@@ -985,3 +985,9 @@ music), launched from the XMB.
   code runs on the ME, Sony's ME codecs (sceMp3/sceAudiocodec) can't be used: MP3 music and
   Opus voice would be software decoders as ME jobs. The VME (reconfigurable DSP beside the ME,
   loaded by Sony's firmware) is undocumented. Next ME candidate: bone setup (~1.3 ms in fight1).
+- 2026-11-22 (night, 4): sound back to 22 kHz with the ME mixing (`dfb3ccf2`, 66.4 -> 65.7: the
+  main CPU's DSP, gain and transfer doubled), then those on the ME too (`df6a341f`, 65.65 ->
+  65.95): the ME job adds the main CPU's raw/sentence buffers, runs the room DSP loops (their
+  state and delay lines cache line aligned, their own random seed; presets and allocation stay
+  on the main CPU), the gain and the clipping; the main CPU copies 16 bit samples to the DMA
+  buffer. Left on the main CPU for sound: spatialization and the per-channel bookkeeping.
