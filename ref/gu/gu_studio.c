@@ -5380,6 +5380,74 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 	return 1;
 }
 
+#if XASH_PSP
+/*
+===============
+R_StudioViewModelBones
+
+the view model's bones are set up twice a frame, for its events
+(R_RunViewmodelEvents) and to draw it, from the same state: the second
+time they are copied from the first (25 bones, ~100 us)
+===============
+*/
+static struct
+{
+	qboolean		valid;
+	const studiohdr_t	*hdr;
+	matrix3x4		rotation;
+	double		time;
+	float		frame, animtime, framerate, sequencetime, prevframe;
+	int		sequence, prevsequence;
+	byte		controller[4], blending[2];
+	matrix3x4		bones[MAXSTUDIOBONES];
+} r_vmbones;
+
+static qboolean R_StudioViewModelBonesMatch( const cl_entity_t *e )
+{
+	return r_vmbones.valid && r_vmbones.hdr == m_pStudioHeader && r_vmbones.time == g_studio.time
+		&& r_vmbones.frame == e->curstate.frame && r_vmbones.animtime == e->curstate.animtime
+		&& r_vmbones.framerate == e->curstate.framerate && r_vmbones.sequence == e->curstate.sequence
+		&& r_vmbones.prevsequence == e->latched.prevsequence && r_vmbones.sequencetime == e->latched.sequencetime
+		&& r_vmbones.prevframe == e->latched.prevframe
+		&& !memcmp( r_vmbones.controller, e->curstate.controller, sizeof( r_vmbones.controller ))
+		&& !memcmp( r_vmbones.blending, e->curstate.blending, sizeof( r_vmbones.blending ))
+		&& !memcmp( r_vmbones.rotation, g_studio.rotationmatrix, sizeof( r_vmbones.rotation ));
+}
+
+static void R_StudioViewModelBones( cl_entity_t *e )
+{
+	const size_t size = m_pStudioHeader->numbones * sizeof( matrix3x4 );
+
+	if( R_StudioViewModelBonesMatch( e ))
+	{
+		memcpy( g_studio.bonestransform, r_vmbones.bones, size );
+		memcpy( g_studio.lighttransform, r_vmbones.bones, size );
+		return;
+	}
+
+	R_StudioSetupBones( e );
+
+	// with these effects the light transforms differ
+	r_vmbones.valid = e->curstate.renderfx != kRenderFxDistort && e->curstate.renderfx != kRenderFxHologram && e->curstate.renderfx != kRenderFxExplode;
+	if( !r_vmbones.valid )
+		return;
+
+	r_vmbones.hdr = m_pStudioHeader;
+	r_vmbones.time = g_studio.time;
+	r_vmbones.frame = e->curstate.frame;
+	r_vmbones.animtime = e->curstate.animtime;
+	r_vmbones.framerate = e->curstate.framerate;
+	r_vmbones.sequence = e->curstate.sequence;
+	r_vmbones.prevsequence = e->latched.prevsequence;
+	r_vmbones.sequencetime = e->latched.sequencetime;
+	r_vmbones.prevframe = e->latched.prevframe; // as R_StudioSetupBones left it
+	memcpy( r_vmbones.controller, e->curstate.controller, sizeof( r_vmbones.controller ));
+	memcpy( r_vmbones.blending, e->curstate.blending, sizeof( r_vmbones.blending ));
+	Matrix3x4_Copy( r_vmbones.rotation, g_studio.rotationmatrix );
+	memcpy( r_vmbones.bones, g_studio.bonestransform, size );
+}
+#endif
+
 /*
 ===============
 R_StudioDrawModel
@@ -5942,6 +6010,10 @@ static int R_StudioDrawModel( int flags )
 
 	if( RI.currententity->curstate.movetype == MOVETYPE_FOLLOW )
 		R_StudioMergeBones( RI.currententity, RI.currentmodel );
+#if XASH_PSP
+	else if( RI.currententity == tr.viewent )
+		R_StudioViewModelBones( RI.currententity );
+#endif
 	else R_StudioSetupBones( RI.currententity );
 
 	R_StudioSaveBones();
