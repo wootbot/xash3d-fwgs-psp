@@ -991,3 +991,11 @@ music), launched from the XMB.
   state and delay lines cache line aligned, their own random seed; presets and allocation stay
   on the main CPU), the gain and the clipping; the main CPU copies 16 bit samples to the DMA
   buffer. Left on the main CPU for sound: spatialization and the per-channel bookkeeping.
+- 2026-11-23: ME jobs queue (`5331f815`, tickets, the mixer waits for its own) and studio bones
+  on the ME (`9458e2db`, 65.8 -> 67.9 fps): before the world is drawn the main CPU gathers each
+  unculled animated model's frames, blend weights, controller adjustments and transform, one ME
+  job computes all their bones with plain float math (no VFPU there), and R_StudioSetupBones
+  takes them if a key of the entity state, time and transform still matches. fight1: ~9 models
+  a frame posted, ~7 used, no misses, no waits; within 0.08 units of the VFPU results.
+  `r_studio_me 0` turns it off. Writeback-only instead of writeback-invalidate before a job:
+  no difference, kept the invalidate (the mixer's DSP state is read back by the main CPU).
