@@ -973,3 +973,15 @@ music), launched from the XMB.
   how every prop keeps its bones and light); temp entity collision traces (landed ones
   don't trace anyway). hgrunt has 2 blend sequences only for crouched shooting; player.mdl
   has 52, with ~70% of the bones identical in both blends (an exact saving for players).
+- 2026-11-22 (night, 3): delta entities read only the sent fields over a copy of the old state
+  (`0bb78023`, 65.95 -> 66.15). `#pragma GCC optimize( "Os" )` on gu_studio.c (icache): no
+  change. **Media Engine** (`7889528f`): the second CPU (same clock, no VFPU, no syscalls,
+  caches not coherent with the main CPU) runs engine code from main RAM, started from kernel
+  mode via kuKernelCall with a reset handler at 0xbfc00000 (mcidclan's me-minimal-handler).
+  Empty job round trip 15 us; as fast as the main CPU; ME polling its control block flat out
+  (~600k uncached reads/s) cost the main CPU ~1.5 fps, one read per ~10 us costs nothing. The
+  mixer's sample loops run there a frame behind (fight1 66.15 -> 66.35, and all channels mixed
+  again: the 16 cap only applies without the ME; `s_mixme 0` mixes on the main CPU). While our
+  code runs on the ME, Sony's ME codecs (sceMp3/sceAudiocodec) can't be used: MP3 music and
+  Opus voice would be software decoders as ME jobs. The VME (reconfigurable DSP beside the ME,
+  loaded by Sony's firmware) is undocumented. Next ME candidate: bone setup (~1.3 ms in fight1).
