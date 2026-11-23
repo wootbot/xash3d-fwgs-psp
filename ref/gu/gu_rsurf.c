@@ -936,6 +936,11 @@ static uint16_t		ws_textures[WS_TEXTURE + 1];	// the textures with a chain
 static int		ws_numtextures;
 static uint16_t		ws_lmhead[MAX_LIGHTMAPS];
 
+// the textures R_WorldSurfSlow chained surfaces to, for R_DrawTextureChains
+#define WS_MAX_SLOWTEXTURES	32
+static texture_t		*ws_slowtextures[WS_MAX_SLOWTEXTURES];
+static int		ws_numslowtextures = -1;	// -1: look at all of them
+
 #define WS_MAX_DLIT	1024
 static uint16_t		ws_dlit[WS_MAX_DLIT];
 static int		ws_numdlit;
@@ -1669,8 +1674,21 @@ static void R_WorldSurfSlow( int i )
 	}
 	else
 	{
-		surf->texturechain = surf->texinfo->texture->texturechain;
-		surf->texinfo->texture->texturechain = surf;
+		texture_t *t = surf->texinfo->texture;
+		int k = 0;
+
+		while( k < ws_numslowtextures && ws_slowtextures[k] != t )
+			k++;
+
+		if( k == ws_numslowtextures )
+		{
+			if( k < WS_MAX_SLOWTEXTURES )
+				ws_slowtextures[ws_numslowtextures++] = t;
+			else ws_numslowtextures = -1;
+		}
+
+		surf->texturechain = t->texturechain;
+		t->texturechain = surf;
 	}
 }
 
@@ -1849,9 +1867,11 @@ typedef struct
 	// the ME's own
 	struct
 	{
-		uint16_t		surf, texnext, lmnext, pad;
+		const gu_vert_t	*verts;	// not read from the surface again: they are far apart
+		uint16_t		texnext, lmnext;
+		byte		numverts, pad[3];
 	} vis[MEWORLD_MAXVIS];
-	uint16_t		texhead[WS_TEXTURE + 1], textures[WS_TEXTURE + 1];
+	uint16_t		texhead[WS_TEXTURE + 1], textail[WS_TEXTURE + 1], textures[WS_TEXTURE + 1];
 	uint16_t		lmhead[MAX_LIGHTMAPS];
 	uint32_t		cmds[MEWORLD_CMDS] __attribute__(( aligned( 64 )));
 } meworld_out_t;
@@ -1991,11 +2011,17 @@ static void R_MeSurf( meworld_job_t *job, int i, const gu_wsurf_t *w, uint left 
 	const int n = job->numvis++;
 	const int tex = w->texflags & WS_TEXTURE;
 
-	out->vis[n].surf = i;
+	out->vis[n].verts = w->verts;
+	out->vis[n].numverts = w->numverts;
+	// the nearest first: what they hide fails the depth test
 	if( out->texhead[tex] == WS_NONE )
+	{
 		out->textures[job->numtextures++] = tex;
-	out->vis[n].texnext = out->texhead[tex];
-	out->texhead[tex] = n;
+		out->texhead[tex] = n;
+	}
+	else out->vis[out->textail[tex]].texnext = n;
+	out->vis[n].texnext = WS_NONE;
+	out->textail[tex] = n;
 	out->vis[n].lmnext = out->lmhead[w->lightmap];
 	out->lmhead[w->lightmap] = n;
 }
@@ -2224,9 +2250,7 @@ static void R_MeCommands( meworld_job_t *job )
 
 		for( int n = out->texhead[tex]; n != WS_NONE; n = out->vis[n].texnext )
 		{
-			const gu_wsurf_t *w = &ws_surfs[out->vis[n].surf];
-
-			if( !R_MeDrawVerts( job, w->verts, w->numverts ))
+			if( !R_MeDrawVerts( job, out->vis[n].verts, out->vis[n].numverts ))
 				return;
 		}
 	}
@@ -2244,9 +2268,7 @@ static void R_MeCommands( meworld_job_t *job )
 
 		for( int n = out->lmhead[i]; n != WS_NONE; n = out->vis[n].lmnext )
 		{
-			const gu_wsurf_t *w = &ws_surfs[out->vis[n].surf];
-
-			if( !R_MeDrawVerts( job, w->verts + w->numverts, w->numverts ))
+			if( !R_MeDrawVerts( job, out->vis[n].verts + out->vis[n].numverts, out->vis[n].numverts ))
 				return;
 		}
 	}
@@ -2265,7 +2287,7 @@ static void R_MeResultBegin( meworld_job_t *job, int result )
 	res->numslow = res->numclip = res->numleafs = 0;
 	res->leafs = res->skyseen = 0;
 	res->texlist = res->lmlist = 0;
-	memset( out->texhead, 0xff, sizeof( out->texhead ));
+	memset( out->texhead, 0xff, WORLDMODEL->numtextures * sizeof( out->texhead[0] ));
 	memset( out->lmhead, 0xff, sizeof( out->lmhead ));
 }
 
@@ -2577,6 +2599,7 @@ static qboolean R_MeWorldEnd( void )
 		gEngfuncs.R_StoreEfrags( &pleaf->efrags, tr.realframecount );
 	}
 
+	ws_numslowtextures = 0;
 	for( int i = 0; i < numslow; i++ )
 		R_WorldSurfSlow( res->slow[i] );
 
@@ -3067,7 +3090,7 @@ static void R_BlendLightmaps( void )
 #endif
 
 	// render dynamic lightmaps
-	if( r_dynamic->value )
+	if( r_dynamic->value && gl_lms.dynamic_surfaces )
 	{
 		LM_InitBlock();
 
@@ -3377,6 +3400,34 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
 	R_RenderLightmapForSurface( fa );
 }
 
+static void R_DrawTextureChain( int i )
+{
+	texture_t *t = WORLDMODEL->textures[i];
+	if( !t )
+		return;
+
+	msurface_t *s = t->texturechain;
+
+	if( !s || ( i == tr.skytexturenum ))
+		return;
+
+	if(( s->flags & SURF_DRAWTURB ) && gp_movevars->wateralpha < 1.0f )
+	{
+		R_AddToSeparatePass( &draw_wateralpha, i );
+		return;	// draw translucent water later
+	}
+
+	if( FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) && FBitSet( s->flags, SURF_TRANSPARENT ))
+	{
+		R_AddToSeparatePass( &draw_alpha_surfaces, i );
+		return;	// draw transparent surfaces later
+	}
+
+	for( ; s != NULL; s = s->texturechain )
+		R_RenderBrushPoly( s, CULL_VISIBLE );
+	t->texturechain = NULL;
+}
+
 /*
 ================
 R_DrawTextureChains
@@ -3412,32 +3463,27 @@ static void R_DrawTextureChains( void )
 		skychain = NULL;
 	}
 
-	for( int i = 0; i < WORLDMODEL->numtextures; i++ )
+#if XASH_PSP
+	if( ws_numslowtextures >= 0 )
 	{
-		texture_t *t = WORLDMODEL->textures[i];
-		if( !t ) continue;
-
-		msurface_t *s = t->texturechain;
-
-		if( !s || ( i == tr.skytexturenum ))
-			continue;
-
-		if(( s->flags & SURF_DRAWTURB ) && gp_movevars->wateralpha < 1.0f )
+		// each texture is a cache miss, ~100 of them a frame
+		for( int k = 0; k < ws_numslowtextures; k++ )
 		{
-			R_AddToSeparatePass( &draw_wateralpha, i );
-			continue;	// draw translucent water later
+			for( int i = 0; i < WORLDMODEL->numtextures; i++ )
+			{
+				if( WORLDMODEL->textures[i] == ws_slowtextures[k] )
+				{
+					R_DrawTextureChain( i );
+					break;
+				}
+			}
 		}
-
-		if( FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) && FBitSet( s->flags, SURF_TRANSPARENT ))
-		{
-			R_AddToSeparatePass( &draw_alpha_surfaces, i );
-			continue;	// draw transparent surfaces later
-		}
-
-		for( ; s != NULL; s = s->texturechain )
-			R_RenderBrushPoly( s, CULL_VISIBLE );
-		t->texturechain = NULL;
+		ws_numslowtextures = -1;
 	}
+	else
+#endif
+	for( int i = 0; i < WORLDMODEL->numtextures; i++ )
+		R_DrawTextureChain( i );
 
 #if XASH_PSP
 	R_MeCallList( &r_meworld.texlist );
@@ -4324,8 +4370,11 @@ void R_DrawWorld( void )
 
 	VectorCopy( RI.cullorigin, tr.modelorg );
 	memset( gl_lms.lightmap_surfaces, 0, sizeof( gl_lms.lightmap_surfaces ));
-	memset( fullbright_surfaces, 0, sizeof( fullbright_surfaces ));
-	memset( detail_surfaces, 0, sizeof( detail_surfaces ));
+	// their passes empty them (they're 12 KB, most of the data cache)
+	if( R_SeparatePassActive( &draw_fullbrights ))
+		memset( fullbright_surfaces, 0, sizeof( fullbright_surfaces ));
+	if( R_SeparatePassActive( &draw_details ))
+		memset( detail_surfaces, 0, sizeof( detail_surfaces ));
 
 	gl_lms.dynamic_surfaces = NULL;
 	sceGuDisable( GU_ALPHA_TEST );
@@ -4608,6 +4657,12 @@ void GL_BuildLightmaps( void )
 
 	memset( tr.lightmapTextures, 0, sizeof( tr.lightmapTextures ));
 	memset( &RI, 0, sizeof( RI ));
+
+	if( guRender.lightmap_vram )
+	{
+		vfree( guRender.lightmap_vram );
+		guRender.lightmap_vram = NULL;
+	}
 
 	// GU lightmaps are always 128x128 (BLOCK_SIZE_MAX)
 	tr.block_size = BLOCK_SIZE_DEFAULT;

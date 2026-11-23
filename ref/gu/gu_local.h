@@ -677,6 +677,7 @@ typedef struct
 	void		*draw_buffer;
 	void		*disp_buffer;
 	void		*depth_buffer;
+	void		*lightmap_vram;	// kept free for GL_BuildLightmaps
 	void		*context_list;
 	size_t		context_list_size;
 	byte		*vert_vram;	// per-frame vertex memory in VRAM (uncached alias)

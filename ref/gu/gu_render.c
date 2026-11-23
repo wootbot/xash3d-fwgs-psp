@@ -106,11 +106,15 @@ static qboolean GU_Init( void )
 
 	// per-frame vertices and lighting ramps: CPU writes to VRAM are cheaper than to
 	// RAM while the GE reads its display list from RAM
-	guRender.vert_vram_size = 512 * 1024;
+	guRender.vert_vram_size = 64 * 1024;
 	guRender.vert_vram = valloc( guRender.vert_vram_size );
 	if( guRender.vert_vram )
 		guRender.vert_vram = (byte *)((uint)guRender.vert_vram | 0x40000000 );
 	else guRender.vert_vram_size = 0;
+
+	// the first map's lightmaps, before its textures and models fill the VRAM: the
+	// lightmap pass covers the screen. Later maps reuse the old ones' memory
+	guRender.lightmap_vram = valloc( 320 * 1024 );
 
 	// Initialise the GU.
 	sceGuInit();
