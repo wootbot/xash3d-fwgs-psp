@@ -424,13 +424,15 @@ CVAR_DEFINE_AUTO( s_mixchannels, "16", FCVAR_ARCHIVE, "without the Media Engine,
 static qboolean s_mix_dry;
 
 /*
-the sample loops of the normal channels run on the Media Engine (me_psp.c):
-the main CPU does all of the bookkeeping and records what S_MixAudio would
-do, the ME mixes that into a buffer of its own during the next frame, and the
-next paint adds it to the room buffer before the DSP and the transfer into
-the DMA buffer. That is a frame later, well inside the mixahead. The ME reads
-sample data and writes only s_me.room, cache line aligned; sounds aren't freed
-while it runs (S_PaintSync)
+the sample loops run on the Media Engine (me_psp.c): the main CPU does all of
+the bookkeeping, records what S_MixAudio would do for the normal channels and
+mixes the rest (raw streams, sentences) itself. During the next frame the ME
+mixes the recorded channels, adds the main CPU's room and paint buffers, runs
+the room DSP and the gain and clips it into 16 bit samples, which the next
+paint copies into the DMA buffer. That is a frame later, well inside the
+mixahead. The ME reads sample data and the main CPU's buffers and writes only
+s_me and the DSP state (sx_me, cache line aligned); sounds aren't freed while it
+runs (S_PaintSync)
 */
 CVAR_DEFINE_AUTO( s_mixme, "1", 0, "mix sounds on the Media Engine" );
 
@@ -455,12 +457,19 @@ typedef struct
 	int			num_samples;
 	const s_mixop_t		*ops;
 	portable_samplepair_t	*out;
+	const portable_samplepair_t	*room_in;	// the main CPU's part
+	const portable_samplepair_t	*paint_in;
+	int			room_channels;
+	int			gain;
+	qboolean		dsp;
+	short			*out16;
 } s_mejob_t;
 
 static struct
 {
 	s_mixop_t		ops[S_ME_MAXOPS] __attribute__(( aligned( 64 )));
-	portable_samplepair_t	room[PAINTBUFFER_SIZE + 8] __attribute__(( aligned( 64 ))); // ME output, whole cache lines
+	portable_samplepair_t	room[PAINTBUFFER_SIZE + 8] __attribute__(( aligned( 64 ))); // whole cache lines
+	short			out16[PAINTBUFFER_SIZE * 2] __attribute__(( aligned( 64 ))); // the ME's output
 	s_mejob_t		job __attribute__(( aligned( 64 )));
 	byte			pad[64] __attribute__(( aligned( 64 ))); // nothing else in job's line
 } s_me __attribute__(( aligned( 64 )));
@@ -473,9 +482,6 @@ static struct
 {
 	qboolean	active;
 	int		start, end;
-	int		room_channels;
-	int		gain;
-	qboolean	dsp;
 } s_me_pending;
 
 static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, s_pitch_t pitch, int offset, int timecompress )
@@ -1004,19 +1010,65 @@ void S_ClearBuffers( int num_samples )
 }
 
 #if XASH_PSP
-// on the ME, without syscalls
+// on the ME, without syscalls: the rest of S_PaintChunk
 static void S_MeMixJob( void *arg )
 {
 	const s_mejob_t *job = arg;
+	portable_samplepair_t *out = job->out;
+	const int n = job->num_samples;
 
-	memset( job->out, 0, ( job->num_samples + 1 ) * sizeof( portable_samplepair_t ));
+	memcpy( out, job->room_in, n * sizeof( portable_samplepair_t ));
 
 	for( int i = 0; i < job->num_ops; i++ )
 	{
 		const s_mixop_t *op = &job->ops[i];
 
-		S_MixAudio( job->out + op->offset, op->pvol, op->audio, op->channels, op->width, op->frac, op->step, op->count, op->lerp );
+		S_MixAudio( out + op->offset, op->pvol, op->audio, op->channels, op->width, op->frac, op->step, op->count, op->lerp );
 	}
+
+	if( job->dsp )
+		SX_RoomFXProcess( out, n );
+
+	if( job->room_channels > 0 || job->dsp )
+	{
+		const int gain = job->gain;
+
+		for( int i = 0; i < n; i++ )
+		{
+			out[i].left = job->paint_in[i].left + (( out[i].left * gain ) >> 8 );
+			out[i].right = job->paint_in[i].right + (( out[i].right * gain ) >> 8 );
+		}
+	}
+	else memcpy( out, job->paint_in, n * sizeof( portable_samplepair_t ));
+
+	for( int i = 0; i < n; i++ )
+	{
+		job->out16[i * 2 + 0] = CLIP16( out[i].left );
+		job->out16[i * 2 + 1] = CLIP16( out[i].right );
+	}
+}
+
+// the ME's samples into the DMA buffer
+static void S_TransferSamples16( const short *src, int starttime, int endtime )
+{
+	const int sampleMask = ((snd.samples >> 1) - 1);
+
+	SNDDMA_BeginPainting ();
+
+	while( starttime < endtime )
+	{
+		const int lpos = starttime & sampleMask;
+		int count = (snd.samples >> 1) - lpos;
+
+		if( starttime + count > endtime )
+			count = endtime - starttime;
+
+		memcpy( (short *)snd.buffer + ( lpos << 1 ), src, count * 2 * sizeof( short ));
+		src += count * 2;
+		starttime += count;
+	}
+
+	SNDDMA_Submit();
 }
 #endif
 
@@ -1054,9 +1106,8 @@ static void S_PaintFinish( void )
 
 	s_me_pending.active = false;
 	PSP_MeWait();
-	sceKernelDcacheInvalidateRange( s_me.room, sizeof( s_me.room ));
-	S_MixBufferWithGain( roombuffer, s_me.room, s_me_pending.end - s_me_pending.start, 256 );
-	S_PaintChunk( s_me_pending.start, s_me_pending.end, s_me_pending.room_channels, s_me_pending.gain, s_me_pending.dsp );
+	sceKernelDcacheInvalidateRange( s_me.out16, sizeof( s_me.out16 ));
+	S_TransferSamples16( s_me.out16, s_me_pending.start, s_me_pending.end );
 }
 
 void S_PaintDiscard( void )
@@ -1094,20 +1145,23 @@ void S_PaintChannels( int endtime )
 		room_channels += S_MixRawChannels( end );
 
 #if XASH_PSP
-		if( s_me_numops > 0 )
+		if( s_mixme.value && PSP_MeStart( ))
 		{
 			s_me.job.num_ops = s_me_numops;
 			s_me.job.num_samples = num_samples;
 			s_me.job.ops = s_me.ops;
 			s_me.job.out = s_me.room;
+			s_me.job.room_in = roombuffer;
+			s_me.job.paint_in = paintbuffer;
+			s_me.job.room_channels = room_channels;
+			s_me.job.gain = gain;
+			s_me.job.dsp = cls.key_dest != key_menu && SX_RoomFXPrepare();
+			s_me.job.out16 = s_me.out16;
 			PSP_MeRun( S_MeMixJob, &s_me.job );
 
 			s_me_pending.active = true;
 			s_me_pending.start = snd.paintedtime;
 			s_me_pending.end = end;
-			s_me_pending.room_channels = room_channels;
-			s_me_pending.gain = gain;
-			s_me_pending.dsp = cls.key_dest != key_menu;
 			snd.paintedtime = end;
 
 			// more to paint now: this chunk can't wait

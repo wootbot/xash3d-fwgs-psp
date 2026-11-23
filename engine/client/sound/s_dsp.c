@@ -16,6 +16,9 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "client.h"
+#if XASH_PSP
+#include <malloc.h>
+#endif
 #include "sound.h"
 
 #define MAX_ROOM_TYPES   ARRAYSIZE( rgsxpre )
@@ -177,6 +180,46 @@ static int			idsp_dma_speed;
 int			idsp_room;
 static int			room_typeprev;
 
+#if XASH_PSP
+/*
+the sample loops (SX_RoomFXProcess) run on the Media Engine (s_mix.c): what they
+write is in cache lines of its own, and they draw random numbers from a seed of
+their own (COM_RandomLong's isn't the ME's to write)
+*/
+static struct
+{
+	int		sxamodl, sxamodr;
+	int		sxamodlt, sxamodrt;
+	int		sxmod1cur, sxmod2cur;
+	dly_t		monodly;
+	dly_t		reverbdly[2];
+	dly_t		stereodly;
+	int		rgsxlp[MAXLP];
+	uint32_t	seed;
+} sx_me __attribute__(( aligned( 64 )));
+
+#define sxamodl		sx_me.sxamodl
+#define sxamodr		sx_me.sxamodr
+#define sxamodlt	sx_me.sxamodlt
+#define sxamodrt	sx_me.sxamodrt
+#define sxmod1cur	sx_me.sxmod1cur
+#define sxmod2cur	sx_me.sxmod2cur
+#define monodly		sx_me.monodly
+#define reverbdly	sx_me.reverbdly
+#define stereodly	sx_me.stereodly
+#define rgsxlp		sx_me.rgsxlp
+
+static int SX_RandomLong( int lo, int hi )
+{
+	sx_me.seed = sx_me.seed * 1664525u + 1013904223u;
+	return lo + (int)(( sx_me.seed >> 8 ) % (uint32_t)( hi - lo + 1 ));
+}
+#undef COM_RandomLong
+#define COM_RandomLong SX_RandomLong
+
+static int			sxmod1, sxmod2;
+static int			sxhires;
+#else
 // routines
 static int			sxamodl, sxamodr;      // amplitude modulation values
 static int			sxamodlt, sxamodrt;    // modulation targets
@@ -189,6 +232,7 @@ static dly_t reverbdly[2];
 static dly_t stereodly;
 
 static int			rgsxlp[MAXLP];
+#endif
 
 static void SX_Profiling_f( void );
 
@@ -268,7 +312,11 @@ static void DLY_Free( dly_t *dly )
 {
 	if( dly->lpdelayline )
 	{
+#if XASH_PSP
+		free( dly->lpdelayline );
+#else
 		Mem_Free( dly->lpdelayline );
+#endif
 		dly->lpdelayline = NULL;
 	}
 }
@@ -303,7 +351,19 @@ static void DLY_Init( dly_t *cur, float delay )
 	DLY_Free( cur ); // free dly if it's allocated
 
 	cur->cdelaysamplesmax = ((int)(delay * idsp_dma_speed) << sxhires) + 1;
+#if XASH_PSP
+	{
+		// whole cache lines: the Media Engine writes them
+		const size_t size = ( cur->cdelaysamplesmax * sizeof( int ) + 63 ) & ~63;
+
+		cur->lpdelayline = (int *)memalign( 64, size );
+		if( !cur->lpdelayline )
+			Sys_Error( "%s: out of memory\n", __func__ );
+		memset( cur->lpdelayline, 0, size );
+	}
+#else
 	cur->lpdelayline = (int *)Mem_Calloc( sndpool, cur->cdelaysamplesmax * sizeof( int ));
+#endif
 	cur->xfade = 0;
 
 	// init modulation
@@ -869,6 +929,32 @@ void SX_RoomFX( portable_samplepair_t *paint, int num_samples )
 	DLY_DoDelay( paint, num_samples );
 	DLY_DoStereoDelay( paint, num_samples );
 }
+
+#if XASH_PSP
+/*
+SX_RoomFX in two: the settings on the main CPU, then the sample loops, which
+only write sx_me and the delay lines (the Media Engine runs them)
+*/
+qboolean SX_RoomFXPrepare( void )
+{
+	if( room_off.value )
+		return false;
+
+	SX_CheckPresets();
+	return true;
+}
+
+void SX_RoomFXProcess( portable_samplepair_t *paint, int num_samples )
+{
+	if( !num_samples )
+		return;
+
+	RVB_DoAMod( paint, num_samples );
+	RVB_DoReverb( paint, num_samples );
+	DLY_DoDelay( paint, num_samples );
+	DLY_DoStereoDelay( paint, num_samples );
+}
+#endif
 
 /*
 ===========

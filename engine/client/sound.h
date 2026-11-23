@@ -85,6 +85,8 @@ void S_ClearBuffers( int num_samples );
 #if XASH_PSP
 void S_PaintSync( void );
 void S_PaintDiscard( void );
+qboolean SX_RoomFXPrepare( void );
+void SX_RoomFXProcess( portable_samplepair_t *paint, int num_samples );
 #endif
 void S_PaintChannels( int endtime );
 
