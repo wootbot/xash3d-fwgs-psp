@@ -355,6 +355,57 @@ static inline uint S_FixedLastRead( uint32_t frac, s_fixstep_t step, uint n )
 }
 
 /*
+chan->sample, a double, to 32.32 fixed point and back from its bits: the
+casts and the double math were ~9 software calls, ~10 us a channel and
+mix. Back to a double the bits past 53 are cut, not rounded (from 2^21
+samples on, ~3 minutes into a sound)
+*/
+static void S_DoubleToFixed( double d, uint32_t *pos, uint32_t *frac )
+{
+	uint64_t b, f;
+
+	memcpy( &b, &d, sizeof( b ));
+
+	// zero, negative or NaN: the start
+	if( (int64_t)b <= 0 || ( b >> 52 ) >= 0x7ff )
+	{
+		*pos = *frac = 0;
+		return;
+	}
+
+	const int e = (int)( b >> 52 ) - 1023; // d = m * 2^( e - 52 )
+	const uint64_t m = ( b & (( 1ull << 52 ) - 1 )) | ( 1ull << 52 );
+	const int shift = e - 20; // the fixed point value is m * 2^( e - 20 )
+
+	if( e >= 32 )
+		f = ~0ull;
+	else if( shift >= 0 )
+		f = m << shift;
+	else if( shift > -64 )
+		f = m >> -shift;
+	else f = 0;
+
+	*pos = (uint32_t)( f >> 32 );
+	*frac = (uint32_t)f;
+}
+
+static double S_FixedToDouble( uint32_t pos, uint32_t frac )
+{
+	const uint64_t f = ((uint64_t)pos << 32 ) | frac;
+	double d;
+
+	if( !f )
+		return 0.0;
+
+	const int lz = pos ? __builtin_clz( pos ) : 32 + __builtin_clz( frac );
+	const uint64_t m = ( f << lz ) >> 11; // 53 bits, the top one implicit
+	const uint64_t b = ((uint64_t)( 63 - lz - 32 + 1023 ) << 52 ) | ( m & (( 1ull << 52 ) - 1 ));
+
+	memcpy( &d, &b, sizeof( d ));
+	return d;
+}
+
+/*
 the same as the generic version below, but the source position is stepped in 32.32
 fixed point: with no double precision FPU, its double math cost ~30 us per channel
 and paint call (~60 software calls), a third of all mixing in a firefight.
@@ -404,8 +455,8 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 	if( num_samples <= 0 )
 		return 0;
 
-	uint32_t pos = (uint32_t)chan->sample;
-	uint32_t frac = (uint32_t)(( chan->sample - (double)pos ) * 4294967296.0 );
+	uint32_t pos, frac;
+	S_DoubleToFixed( chan->sample, &pos, &frac );
 
 	// linear interpolation needs one sample of lookahead beyond the last read position
 	const int lookahead = s_lerping.value ? 1 : 0;
@@ -463,7 +514,7 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 		num_samples -= out_count;
 	}
 
-	chan->sample = (double)pos + (double)frac * ( 1.0 / 4294967296.0 );
+	chan->sample = S_FixedToDouble( pos, frac );
 
 	// samples couldn't be retrieved, mark as finished
 	if( num_samples > 0 )
