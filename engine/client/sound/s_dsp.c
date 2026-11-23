@@ -150,7 +150,7 @@ static CVAR_DEFINE_AUTO( room_type, "0",  0, "current room type preset" );
 
 static CVAR_DEFINE( roomwater_type, "waterroom_type", "14", 0, "water room type" );
 #if XASH_PSP
-#define DEFAULT_HIRES "0" // SOUND_DMA_SPEED is 11k
+#define DEFAULT_HIRES "1" // SOUND_DMA_SPEED is 22k
 #else
 #define DEFAULT_HIRES "2"
 #endif

@@ -15,7 +15,7 @@ GNU General Public License for more details.
 
 /*
 A thread copies the engine's DMA buffer into the SRC audio channel, which resamples the engine's
-SOUND_DMA_SPEED (11 kHz) to the hardware rate. sceAudioSRCOutputBlocking waits until the
+SOUND_DMA_SPEED (22 kHz) to the hardware rate. sceAudioSRCOutputBlocking waits until the
 hardware needs the next block, that sets the pace. The semaphore keeps
 the mixer and the thread out of the buffer at the same time.
 */
@@ -27,7 +27,7 @@ the mixer and the thread out of the buffer at the same time.
 #include <pspkernel.h>
 #include "sound.h"
 
-#define PSP_NUM_AUDIO_SAMPLES  256 // per channel, must be multiple of 64 (23 ms at 11 kHz)
+#define PSP_NUM_AUDIO_SAMPLES  512 // per channel, must be multiple of 64 (23 ms at 22 kHz)
 #define PSP_OUTPUT_CHANNELS    2
 #define PSP_OUTPUT_BUFFER_SIZE ( PSP_NUM_AUDIO_SAMPLES * PSP_OUTPUT_CHANNELS )
 

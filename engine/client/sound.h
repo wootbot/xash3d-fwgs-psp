@@ -27,9 +27,9 @@ extern poolhandle_t sndpool;
 #define SOUND_44k       44100 // 44khz sample rate
 
 #if XASH_PSP
-// a quarter of the mixing work, the PSP resamples in hardware: most HL sounds are
-// 11 kHz and mix at the unit rate, the 22 kHz ones lose their top octave
-#define SOUND_DMA_SPEED SOUND_11k // hardware playback rate
+// HL sounds are 22 kHz at most and the PSP resamples in hardware. The Media Engine
+// mixes (s_mix.c); without it 11 kHz was ~0.9 fps faster in a firefight
+#define SOUND_DMA_SPEED SOUND_22k // hardware playback rate
 #else
 #define SOUND_DMA_SPEED SOUND_44k // hardware playback rate
 #endif
