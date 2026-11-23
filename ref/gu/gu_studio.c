@@ -158,7 +158,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_batch;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_batch, r_studio_ge_hwlight;
 #endif
 
 void R_StudioInit( void )
@@ -173,6 +173,7 @@ void R_StudioInit( void )
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_precull );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_batch );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge_hwlight );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_ge_elights );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_atlas );
 #if XASH_PSP
@@ -3894,11 +3895,68 @@ typedef struct geplan_s
 // the body parts of a model drawn from plans share the view matrix and the end state
 static qboolean ge_plan_open;
 
+/*
+GE lighting instead of the light pass: one directional light toward
+-lightvec and the global ambient, from the light ramp's colors where the
+surface is edge on (ambient) and facing the light (ambient + diffuse). The
+lit side is the ramp's; the GE clamps the side away from the light at the
+edge on color, where the ramp went on darkening down to the ambient light.
+Each batch is drawn once instead of twice, and needs no ramp or light block.
+*/
+static CVAR_DEFINE_AUTO( r_studio_ge_hwlight, "1", FCVAR_ARCHIVE, "GE studio models: GE lighting, one pass (faster, the dark side is lighter)" );
+static qboolean ge_hwlight_on;
+
+// R_StudioGERampFill's color at d = dot( normal, lightvec )
+static void R_StudioGELightColor( float d, int rgb[3] )
+{
+	const float base = g_studio.ambientlight + g_studio.shadelight;
+	const float k = g_studio.shadelight * ( 1.0f / SHADE_LAMBERT );
+	const uint16_t *gamma = FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ) ? NULL : tr.lightgammatable;
+	float illum = base;
+
+	d += SHADE_LAMBERT - 1.0f;
+	if( d > 0.0f )
+		illum -= k * d;
+	illum = bound( 0.0f, illum, 255.0f );
+
+	const int b = (int)( illum * 4.0f );
+	const float g = gamma ? gamma[b] : b;
+
+	for( int i = 0; i < 3; i++ )
+		rgb[i] = bound( 0, (int)( g_studio.lightcolor[i] * ( 255.0f / 1023.0f ) * g ), 255 );
+}
+
+static void R_StudioGEHwLight( qboolean flat )
+{
+	int lo[3], hi[3];
+
+	if( flat )
+	{
+		// see R_StudioGEBuildLightBlock_
+		R_StudioGELightColor( 1.0f - 0.8f * SHADE_LAMBERT, lo );
+		VectorCopy( lo, hi );
+	}
+	else
+	{
+		R_StudioGELightColor( 0.0f, lo );
+		R_StudioGELightColor( -1.0f, hi );
+	}
+
+	sceGuAmbient( GUCOLOR4UB( lo[0], lo[1], lo[2], 255 ));
+	sceGuLightColor( 0, GU_DIFFUSE, GUCOLOR4UB( Q_max( hi[0] - lo[0], 0 ), Q_max( hi[1] - lo[1], 0 ), Q_max( hi[2] - lo[2], 0 ), 255 ));
+}
+
 static void R_StudioGEPlanClose( void )
 {
 	if( !ge_plan_open )
 		return;
 	ge_plan_open = false;
+	if( ge_hwlight_on )
+	{
+		sceGuDisable( GU_LIGHTING );
+		sceGuDisable( GU_LIGHT0 );
+		ge_hwlight_on = false;
+	}
 	R_StudioGERestore();
 	R_StudioGEViewMatrix( false );
 	extGuUpdateStall();
@@ -3990,9 +4048,51 @@ static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotextur
 		R_StudioGEViewMatrix( true );
 		ge_plan_open = true;
 	}
-	const uint *ramp = R_StudioGERamp();
 	const uint *skinblock = NULL;
 	ge_slots_valid = 0;
+
+	if( r_studio_ge_hwlight.value )
+	{
+		const ScePspFVector3 dir = { -g_studio.lightvec[0], -g_studio.lightvec[1], -g_studio.lightvec[2] };
+		int flat = -1;
+
+		sceGuLight( 0, GU_DIRECTIONAL, GU_DIFFUSE, &dir );
+		sceGuEnable( GU_LIGHT0 );
+		sceGuEnable( GU_LIGHTING );
+		ge_hwlight_on = true;
+
+		for( int i = 0; i < pl->numitems; i++ )
+		{
+			const geplanitem_t *it = &pl->items[i];
+
+			if( flat != it->flat )
+			{
+				flat = it->flat;
+				R_StudioGEHwLight( flat );
+			}
+
+			// may build the block in the display list: before the commands
+			skinblock = R_StudioGESkinBlock( it->ptex, it->skinindex, it->bindtex );
+			uint *p = R_StudioGECall( extGuCmdBegin(), skinblock );
+
+			for( int k = 0; k < it->numbatches; k++ )
+			{
+				const gebatch_t *b = &it->batches[k];
+
+				p = R_StudioGEBones( p, b, RI.rvp.vieworigin );
+				if( it->chrome )
+					p = R_StudioGEChromeMatrix( p, b, it->ptex );
+				p = R_StudioGECall( p, b->cmds );
+			}
+			extGuCmdEnd( p );
+		}
+
+		ge_last_skinblock = skinblock; // R_StudioGEPlanClose restores
+		r_stats.c_studio_polys += pl->polys;
+		return true;
+	}
+
+	const uint *ramp = R_StudioGERamp();
 
 	for( int i = 0; i < pl->numitems; i++ )
 	{
