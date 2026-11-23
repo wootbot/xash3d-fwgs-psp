@@ -136,6 +136,9 @@ void MSG_WriteDeltaEntity( const struct entity_state_s *from, const struct entit
 qboolean MSG_ReadDeltaEntity( sizebuf_t *msg, const struct entity_state_s *from, struct entity_state_s *to, int num, int type, double timebase );
 int Delta_TestBaseline( const struct entity_state_s *from, const struct entity_state_s *to, qboolean player, double timebase );
 void Delta_ReadGSFields( sizebuf_t *msg, int index, const void *from, void *to, double timebase );
+#if XASH_PSP
+void Delta_ReadGSFieldsOver( sizebuf_t *msg, int index, void *to, double timebase );
+#endif
 void Delta_WriteGSFields( sizebuf_t *msg, int index, const void *from, const void *to, double timebase );
 
 #endif//NET_ENCODE_H

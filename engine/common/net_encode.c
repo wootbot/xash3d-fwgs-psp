@@ -1534,6 +1534,38 @@ void Delta_ReadGSFields( sizebuf_t *msg, int index, const void *from, void *to, 
 	Delta_ParseGSFields( msg, dt, from, to, timebase );
 }
 
+#if XASH_PSP
+/*
+=====================
+Delta_ReadGSFieldsOver
+
+Delta_ReadGSFields into a copy of from: only the fields the message has are
+read, without a Delta_CopyField call for each of the others (~50 of an
+entity_state_t, most of them unchanged)
+=====================
+*/
+void Delta_ReadGSFieldsOver( sizebuf_t *msg, int index, void *to, double timebase )
+{
+	const delta_info_t *dt = Delta_FindStructByIndex( index );
+	uint8_t bits[8] = { 0 };
+	const byte c = MSG_ReadUBitLong( msg, 3 );
+
+	for( int i = 0; i < c; i++ )
+		bits[i] = MSG_ReadByte( msg );
+
+	for( int b = 0; b < c; b++ )
+	{
+		for( uint m = bits[b]; m; m &= m - 1 )
+		{
+			const int i = b * 8 + __builtin_ctz( m );
+
+			if( i < dt->numFields )
+				Delta_ReadField_( msg, &dt->pFields[i], to, timebase );
+		}
+	}
+}
+#endif
+
 void Delta_WriteGSFields( sizebuf_t *msg, int index, const void *from, const void *to, double timebase )
 {
 	delta_info_t *dt = Delta_FindStructByIndex( index );

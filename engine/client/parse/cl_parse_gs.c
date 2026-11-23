@@ -248,7 +248,14 @@ static void CL_DeltaEntityGS( const delta_header_t *hdr, sizebuf_t *msg, frame_t
 	}
 
 	if( has_update )
+#if XASH_PSP
+	{
+		memcpy( to, from, sizeof( entity_state_t ));
+		Delta_ReadGSFieldsOver( msg, CL_GetEntityDelta( hdr, newnum ), to, cl.mtime[0] );
+	}
+#else
 		Delta_ReadGSFields( msg, CL_GetEntityDelta( hdr, newnum ), from, to, cl.mtime[0] );
+#endif
 	else memcpy( to, from, sizeof( entity_state_t ));
 
 	to->entityType = hdr->custom ? ENTITY_BEAM : ENTITY_NORMAL;
