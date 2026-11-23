@@ -218,9 +218,11 @@ void PSP_MeShutdown( void );
 qboolean PSP_MeStart( void );
 qboolean PSP_MeActive( void );
 uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );
+uint32_t PSP_MeRunKeep( void (*func)( void *arg ), void *arg );
 void PSP_MeWaitFor( uint32_t ticket );
 qboolean PSP_MeDone( uint32_t ticket );
-void PSP_MeFlushDcache( void );
+extern void (*psp_entities_hook)( void ); // the renderer's, after CL_EmitEntities
+void PSP_MeWriteback( const void *start, size_t size );
 qboolean PSP_MeBusy( void );
 void PSP_MeWait( void );
 void PSP_DbgConFrame( void );

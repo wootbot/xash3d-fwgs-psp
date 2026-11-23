@@ -69,6 +69,8 @@ typedef struct
 } psp_kcall_args_t;
 int kuKernelCall( void *func_addr, psp_kcall_args_t *args );
 
+void (*psp_entities_hook)( void );	// the renderer's symbols are local to it: it sets this one
+
 static me_ctl_t *me_ctl;		// uncached view
 static void *me_ctl_mem, *me_stack;
 static int me_state;			// 0 not tried, 1 running, -1 failed
@@ -173,17 +175,23 @@ static void __attribute__(( noinline )) PSP_MeMain( me_ctl_t *ctl )
 }
 
 /*
-PSP_MeFlushDcache
+PSP_MeWriteback
 
-for a job on the ME that reports results before it ends: its data cache into
-RAM (the main CPU still has to invalidate the range before reading it). Run
-on the main CPU (the ME wasn't running) it does nothing: the cache
+for a job on the ME that reports results before it ends: the range from its
+data cache into RAM (the main CPU still has to invalidate it before reading
+it). Run on the main CPU (the ME wasn't running) it does nothing: the cache
 instructions are kernel only there
 */
-void PSP_MeFlushDcache( void )
+void PSP_MeWriteback( const void *start, size_t size )
 {
-	if( !me_local )
-		PSP_MeDcacheFlushAll();
+	const uintptr_t end = (uintptr_t)start + size;
+
+	if( me_local )
+		return;
+
+	for( uintptr_t a = (uintptr_t)start & ~63; a < end; a += 64 )
+		__asm__ volatile( "cache 0x1a, 0(%0)" :: "r"( a ) : "memory" ); // D-cache hit writeback
+	__asm__ volatile( "sync" ::: "memory" );
 }
 
 static void PSP_MeRunLocal( psp_mejob_t func, void *arg )
@@ -320,7 +328,7 @@ PSP_MeRun
 queues func( arg ) on the ME and returns its ticket, or runs it here (ticket 0)
 if the ME isn't running
 */
-uint32_t PSP_MeRun( psp_mejob_t func, void *arg )
+static uint32_t PSP_MePost( psp_mejob_t func, void *arg, qboolean invalidate )
 {
 	uint32_t next;
 
@@ -339,12 +347,31 @@ uint32_t PSP_MeRun( psp_mejob_t func, void *arg )
 		return 0;
 	}
 
-	sceKernelDcacheWritebackInvalidateAll();
+	if( invalidate )
+		sceKernelDcacheWritebackInvalidateAll();
+	else sceKernelDcacheWritebackAll();
 	me_ctl->queue[next % ME_QUEUE].func = func;
 	me_ctl->queue[next % ME_QUEUE].arg = arg;
 	__asm__ volatile( "sync" ::: "memory" );
 	me_ctl->req = next;
 	return next;
+}
+
+uint32_t PSP_MeRun( psp_mejob_t func, void *arg )
+{
+	return PSP_MePost( func, arg, true );
+}
+
+/*
+PSP_MeRunKeep
+
+the same, but this CPU keeps its cache (a full invalidate costs the misses to
+fill it again): it has to invalidate the ranges the ME wrote itself, or read
+them uncached
+*/
+uint32_t PSP_MeRunKeep( psp_mejob_t func, void *arg )
+{
+	return PSP_MePost( func, arg, false );
 }
 
 void PSP_MeShutdown( void )

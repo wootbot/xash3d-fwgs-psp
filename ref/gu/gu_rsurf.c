@@ -2421,7 +2421,7 @@ void R_MeWorldBegin( void )
 			job->absplanes[i][j] = fabsf( job->planes[i][j] );
 	}
 
-	r_meworld.ticket = PSP_MeRun( R_MeWorldJob, job );
+	r_meworld.ticket = PSP_MeRunKeep( R_MeWorldJob, job );
 	r_meworld.begun = r_meworld.ticket != 0;
 }
 
@@ -2505,7 +2505,7 @@ void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped )
 
 	if( bjob->numbrushes > 0 )
 	{
-		r_meworld.brush_ticket = PSP_MeRun( R_MeBrushesJob, bjob );
+		r_meworld.brush_ticket = PSP_MeRunKeep( R_MeBrushesJob, bjob );
 		r_meworld.brushes = true;
 	}
 }

@@ -974,6 +974,8 @@ static void R_DrawEntitiesOnList( void )
 	}
 
 #if XASH_PSP
+	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
+		R_StudioDrawMeModels();
 	R_DrawMeBrushes();
 #endif
 

@@ -612,14 +612,17 @@ qboolean R_MeBrushesDraw( void );
 qboolean R_StudioMeBonesPosted( const cl_entity_t *e );
 // engine/platform/psp/me_psp.c: the renderer is linked into the engine
 qboolean PSP_MeStart( void );
-uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );
+uint32_t PSP_MeRunKeep( void (*func)( void *arg ), void *arg );
 void PSP_MeWaitFor( uint32_t ticket );
 qboolean PSP_MeDone( uint32_t ticket );
-void PSP_MeFlushDcache( void );
+void PSP_MeWriteback( const void *start, size_t size );
 void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled );
 void R_StudioPreCullEnd( void );
 qboolean R_ViewModelSolid( void );
-void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, const byte *solid_culled, cl_entity_t **trans, int ntrans, const byte *trans_culled );
+#define R_STUDIO_ME	2	// in the culled flags: drawn by R_StudioDrawMeModels
+void R_StudioDrawMeModels( void );
+extern void (*psp_entities_hook)( void );
+void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, byte *solid_culled, cl_entity_t **trans, int ntrans, const byte *trans_culled );
 void GU_ClipLoadFrustum( const mplane_t *plane ); // Experimental
 int GU_ClipIsRequired( gu_vert_t *uv, int uvc );
 void GU_Clip( gu_vert_t *uv, int uvc, gu_vert_t **cv, int *cvc );

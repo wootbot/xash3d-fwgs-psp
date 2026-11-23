@@ -3939,6 +3939,12 @@ void Host_ClientFrame( void )
 	// emit visible entities
 	CL_EmitEntities ();
 
+#if XASH_PSP
+	// their bones start on the Media Engine
+	if( cls.state == ca_active && cl.video_prepped && psp_entities_hook )
+		psp_entities_hook();
+#endif
+
 	// in case we lost connection
 	CL_CheckForResend ();
 
