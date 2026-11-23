@@ -1416,6 +1416,18 @@ void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, const byte *solid_cu
 	r_mebones.local = !r_mebones.ticket;
 }
 
+// its bones are the ME's
+qboolean R_StudioMeBonesPosted( const cl_entity_t *e )
+{
+	for( int i = 0; i < r_mebones.count; i++ )
+	{
+		if( r_mebones.ents[i].e == e )
+			return true;
+	}
+
+	return false;
+}
+
 // the bones of e from the ME, if they were computed from what R_StudioSetupBones sees now
 static qboolean R_StudioMeBonesUse( cl_entity_t *e )
 {

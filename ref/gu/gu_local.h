@@ -606,6 +606,10 @@ void GU_ClipGetWorldPlanes( float planes[4][4] );
 void R_MeWorldRegister( void );
 void R_MeWorldBegin( void );
 qboolean R_MeWorldBusy( void );
+#define R_GROUPED_ME	2	// in the flags of the draw lists: drawn by R_MeBrushesDraw
+void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped );
+qboolean R_MeBrushesDraw( void );
+qboolean R_StudioMeBonesPosted( const cl_entity_t *e );
 // engine/platform/psp/me_psp.c: the renderer is linked into the engine
 qboolean PSP_MeStart( void );
 uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );

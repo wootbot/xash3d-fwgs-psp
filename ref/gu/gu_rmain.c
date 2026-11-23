@@ -870,28 +870,64 @@ static void R_PrepareEntities( void )
 	memset( trans_culled + tr.draw_list->num_trans_entities, 0, sizeof( trans_culled ) - tr.draw_list->num_trans_entities );
 	memset( solid_grouped, 0, sizeof( solid_grouped ));
 	memset( trans_grouped, 0, sizeof( trans_grouped ));
+	R_MeBrushesBegin( solid_grouped, trans_grouped );
 }
 
 /*
 =============
-R_DrawStaticBrushes
+R_DrawMeBrushes
 
-the static brush models, none of them blends: before the world, while the Media
-Engine walks it
+the static brush models R_MeBrushesBegin took
 =============
 */
-static void R_DrawStaticBrushes( void )
+static void R_DrawMeBrushes( void )
 {
+	if( R_MeBrushesDraw( ))
+		return;
+
+	// the job ran out of space
+	for( int i = 0; i < tr.draw_list->num_solid_entities; i++ )
+	{
+		if( solid_grouped[i] == R_GROUPED_ME )
+			solid_grouped[i] = 0;
+	}
+
+	for( int i = 0; i < tr.draw_list->num_trans_entities; i++ )
+	{
+		if( trans_grouped[i] == R_GROUPED_ME )
+			trans_grouped[i] = 0; // the loop below gets there
+	}
+
 	for( int i = 0; i < tr.draw_list->num_solid_entities; i++ )
 	{
 		if( !solid_grouped[i] && R_StaticBrushModel( tr.draw_list->solid_entities[i] ))
 			R_DrawStaticBrushGroup( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, i, solid_grouped, false );
 	}
+}
 
-	for( int i = 0; i < tr.draw_list->num_trans_entities; i++ )
+/*
+=============
+R_DrawStudioModelsFirst
+
+solid studio models that don't need bones from the Media Engine, before the
+world, as long as it isn't done with it
+=============
+*/
+static void R_DrawStudioModelsFirst( void )
+{
+	for( int i = 0; i < tr.draw_list->num_solid_entities && R_MeWorldBusy(); i++ )
 	{
-		if( !trans_grouped[i] && R_StaticBrushModel( tr.draw_list->trans_entities[i] ))
-			R_DrawStaticBrushGroup( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, i, trans_grouped, true );
+		cl_entity_t *e = tr.draw_list->solid_entities[i];
+
+		// a follower needs its parent's bones
+		if( solid_culled[i] || !e->model || e->model->type != mod_studio || e->player
+			|| e->curstate.movetype == MOVETYPE_FOLLOW || R_StudioMeBonesPosted( e ))
+			continue;
+
+		RI.currententity = e;
+		RI.currentmodel = e->model;
+		R_DrawStudioModel( e );
+		solid_culled[i] = true; // done with
 	}
 }
 
@@ -936,6 +972,10 @@ static void R_DrawEntitiesOnList( void )
 			break;
 		}
 	}
+
+#if XASH_PSP
+	R_DrawMeBrushes();
+#endif
 
 	// quake-specific feature
 	R_DrawAlphaTextureChains();
@@ -1093,14 +1133,14 @@ void R_RenderScene( void )
 	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
 	{
 		// instead of waiting for the ME
-		if( R_MeWorldBusy( ))
-			R_DrawStaticBrushes();
-
 		if( R_MeWorldBusy() && R_ViewModelSolid( ))
 		{
 			R_DrawViewModel();
 			viewmodel_drawn = true;
 		}
+
+		tr.blend = 1.0f;
+		R_DrawStudioModelsFirst();
 	}
 
 	if( r_drawworld.value )

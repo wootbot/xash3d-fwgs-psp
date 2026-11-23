@@ -910,6 +910,11 @@ typedef struct
 
 static void R_MeWorldFree( void );
 static qboolean R_HasLightmap( void );
+static void R_SetRenderMode( cl_entity_t *e );
+static void R_RenderBrushPoly( msurface_t *fa, int cull_type );
+static void R_BlendLightmaps( void );
+static void R_RenderFullbrights( void );
+static void R_RenderDetails( void );
 
 typedef char ws_size_check[sizeof( gu_wsurf_t ) == 32 ? 1 : -1];
 
@@ -1782,7 +1787,7 @@ static void R_WorldSurfsDrawLightmaps( int page )
 /*
 =============================================================
 
-THE WORLD ON THE MEDIA ENGINE
+THE WORLD AND THE STATIC BRUSH MODELS ON THE MEDIA ENGINE
 
 The walk of the world and the draws of the plain surfaces, from the view on:
 R_MeWorldBegin posts a job for the second CPU (engine/platform/psp/me_psp.c)
@@ -1791,7 +1796,13 @@ R_WorldNodesWalk and R_WorldSurfsCull and writes the GE commands of the
 texture pass and the lightmap pass as two lists, which R_DrawTextureChains and
 R_BlendLightmaps call. What it can't draw (the slow surfaces, polygons that
 need clipping, leaves with efrags) it lists for the main CPU (R_MeWorldEnd).
-If it runs out of space the main CPU walks the world as before.
+
+R_MeBrushesBegin posts a second one for the static brush models in the draw
+lists, after the bones (R_StudioMeBonesBegin): culled like R_SortBrushModelSurfaces,
+two lists for the opaque ones and two for the alpha tested ones
+(R_MeBrushesDraw).
+
+If a job runs out of space the main CPU does the work as before.
 
 No VFPU, no syscalls, and only its output and the job are written (cache lines
 of their own): see me_psp.c.
@@ -1799,23 +1810,40 @@ of their own): see me_psp.c.
 =============================================================
 */
 static CVAR_DEFINE_AUTO( r_world_me, "1", FCVAR_ARCHIVE, "walk the world and write its draw commands on the Media Engine" );
+static CVAR_DEFINE_AUTO( r_brushes_me, "1", FCVAR_ARCHIVE, "the same for the static brush models (needs r_world_me)" );
 
 #define MEWORLD_MAXVIS	2048	// visible plain surfaces
 #define MEWORLD_MAXLIST	1024	// surfaces for the main CPU, of each kind
 #define MEWORLD_MAXLEAFS	256	// leaves with efrags
-#define MEWORLD_CMDS	12288	// GE commands of both lists
+#define MEWORLD_CMDS	12288	// GE commands of all lists of a frame
 #define MEWORLD_MAXBIND	48	// GE commands of one bind
+#define MEWORLD_MAXBRUSHES	128	// static brush models
+#define MEWORLD_BACKSIDE	BIT( 15 )	// meworld_res_t.who: CULL_BACKSIDE
+
+enum
+{
+	MEWORLD_WORLD = 0,
+	MEWORLD_BRUSHES,		// kRenderNormal
+	MEWORLD_ABRUSHES,		// kRenderTransAlpha
+	MEWORLD_RESULTS
+};
 
 typedef struct
 {
 	uint32_t		framecount;	// the job's, if it didn't run out of space
-	uint32_t		numslow, numclip, numleafs;
-	uint32_t		numpolys, leafs, skyseen;
+	uint32_t		numslow, numclip;
+	uint32_t		numpolys, numleafs, leafs, skyseen;
 	uint32_t		texlist, lmlist;	// offsets in cmds, 0: nothing to draw
 	uint32_t		pad[7];
 
 	uint16_t		slow[MEWORLD_MAXLIST];
 	uint16_t		clip[MEWORLD_MAXLIST];
+	uint16_t		who[MEWORLD_MAXLIST];	// of a slow one: the brush model in the job, MEWORLD_BACKSIDE
+} meworld_res_t;
+
+typedef struct
+{
+	meworld_res_t	res[MEWORLD_RESULTS];
 	uint16_t		leaf[MEWORLD_MAXLEAFS];
 
 	// the ME's own
@@ -1827,6 +1855,14 @@ typedef struct
 	uint16_t		lmhead[MAX_LIGHTMAPS];
 	uint32_t		cmds[MEWORLD_CMDS] __attribute__(( aligned( 64 )));
 } meworld_out_t;
+
+typedef struct
+{
+	short		mins[3], maxs[3];	// rounded outwards
+	uint16_t		firstsurf, numsurfs;
+	byte		result, cullsurfs, watersides, pad;
+	float		waterz;		// water planes up to here aren't drawn
+} meworld_brush_t;
 
 typedef struct
 {
@@ -1846,16 +1882,31 @@ typedef struct
 	uint		*p;		// end of the commands
 	int		full;
 	int		numvis, numtextures;
+	meworld_res_t	*res;
+	int		who;
 } meworld_job_t;
+
+// posted while the world's job may still run: in cache lines of its own
+typedef struct
+{
+	meworld_job_t	*world;
+	float		front;		// backface culling: 1 or -1, 0 off
+	int		numbrushes;
+	meworld_brush_t	brushes[MEWORLD_MAXBRUSHES];
+} meworld_brushjob_t;
 
 static struct
 {
 	meworld_job_t	job __attribute__(( aligned( 64 )));
+	meworld_brushjob_t	brushjob __attribute__(( aligned( 64 )));
 	void		*alloc __attribute__(( aligned( 64 )));
-	uint32_t		ticket;		// not waited for yet
+	uint32_t		ticket, brush_ticket;	// not waited for yet
 	int		visfill;
 	uint		vert_frame;	// of the last job: one per GE list
-	qboolean		draw;		// R_DrawWorld draws with the lists
+	qboolean		begun;		// this frame: the world's job was posted
+	qboolean		brushes;		// and the brush models', not drawn yet
+	uint		texlist, lmlist;	// addresses, for the next R_DrawTextureChains and R_BlendLightmaps
+	cl_entity_t	*ents[MEWORLD_MAXBRUSHES];
 } r_meworld __attribute__(( aligned( 64 )));
 
 // uncached view
@@ -1906,10 +1957,52 @@ static qboolean R_MeClipIsRequired( const meworld_job_t *job, const gu_vert_t *v
 	return false;
 }
 
+// a surface in the view: into the chains, or for the main CPU
+static void R_MeSurf( meworld_job_t *job, int i, const gu_wsurf_t *w, uint left )
+{
+	meworld_out_t *out = job->out;
+	meworld_res_t *res = job->res;
+
+	if( FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ) || job->allslow )
+	{
+		if( res->numslow < MEWORLD_MAXLIST )
+		{
+			res->who[res->numslow] = job->who;
+			res->slow[res->numslow++] = i;
+		}
+		else job->full = true;
+		return;
+	}
+
+	if( FBitSet( left, WB_GUARD ) && R_MeClipIsRequired( job, w->verts, w->numverts ))
+	{
+		if( res->numclip < MEWORLD_MAXLIST )
+			res->clip[res->numclip++] = i;
+		else job->full = true;
+		return;
+	}
+
+	if( job->numvis >= MEWORLD_MAXVIS )
+	{
+		job->full = true;
+		return;
+	}
+
+	const int n = job->numvis++;
+	const int tex = w->texflags & WS_TEXTURE;
+
+	out->vis[n].surf = i;
+	if( out->texhead[tex] == WS_NONE )
+		out->textures[job->numtextures++] = tex;
+	out->vis[n].texnext = out->texhead[tex];
+	out->texhead[tex] = n;
+	out->vis[n].lmnext = out->lmhead[w->lightmap];
+	out->lmhead[w->lightmap] = n;
+}
+
 // R_WorldSurfsCull
 static void R_MeSurfsCull( meworld_job_t *job, int first, int count, uint clipflags )
 {
-	meworld_out_t *out = job->out;
 	const uint16_t visframe = job->framecount;
 	const gu_wsurf_t *w = &ws_surfs[first];
 
@@ -1928,40 +2021,9 @@ static void R_MeSurfsCull( meworld_job_t *job, int first, int count, uint clipfl
 				continue;
 		}
 
-		if( FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ) || job->allslow )
-		{
-			if( job->skybox && w->texflags == WS_SKY )
-				out->skyseen = true;
-			else if( out->numslow < MEWORLD_MAXLIST )
-				out->slow[out->numslow++] = i;
-			else job->full = true;
-			continue;
-		}
-
-		if( FBitSet( left, WB_GUARD ) && R_MeClipIsRequired( job, w->verts, w->numverts ))
-		{
-			if( out->numclip < MEWORLD_MAXLIST )
-				out->clip[out->numclip++] = i;
-			else job->full = true;
-			continue;
-		}
-
-		if( job->numvis >= MEWORLD_MAXVIS )
-		{
-			job->full = true;
-			continue;
-		}
-
-		const int n = job->numvis++;
-		const int tex = w->texflags & WS_TEXTURE;
-
-		out->vis[n].surf = i;
-		if( out->texhead[tex] == WS_NONE )
-			out->textures[job->numtextures++] = tex;
-		out->vis[n].texnext = out->texhead[tex];
-		out->texhead[tex] = n;
-		out->vis[n].lmnext = out->lmhead[w->lightmap];
-		out->lmhead[w->lightmap] = n;
+		if( job->skybox && w->texflags == WS_SKY )
+			job->res->skyseen = true;
+		else R_MeSurf( job, i, w, left );
 	}
 }
 
@@ -1996,12 +2058,12 @@ static void R_MeNodesWalk( meworld_job_t *job, int n, uint clipflags )
 
 			if( WORLDMODEL->leafs[w->child[1]].efrags )
 			{
-				if( job->out->numleafs < MEWORLD_MAXLEAFS )
-					job->out->leaf[job->out->numleafs++] = w->child[1];
+				if( job->res->numleafs < MEWORLD_MAXLEAFS )
+					job->out->leaf[job->res->numleafs++] = w->child[1];
 				else job->full = true;
 			}
 
-			job->out->leafs++;
+			job->res->leafs++;
 			return;
 		}
 
@@ -2017,6 +2079,56 @@ static void R_MeNodesWalk( meworld_job_t *job, int n, uint clipflags )
 		n = w->child[!side];
 		if( wn_visframe[n] != visframe )
 			return;
+	}
+}
+
+// R_CullBox and R_SortBrushModelSurfaces for a model that doesn't blend
+static void R_MeBrush( meworld_job_t *job, const meworld_brush_t *m, float front, int who )
+{
+	const int left = R_MeBoxClip( job, m->mins, job->clipflags );
+
+	if( left < 0 )
+		return;
+
+	const uint clipflags = m->cullsurfs ? left : left & WB_GUARD;
+	const gu_bsurf_t *b = &bs_surfs[m->firstsurf - bs_first];
+
+	for( int i = m->firstsurf; i < m->firstsurf + m->numsurfs; i++, b++ )
+	{
+		const gu_wsurf_t *w = &ws_surfs[i];
+		int back = 0, surfleft = 0;
+
+		if( FBitSet( b->flags, BS_SLOW ))
+		{
+			job->full = true;
+			return;
+		}
+
+		if( FBitSet( b->flags, BS_TURB ))
+		{
+			if( !FBitSet( b->flags, BS_PLANEZ ) && !m->watersides )
+				continue;
+
+			if( m->waterz >= ( FBitSet( b->flags, BS_PLANEBACK ) ? -b->dist : b->dist ))
+				continue;
+		}
+
+		if( front != 0.0f && front * ( DotProduct( job->org, b->normal ) - b->dist ) <= BACKFACE_EPSILON )
+		{
+			if( !FBitSet( b->flags, BS_TURB ))
+				continue;
+			back = MEWORLD_BACKSIDE;
+		}
+		else if( clipflags )
+		{
+			surfleft = R_MeBoxClip( job, b->mins, clipflags );
+
+			if( surfleft < 0 )
+				continue;
+		}
+
+		job->who = who | back;
+		R_MeSurf( job, i, w, surfleft );
 	}
 }
 
@@ -2096,11 +2208,12 @@ static const texture_t *R_MeTextureFrame( const meworld_job_t *job, const textur
 	return t;
 }
 
-static void R_MeWorldCommands( meworld_job_t *job )
+// the chains as GE commands
+static void R_MeCommands( meworld_job_t *job )
 {
 	meworld_out_t *out = job->out;
 
-	out->texlist = R_MeListBegin( job );
+	job->res->texlist = R_MeListBegin( job );
 
 	for( int i = 0; i < job->numtextures; i++ )
 	{
@@ -2119,7 +2232,7 @@ static void R_MeWorldCommands( meworld_job_t *job )
 	}
 
 	R_MeListEnd( job );
-	out->lmlist = R_MeListBegin( job );
+	job->res->lmlist = R_MeListBegin( job );
 
 	for( int i = 0; i < MAX_LIGHTMAPS; i++ )
 	{
@@ -2141,20 +2254,34 @@ static void R_MeWorldCommands( meworld_job_t *job )
 	R_MeListEnd( job );
 }
 
+static void R_MeResultBegin( meworld_job_t *job, int result )
+{
+	meworld_out_t *out = job->out;
+	meworld_res_t *res = &out->res[result];
+
+	job->res = res;
+	job->numvis = job->numtextures = 0;
+	res->framecount = 0;
+	res->numslow = res->numclip = res->numleafs = 0;
+	res->leafs = res->skyseen = 0;
+	res->texlist = res->lmlist = 0;
+	memset( out->texhead, 0xff, sizeof( out->texhead ));
+	memset( out->lmhead, 0xff, sizeof( out->lmhead ));
+}
+
+static void R_MeResultEnd( meworld_job_t *job )
+{
+	if( job->numvis && !job->full )
+		R_MeCommands( job );
+
+	job->res->numpolys = job->numvis;
+	if( !job->full )
+		job->res->framecount = job->framecount;
+}
+
 static void R_MeWorldJob( void *arg )
 {
 	meworld_job_t *job = arg;
-	meworld_out_t *out = job->out;
-
-	job->full = false;
-	job->numvis = job->numtextures = 0;
-	job->p = out->cmds;
-	out->framecount = 0;
-	out->numslow = out->numclip = out->numleafs = 0;
-	out->leafs = out->skyseen = 0;
-	out->texlist = out->lmlist = 0;
-	memset( out->texhead, 0xff, sizeof( out->texhead ));
-	memset( out->lmhead, 0xff, sizeof( out->lmhead ));
 
 	if( job->visfill >= 0 )
 	{
@@ -2162,22 +2289,49 @@ static void R_MeWorldJob( void *arg )
 			job->visframe[i] = job->visfill;
 	}
 
+	job->full = false;
+	job->p = job->out->cmds;
+	job->who = 0;
+
+	R_MeResultBegin( job, MEWORLD_WORLD );
 	if( wn_visframe[0] == job->visframecount )
 		R_MeNodesWalk( job, 0, job->clipflags );
+	R_MeResultEnd( job );
+}
 
-	if( job->numvis && !job->full )
-		R_MeWorldCommands( job );
+// after the world's, its commands too
+static void R_MeBrushesJob( void *arg )
+{
+	const meworld_brushjob_t *bjob = arg;
+	meworld_job_t *job = bjob->world;
 
-	out->numpolys = job->numvis;
-	if( !job->full )
-		out->framecount = job->framecount;
+	for( int r = MEWORLD_BRUSHES; r <= MEWORLD_ABRUSHES; r++ )
+	{
+		R_MeResultBegin( job, r );
+
+		for( int i = 0; i < bjob->numbrushes; i++ )
+		{
+			if( bjob->brushes[i].result == r )
+				R_MeBrush( job, &bjob->brushes[i], bjob->front, i );
+		}
+
+		R_MeResultEnd( job );
+	}
+}
+
+static void R_MeWorldWait( void )
+{
+	PSP_MeWaitFor( r_meworld.ticket );
+	PSP_MeWaitFor( r_meworld.brush_ticket );
+	r_meworld.ticket = r_meworld.brush_ticket = 0;
+	r_meworld.brushes = false;
+	r_meworld.texlist = r_meworld.lmlist = 0;
+	r_meworld.begun = false;
 }
 
 static void R_MeWorldFree( void )
 {
-	PSP_MeWaitFor( r_meworld.ticket );
-	r_meworld.ticket = 0;
-	r_meworld.draw = false;
+	R_MeWorldWait();
 	if( r_meworld.alloc )
 		free( r_meworld.alloc );
 	r_meworld.alloc = NULL;
@@ -2186,6 +2340,7 @@ static void R_MeWorldFree( void )
 void R_MeWorldRegister( void )
 {
 	gEngfuncs.Cvar_RegisterVariable( &r_world_me );
+	gEngfuncs.Cvar_RegisterVariable( &r_brushes_me );
 }
 
 /*
@@ -2199,9 +2354,7 @@ void R_MeWorldBegin( void )
 {
 	meworld_job_t *job = &r_meworld.job;
 
-	PSP_MeWaitFor( r_meworld.ticket );
-	r_meworld.ticket = 0;
-	r_meworld.draw = false;
+	R_MeWorldWait();
 
 	if( !r_world_me.value || !wn_nodes || !ws_surfs || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD )
 		|| FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW|RF_DRAW_OVERVIEW ) || !PSP_MeStart( ))
@@ -2269,6 +2422,7 @@ void R_MeWorldBegin( void )
 	}
 
 	r_meworld.ticket = PSP_MeRun( R_MeWorldJob, job );
+	r_meworld.begun = r_meworld.ticket != 0;
 }
 
 // the job isn't done yet (R_MeWorldEnd)
@@ -2277,15 +2431,121 @@ qboolean R_MeWorldBusy( void )
 	return r_meworld.ticket && !PSP_MeDone( r_meworld.ticket );
 }
 
-static void R_MeCallList( uint offset )
+// for the ME: R_DrawStaticBrushModels with the chains, and bs_surfs
+static qboolean R_MeBrushAllowed( const cl_entity_t *e )
 {
-	const uint list = (uint)( r_meworld.job.out->cmds + offset );
-	uint *p = extGuCmdBegin();
+	const model_t *mod = e->model;
 
-	*p++ = ( 16 << 24 ) | (( list >> 8 ) & 0xf0000 ); // BASE
-	*p++ = ( 10 << 24 ) | ( list & 0xffffff ); // CALL
-	extGuCmdEnd( p );
-	glState.currentTexture = -1;
+	return mod && mod->type == mod_brush && mod->surfaces == WORLDMODEL->surfaces && mod->firstmodelsurface >= bs_first
+		&& mod->firstmodelsurface + mod->nummodelsurfaces <= bs_first + bs_numsurfs
+		&& !FBitSet( e->curstate.effects, EF_FULLBRIGHT ) && !e->curstate.frame && R_StaticBrushModel( e );
+}
+
+static void R_MeBrushesAdd( cl_entity_t **list, int count, byte *grouped, qboolean trans )
+{
+	meworld_brushjob_t *bjob = &r_meworld.brushjob;
+
+	for( int i = 0; i < count && bjob->numbrushes < MEWORLD_MAXBRUSHES; i++ )
+	{
+		cl_entity_t *e = list[i];
+		model_t *mod = e->model;
+
+		if( !R_MeBrushAllowed( e ))
+			continue;
+
+		grouped[i] = R_GROUPED_ME;
+
+		// skipped like the translucent loop does
+		if( trans && e->curstate.rendermode != kRenderNormal && CL_FxBlend( e ) <= 0 )
+			continue;
+
+		r_meworld.ents[bjob->numbrushes] = e;
+		meworld_brush_t *m = &bjob->brushes[bjob->numbrushes++];
+
+		for( int j = 0; j < 3; j++ )
+		{
+			m->mins[j] = bound( -32768, (int)floorf( mod->mins[j] ), 32767 );
+			m->maxs[j] = bound( -32768, (int)ceilf( mod->maxs[j] ), 32767 );
+		}
+
+		m->firstsurf = mod->firstmodelsurface;
+		m->numsurfs = mod->nummodelsurfaces;
+		m->result = e->curstate.rendermode == kRenderNormal ? MEWORLD_BRUSHES : MEWORLD_ABRUSHES;
+		m->cullsurfs = R_StaticEntity( e );
+		m->watersides = FBitSet( e->curstate.effects, EF_WATERSIDES ) ? true : false;
+		m->waterz = mod->mins[2] + 1.0f;
+
+		R_PushDlightsForBmodel( mod, tr.dlightframecount, RI.objectMatrix );
+		e->visframe = tr.realframecount;
+	}
+}
+
+/*
+=================
+R_MeBrushesBegin
+
+the static brush models of the draw lists, marked R_GROUPED_ME in grouped, for R_MeBrushesDraw
+=================
+*/
+void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped )
+{
+	meworld_brushjob_t *bjob = &r_meworld.brushjob;
+
+	if( !r_brushes_me.value || !r_meworld.begun || !bs_surfs || r_nocull.value || FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
+		return;
+
+	R_LoadIdentity();
+	VectorCopy( RI.cullorigin, tr.modelorg );
+
+	bjob->world = &r_meworld.job;
+	bjob->front = glState.faceCull == GL_NONE ? 0.0f : glState.faceCull == GL_FRONT ? 1.0f : -1.0f;
+	bjob->numbrushes = 0;
+	R_MeBrushesAdd( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_grouped, false );
+	R_MeBrushesAdd( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_grouped, true );
+
+	if( bjob->numbrushes > 0 )
+	{
+		r_meworld.brush_ticket = PSP_MeRun( R_MeBrushesJob, bjob );
+		r_meworld.brushes = true;
+	}
+}
+
+static uint R_MeListAddress( uint offset )
+{
+	return offset ? (uint)( r_meworld.job.out->cmds + offset ) : 0;
+}
+
+static void R_MeCallList( uint *list )
+{
+	if( *list )
+	{
+		uint *p = extGuCmdBegin();
+
+		*p++ = ( 16 << 24 ) | (( *list >> 8 ) & 0xf0000 ); // BASE
+		*p++ = ( 10 << 24 ) | ( *list & 0xffffff ); // CALL
+		extGuCmdEnd( p );
+		glState.currentTexture = -1;
+	}
+
+	*list = 0;
+}
+
+// polygons that need clipping, and the lists
+static void R_MeResultUse( const volatile meworld_res_t *res )
+{
+	const int numclip = res->numclip;
+
+	for( int i = 0; i < numclip; i++ )
+	{
+		const int surf = res->clip[i];
+
+		ClearBits( ws_surfs[surf].texflags, WS_NOCLIP );
+		R_WorldSurfChain( surf );
+	}
+
+	r_stats.c_world_polys += res->numpolys;
+	r_meworld.texlist = R_MeListAddress( res->texlist );
+	r_meworld.lmlist = R_MeListAddress( res->lmlist );
 }
 
 /*
@@ -2304,11 +2564,12 @@ static qboolean R_MeWorldEnd( void )
 	r_meworld.ticket = 0;
 
 	const volatile meworld_out_t *out = MEWORLD_OUT;
+	const volatile meworld_res_t *res = &out->res[MEWORLD_WORLD];
 
-	if( out->framecount != (uint32_t)tr.framecount )
+	if( res->framecount != (uint32_t)tr.framecount )
 		return false;
 
-	const int numslow = out->numslow, numclip = out->numclip, numleafs = out->numleafs;
+	const int numslow = res->numslow, numleafs = res->numleafs;
 
 	for( int i = 0; i < numleafs; i++ )
 	{
@@ -2317,20 +2578,102 @@ static qboolean R_MeWorldEnd( void )
 	}
 
 	for( int i = 0; i < numslow; i++ )
-		R_WorldSurfSlow( out->slow[i] );
+		R_WorldSurfSlow( res->slow[i] );
 
-	for( int i = 0; i < numclip; i++ )
+	R_MeResultUse( res );
+	ws_skyseen = res->skyseen;
+	r_stats.c_world_leafs += res->leafs;
+	return true;
+}
+
+/*
+=================
+R_MeBrushesDraw
+
+as R_DrawStaticBrushModels; false if it has to draw them
+=================
+*/
+qboolean R_MeBrushesDraw( void )
+{
+	if( !r_meworld.brushes )
+		return true;
+
+	PSP_MeWaitFor( r_meworld.brush_ticket );
+	r_meworld.brush_ticket = 0;
+	r_meworld.brushes = false;
+
+	const volatile meworld_out_t *out = MEWORLD_OUT;
+
+	for( int r = MEWORLD_BRUSHES; r <= MEWORLD_ABRUSHES; r++ )
 	{
-		const int surf = out->clip[i];
-
-		ClearBits( ws_surfs[surf].texflags, WS_NOCLIP );
-		R_WorldSurfChain( surf );
+		if( out->res[r].framecount != (uint32_t)tr.framecount )
+			return false;
 	}
 
-	ws_skyseen = out->skyseen;
-	r_stats.c_world_leafs += out->leafs;
-	r_stats.c_world_polys += out->numpolys;
-	r_meworld.draw = true;
+	R_LoadIdentity();
+	VectorCopy( RI.cullorigin, tr.modelorg );
+
+	for( int r = MEWORLD_BRUSHES; r <= MEWORLD_ABRUSHES; r++ )
+	{
+		const volatile meworld_res_t *res = &out->res[r];
+		const meworld_brush_t *m = r_meworld.brushjob.brushes;
+		const int numslow = res->numslow;
+		int first = 0;
+
+		if( !res->numpolys && !numslow && !res->numclip )
+			continue;
+
+		while( m[first].result != r )
+			first++;
+
+		memset( gl_lms.lightmap_surfaces, 0, sizeof( gl_lms.lightmap_surfaces ));
+		gl_lms.dynamic_surfaces = NULL;
+
+		RI.currententity = r_meworld.ents[first];
+		RI.currentmodel = RI.currententity->model;
+		R_SetRenderMode( RI.currententity );
+		GL_SetupFogColorForSurfaces();
+
+		if( gl_polyoffset_bmodels.value )
+			GL_PushPolygonOffset( -0.5f, -gl_polyoffset_bmodels.value );
+
+		// not after a frame without a lightmap pass
+		memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+
+		for( int i = 0; i < numslow; i++ )
+		{
+			const int surf = res->slow[i], who = res->who[i];
+
+			// R_RenderBrushPoly updates it now, unless dlit
+			if( !FBitSet( ws_surfs[surf].texflags, WS_DLIT ))
+				ClearBits( ws_surfs[surf].texflags, WS_STALE );
+
+			RI.currententity = r_meworld.ents[who & ~MEWORLD_BACKSIDE];
+			RI.currentmodel = RI.currententity->model;
+			R_RenderBrushPoly( &WORLDMODEL->surfaces[surf], FBitSet( who, MEWORLD_BACKSIDE ) ? CULL_BACKSIDE : CULL_VISIBLE );
+		}
+
+		R_MeResultUse( res );
+		R_MeCallList( &r_meworld.texlist );
+		R_WorldSurfsDrawTextures();
+
+		DrawDecalsBatch();
+
+		GL_ResetFogColor();
+		R_BlendLightmaps();
+		R_RenderFullbrights();
+		R_RenderDetails();
+		r_meworld.lmlist = 0;
+
+		if( gl_polyoffset_bmodels.value )
+			GL_PopPolygonOffset();
+
+		sceGuDisable( GU_ALPHA_TEST );
+		sceGuAlphaFunc( GU_GREATER, DEFAULT_ALPHATEST, 0xff );
+		sceGuDisable( GU_BLEND );
+		sceGuDepthMask( GU_FALSE );
+	}
+
 	return true;
 }
 
@@ -2720,9 +3063,7 @@ static void R_BlendLightmaps( void )
 	}
 
 #if XASH_PSP
-	if( r_meworld.draw && MEWORLD_OUT->lmlist )
-		R_MeCallList( MEWORLD_OUT->lmlist );
-	r_meworld.draw = false;
+	R_MeCallList( &r_meworld.lmlist );
 #endif
 
 	// render dynamic lightmaps
@@ -3099,8 +3440,7 @@ static void R_DrawTextureChains( void )
 	}
 
 #if XASH_PSP
-	if( r_meworld.draw && MEWORLD_OUT->texlist )
-		R_MeCallList( MEWORLD_OUT->texlist );
+	R_MeCallList( &r_meworld.texlist );
 	R_WorldSurfsDrawTextures();
 #endif
 }
@@ -4056,7 +4396,7 @@ void R_DrawWorld( void )
 	tr.num_draw_decals = 0;
 	skychain = NULL;
 #if XASH_PSP
-	r_meworld.draw = false;
+	r_meworld.lmlist = 0;
 
 	// not drawn when the world has no lightmap pass, not for brush models either
 	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
