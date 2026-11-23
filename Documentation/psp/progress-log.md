@@ -762,3 +762,21 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   0.28, world 0.55 (slow surfaces, decals, sky), brushes 0.15, ME models 0.25, other solid models
   ~0.2, particles and beams 0.38, translucent 0.35. Next: HUD and menu images out of the VRAM for
   models, fewer GE vertices, players on the ME, culling on the ME.
+- 2026-11-23 (3): **Culling and players on the Media Engine** (`e8879404`, fight1 clean 80.0 -> 84.1).
+  The ME tells the entities of the draw lists apart (a table of 32 byte entries: bounding sphere,
+  model, body and skin, who may draw it, brush models ready to queue, sort keys of the translucent
+  ones) before the view is known; the main CPU tests spheres against the planes. Preparation on the
+  main CPU (cull, gather, brush models, sort) 1.0 -> 0.4 ms. Alone that gave only +1.8 fps: the ME
+  was the longer path then and the main CPU waited 0.5 ms for the models. What got it back: two
+  early jobs (one after CL_LinkPacketEntities, before the temp entity update, ~0.75-1.2 ms earlier
+  in fight1), the early job giving way to the world's between two models, the world posted before
+  the view model's events and the sort. On the ME alone (main CPU waiting): early 1.3-1.6 ms, world
+  0.9-1.1, models 0.4-0.5, brush models 0.2. Left to wait: world ~0.1 ms, models ~0.1 ms, GE ~0.06.
+  Players: gait on the main CPU before the first job, then blends, legs of the gait sequence,
+  weapon model merged by bone name, draws with the remapped skins (no atlas). Tried with 3 fake
+  players (gordon, barney, gina walking with an MP5, TEMP code, c1a3a live): 15.1 -> 12.1 ms a
+  frame, same picture. A player is ~560 us on the ME after: each bone computed only in the sequence
+  that decides it, one rotation where both blends agree, normalized lerp below ~25 degrees (1 ms
+  before). Pitfall: `__attribute__(( aligned( 64 )))` on a variable doesn't pad its size, the last
+  cache line is shared with whatever follows: align the type of anything the ME writes. A Wi-Fi join
+  that never finishes after a pushed restart looks like a crash from the PC, the game was fine.
