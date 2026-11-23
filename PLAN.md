@@ -59,9 +59,9 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
       lighting, GE output) for all models in a row instead of the whole pipeline per model.
       The first check (a whole model drawn twice in a row, 5.9 vs 6.6 ms) missed the point:
       the cost is instruction cache misses, and a whole model's code doesn't fit the 16 KB
-      icache, so the repeat is cold too. Per phase cold vs warm repeat: ~45% misses. Done:
-      the solid list's plain models in passes (`r_studio_batch`, 56.9 -> 57.9 fps). Left:
-      players and followers, the GE output split further.
+      icache, so the repeat is cold too. Per phase cold vs warm repeat: ~45% misses. The
+      solid list's plain models in two passes gave 56.9 -> 57.9 fps, but nothing once the GE
+      lighting (one draw per batch) was in: dropped again.
 - [ ] Animation: decode only the bones that matter (reduced skeletons). A cache of decoded
       keyframes was tried twice and saves almost nothing (see the progress log).
 - [ ] PSP model variants generated offline (fewer bones, decimated meshes, small textures),
@@ -934,4 +934,16 @@ music), launched from the XMB.
   pre-decode of the animations doesn't fit (hgrunt ~1.5 MB of quaternions). Mixing is still
   ~1 ms a frame at ~50 fps (26-28 channels, most through the pitched loop: 22 kHz sounds and
   random weapon pitch). A third pass for the light alone (bones and light restored
-  per model) was no faster: 57.7 vs 58.0.
+  per model) was no faster: 57.7 vs 58.0 (invalid: `r_studio_batch` was left at 0 in the
+  config, see below).
+- 2026-11-22 (late): **GE lighting for studio models** (`53253f1c`): the plan path lights
+  with one GE directional light toward -lightvec and the global ambient (the ramp's colors
+  edge on and facing the light) instead of drawing every batch a second time through the
+  ramp texture: no ramp, no light block, half the draws, one skin block per mesh. The side
+  away from the light stays at the edge on color (a bit lighter). 57.65 -> 60.1 fps clean,
+  frames under 60 ~285 -> ~215. After it, the two pass studio batch gives nothing (60.0 vs
+  60.25, three passes 60.5 vs 60.7): removed (`5bb434f7`). Batching the client's packet
+  entities (DLL AddEntity, renderer lists, effects in three passes) was slower, 57.1 vs
+  57.75. Pitfall: `FCVAR_ARCHIVE` cvars toggled for an A/B are saved to config.cfg on the
+  next restart and carry over to every build after it. Clean split now (ms a frame): all
+  16.6, entities ~6.9, floor 6.6, world 2.3, view model/particles/beams/tracers 1.05.
