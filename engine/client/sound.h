@@ -82,6 +82,10 @@ void S_FreeChannel( channel_t *ch );
 // s_mix.c
 //
 void S_ClearBuffers( int num_samples );
+#if XASH_PSP
+void S_PaintSync( void );
+void S_PaintDiscard( void );
+#endif
 void S_PaintChannels( int endtime );
 
 // s_load.c

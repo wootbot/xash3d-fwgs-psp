@@ -198,6 +198,9 @@ void VOX_FreeWord( channel_t *ch )
 	}
 #endif
 
+#if XASH_PSP
+	S_PaintSync(); // the Media Engine may be mixing it
+#endif
 	FS_FreeSound( word->sfx->cache );
 	word->sfx->cache = NULL;
 	word->sfx = NULL;

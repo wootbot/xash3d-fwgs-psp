@@ -1435,6 +1435,9 @@ S_ClearBuffer
 */
 static void S_ClearBuffer( void )
 {
+#if XASH_PSP
+	S_PaintDiscard();
+#endif
 	S_ClearRawChannels();
 
 	SNDDMA_BeginPainting ();
@@ -1991,7 +1994,7 @@ qboolean S_Init( void )
 	Cvar_RegisterVariable( &s_musicfadetime );
 	Cvar_RegisterVariable( &s_mixahead );
 #if XASH_PSP
-	{ extern convar_t s_mixchannels; Cvar_RegisterVariable( &s_mixchannels ); }
+	{ extern convar_t s_mixchannels, s_mixme; Cvar_RegisterVariable( &s_mixchannels ); Cvar_RegisterVariable( &s_mixme ); }
 #endif
 	Cvar_RegisterVariable( &s_show );
 	Cvar_RegisterVariable( &s_lerping );

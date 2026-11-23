@@ -239,6 +239,7 @@ static void PSP_DbgConRestart( void )
 	param.argp = eboot;
 	param.key = "game";
 
+	PSP_MeShutdown();
 	ret = sctrlKernelLoadExecVSHMs2( eboot, &param );
 
 	Q_snprintf( msg, sizeof( msg ), "dbgcon: sctrlKernelLoadExecVSHMs2 failed (0x%08x), start the game again from the XMB\n", ret );

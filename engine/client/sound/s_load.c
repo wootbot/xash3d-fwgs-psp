@@ -244,6 +244,9 @@ void S_FreeSound( sfx_t *sfx )
 		return;
 	}
 
+#if XASH_PSP
+	S_PaintSync(); // the Media Engine may be mixing it
+#endif
 	if( sfx->cache )
 		FS_FreeSound( sfx->cache );
 	memset( sfx, 0, sizeof( *sfx ));

@@ -16,6 +16,10 @@ GNU General Public License for more details.
 #include "common.h"
 #include "sound.h"
 #include "client.h"
+#if XASH_PSP
+#include "platform/platform.h"
+#include <psputils.h>
+#endif
 
 static portable_samplepair_t roombuffer[(PAINTBUFFER_SIZE+1)], paintbuffer[(PAINTBUFFER_SIZE+1)];
 
@@ -416,8 +420,63 @@ the loudest s_mixchannels channels are mixed, the others only move on through
 their sound (s_mix_dry): a firefight has ~45 at once, the quiet ones under the
 gunfire of the loud ones, and mixing them was ~0.4 ms a frame
 */
-CVAR_DEFINE_AUTO( s_mixchannels, "16", FCVAR_ARCHIVE, "mix only this many of the loudest sounds, the others play on silently (0 = all)" );
+CVAR_DEFINE_AUTO( s_mixchannels, "16", FCVAR_ARCHIVE, "without the Media Engine, mix only this many of the loudest sounds, the others play on silently (0 = all)" );
 static qboolean s_mix_dry;
+
+/*
+the sample loops of the normal channels run on the Media Engine (me_psp.c):
+the main CPU does all of the bookkeeping and records what S_MixAudio would
+do, the ME mixes that into a buffer of its own during the next frame, and the
+next paint adds it to the room buffer before the DSP and the transfer into
+the DMA buffer. That is a frame later, well inside the mixahead. The ME reads
+sample data and writes only s_me.room, cache line aligned; sounds aren't freed
+while it runs (S_PaintSync)
+*/
+CVAR_DEFINE_AUTO( s_mixme, "1", 0, "mix sounds on the Media Engine" );
+
+typedef struct
+{
+	const void	*audio;
+	int		offset;
+	int		pvol[2];
+	uint32_t	frac;
+	s_fixstep_t	step;
+	short		count;
+	byte		channels;
+	byte		width;
+	int		lerp;
+} s_mixop_t;
+
+#define S_ME_MAXOPS 256
+
+typedef struct
+{
+	int			num_ops;
+	int			num_samples;
+	const s_mixop_t		*ops;
+	portable_samplepair_t	*out;
+} s_mejob_t;
+
+static struct
+{
+	s_mixop_t		ops[S_ME_MAXOPS] __attribute__(( aligned( 64 )));
+	portable_samplepair_t	room[PAINTBUFFER_SIZE + 8] __attribute__(( aligned( 64 ))); // ME output, whole cache lines
+	s_mejob_t		job __attribute__(( aligned( 64 )));
+	byte			pad[64] __attribute__(( aligned( 64 ))); // nothing else in job's line
+} s_me __attribute__(( aligned( 64 )));
+
+static int s_me_numops;
+static qboolean s_mix_defer; // set around the normal channels when the ME is used
+
+// the chunk waiting for the ME
+static struct
+{
+	qboolean	active;
+	int		start, end;
+	int		room_channels;
+	int		gain;
+	qboolean	dsp;
+} s_me_pending;
 
 static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, s_pitch_t pitch, int offset, int timecompress )
 {
@@ -515,7 +574,24 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 			out_count = 1;
 		}
 
-		if( !s_mix_dry )
+		if( s_mix_dry )
+			;
+		else if( s_mix_defer && s_me_numops < S_ME_MAXOPS )
+		{
+			s_mixop_t *op = &s_me.ops[s_me_numops++];
+
+			op->audio = audio;
+			op->offset = pbuf + offset - roombuffer;
+			op->pvol[0] = pvol[0];
+			op->pvol[1] = pvol[1];
+			op->frac = frac;
+			op->step = read_step;
+			op->count = out_count;
+			op->channels = wav->channels;
+			op->width = wav->width;
+			op->lerp = lerp;
+		}
+		else
 			S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, frac, read_step, out_count, lerp );
 
 		S_FixedAdvance( &pos, &frac, pos_step, out_count );
@@ -666,7 +742,8 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 	// the volume from which on channels are mixed, and how many at exactly that one
 	int mix_volume = 0, mix_at_volume = MAX_CHANNELS;
 
-	if( s_mixchannels.value > 0 )
+	// the Media Engine has the time for all of them
+	if( s_mixchannels.value > 0 && !( s_mixme.value && PSP_MeStart( )))
 	{
 		static int count[256];
 		int audible = 0;
@@ -782,10 +859,12 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 #if XASH_PSP
 			const int vol = bound( 0, Q_max( ch->leftvol, ch->rightvol ), 255 );
 			s_mix_dry = vol < mix_volume || ( vol == mix_volume && mix_at_volume-- <= 0 );
+			s_mix_defer = dst == roombuffer && s_mixme.value && PSP_MeStart();
 #endif
 			S_MixChannelToBuffer( dst, ch, num_samples, out_rate, pitch, 0, 0 );
 #if XASH_PSP
 			s_mix_dry = false;
+			s_mix_defer = false;
 #endif
 
 			if( FBitSet( ch->flags, FL_CHAN_FINISHED ))
@@ -885,11 +964,11 @@ static void S_WriteLinearBlastStereo16( short *snd_out, const int *snd_p, size_t
 	}
 }
 
-static void S_TransferPaintBuffer( const portable_samplepair_t *src, int endtime )
+static void S_TransferPaintBuffer( const portable_samplepair_t *src, int starttime, int endtime )
 {
 	const int *snd_p = (const int *)src;
 	const int sampleMask = ((snd.samples >> 1) - 1);
-	int lpaintedtime = snd.paintedtime;
+	int lpaintedtime = starttime;
 
 	SNDDMA_BeginPainting ();
 
@@ -924,9 +1003,76 @@ void S_ClearBuffers( int num_samples )
 	memset( paintbuffer, 0, num_bytes );
 }
 
+#if XASH_PSP
+// on the ME, without syscalls
+static void S_MeMixJob( void *arg )
+{
+	const s_mejob_t *job = arg;
+
+	memset( job->out, 0, ( job->num_samples + 1 ) * sizeof( portable_samplepair_t ));
+
+	for( int i = 0; i < job->num_ops; i++ )
+	{
+		const s_mixop_t *op = &job->ops[i];
+
+		S_MixAudio( job->out + op->offset, op->pvol, op->audio, op->channels, op->width, op->frac, op->step, op->count, op->lerp );
+	}
+}
+#endif
+
+// the room buffer is mixed: DSP, into the paint buffer and out to the DMA buffer
+static void S_PaintChunk( int start, int end, int room_channels, int gain, qboolean dsp )
+{
+	const int num_samples = end - start;
+
+	// now process DSP and mix result into paintbuffer
+	if( dsp )
+		SX_RoomFX( roombuffer, num_samples );
+
+	if( room_channels > 0 || dsp )
+		S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain );
+
+	// transfer out according to DMA format
+	S_TransferPaintBuffer( paintbuffer, start, end );
+}
+
+#if XASH_PSP
+/*
+S_PaintSync: the ME no longer reads sample data (before a sound is freed)
+S_PaintFinish: the chunk the ME mixed goes out
+S_PaintDiscard: or it's dropped (the DMA buffer is cleared)
+*/
+void S_PaintSync( void )
+{
+	PSP_MeWait();
+}
+
+static void S_PaintFinish( void )
+{
+	if( !s_me_pending.active )
+		return;
+
+	s_me_pending.active = false;
+	PSP_MeWait();
+	sceKernelDcacheInvalidateRange( s_me.room, sizeof( s_me.room ));
+	S_MixBufferWithGain( roombuffer, s_me.room, s_me_pending.end - s_me_pending.start, 256 );
+	S_PaintChunk( s_me_pending.start, s_me_pending.end, s_me_pending.room_channels, s_me_pending.gain, s_me_pending.dsp );
+}
+
+void S_PaintDiscard( void )
+{
+	PSP_MeWait();
+	s_me_pending.active = false;
+}
+#endif
+
 void S_PaintChannels( int endtime )
 {
 	int gain = S_GetMasterVolume() * 256;
+
+#if XASH_PSP
+	S_PaintFinish();
+#endif
 
 	while( snd.paintedtime < endtime )
 	{
@@ -939,19 +1085,39 @@ void S_PaintChannels( int endtime )
 
 		S_ClearBuffers( num_samples );
 
-		int room_channels = S_MixNormalChannelsToRoombuffer( roombuffer, end );
+		int room_channels;
+#if XASH_PSP
+		s_me_numops = 0;
+#endif
+		room_channels = S_MixNormalChannelsToRoombuffer( roombuffer, end );
 
 		room_channels += S_MixRawChannels( end );
 
-		// now process DSP and mix result into paintbuffer
-		if( cls.key_dest != key_menu )
-			SX_RoomFX( roombuffer, num_samples );
+#if XASH_PSP
+		if( s_me_numops > 0 )
+		{
+			s_me.job.num_ops = s_me_numops;
+			s_me.job.num_samples = num_samples;
+			s_me.job.ops = s_me.ops;
+			s_me.job.out = s_me.room;
+			PSP_MeRun( S_MeMixJob, &s_me.job );
 
-		if( room_channels > 0 || cls.key_dest != key_menu )
-			S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain );
+			s_me_pending.active = true;
+			s_me_pending.start = snd.paintedtime;
+			s_me_pending.end = end;
+			s_me_pending.room_channels = room_channels;
+			s_me_pending.gain = gain;
+			s_me_pending.dsp = cls.key_dest != key_menu;
+			snd.paintedtime = end;
 
-		// transfer out according to DMA format
-		S_TransferPaintBuffer( paintbuffer, end );
+			// more to paint now: this chunk can't wait
+			if( snd.paintedtime < endtime )
+				S_PaintFinish();
+			continue;
+		}
+#endif
+
+		S_PaintChunk( snd.paintedtime, end, room_channels, gain, cls.key_dest != key_menu );
 		snd.paintedtime = end;
 	}
 }

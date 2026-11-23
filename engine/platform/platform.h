@@ -213,6 +213,13 @@ extern volatile int psp_stage_depth;
 #define PSP_STAGE( name, x ) do { PSP_STAGE_PUSH( name ); x; PSP_STAGE_POP(); } while( 0 )
 void PSP_NetRegisterCommands( void );
 void PSP_DbgConInit( void );
+void PSP_MeRegisterCommands( void );
+void PSP_MeShutdown( void );
+qboolean PSP_MeStart( void );
+qboolean PSP_MeActive( void );
+void PSP_MeRun( void (*func)( void *arg ), void *arg );
+qboolean PSP_MeBusy( void );
+void PSP_MeWait( void );
 void PSP_DbgConFrame( void );
 void PSP_DbgConPrint( const char *msg );
 qboolean PSP_DbgConSendNow( const char *msg );

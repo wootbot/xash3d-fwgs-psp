@@ -63,6 +63,7 @@ static int PSP_ExitCallback( int count, int arg, void *common )
 {
 	psp_exit_requested = true;
 	sceKernelDelayThread( 5 * 1000 * 1000 );
+	PSP_MeShutdown();
 	sceKernelExitGame();
 	return 0;
 }
@@ -572,6 +573,7 @@ void PSP_RegisterCommands( void )
 {
 	Cmd_AddCommand( "psp_meminfo", PSP_PrintMemInfo, "print free heap and kernel memory" );
 	PSP_NetRegisterCommands();
+	PSP_MeRegisterCommands();
 	PSP_DbgConInit();
 }
 
@@ -605,6 +607,7 @@ void PSP_Init( void )
 
 void PSP_Shutdown( void )
 {
+	PSP_MeShutdown();
 	PSP_NetShutdown();
 	PSP_VolatileShutdown();
 }
