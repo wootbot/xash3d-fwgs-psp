@@ -731,3 +731,34 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   a frame posted, ~7 used, no misses, no waits; within 0.08 units of the VFPU results.
   `r_studio_me 0` turns it off. Writeback-only instead of writeback-invalidate before a job:
   no difference, kept the invalidate (the mixer's DSP state is read back by the main CPU).
+- 2026-11-23 (2): **World, brush models and whole studio models on the ME** (fight1, clean
+  builds, 68.2 -> 80.0 fps). World walk, surface culls and the GE commands of both passes as an ME
+  job (`de1a6eb9`, 68.2 -> 73.4): scalar box tests, called lists, the main CPU keeps the slow
+  surfaces, the clipped polygons and the efrag leaves; ~1.15 ms on the ME, with the old order the
+  main CPU waited 0.7 ms for it, so the view model (if nothing of it blends: its depth range is in
+  front of everything) and props are drawn first. Static brush models the same way (`e3fd377e`,
+  74.9). Solid models drawn from plans: cull, attachments and all GE commands on the ME, 36 us a
+  model left on the main CPU (events, light, two calls) (`3602291d`, 77.8; hgrunt has smooth and
+  flat shaded meshes: a list for each). Their bones are posted right after CL_EmitEntities for the
+  models visible in the last frame: posted after the world they kept the main CPU waiting ~1 ms.
+  The renderer is linked with local symbols: the engine calls it through a hook in me_psp.c.
+  Pitfalls: a job struct the ME writes to must not share a cache line with anything the main CPU
+  writes (the ME's write back put old values over the main CPU's: the ME hung after ~150 frames
+  and everything ran on the main CPU, only visible as lower fps and the "ME: stopped answering"
+  line); flushing the ME's whole cache after every model was slow; the ME can't read the system
+  timer (0xbc600000) and its COP0 count stands still, so time jobs from the main CPU. Waits move:
+  each saving on the main CPU showed up as a longer wait for the ME until the ME was faster too.
+- 2026-11-23: **GE time** (fight1). Measured with the GE held by a jump to itself at the start
+  of the list, released after sceGuFinish: ~9 ms a frame alone (world ~4, entities ~4), ~4 of
+  them vertices and commands (a 32x32 scissor), ~5 fill; not sensitive to texture filter or lod
+  bias. In a normal frame it starts ~2 ms after the list is opened and the main CPU waits only
+  ~0.1-0.4 ms for it, but while it draws (during the next frame's floor too) it competes for the
+  bus: the floor is ~2 ms slower than without drawing. 4 bones a skinned batch instead of 8
+  (`37bcb018`): 9.0 -> 8.3 ms; 3 no better and more CPU. Lightmaps were in RAM, the VRAM (4 MB
+  here) was full before they were built while 512 KB were kept for CPU skinned vertices
+  (`63437061`, +1.5 fps). Front to back inside a texture: no difference. VRAM/RAM use in KB:
+  lightmaps 288/16, world 1438/0, models 409/1941, sprites 349/895, HUD and menu 500/1215.
+  Render split on the main CPU now, ms: cull and gather 0.65, setup and dlights 0.3, view model
+  0.28, world 0.55 (slow surfaces, decals, sky), brushes 0.15, ME models 0.25, other solid models
+  ~0.2, particles and beams 0.38, translucent 0.35. Next: HUD and menu images out of the VRAM for
+  models, fewer GE vertices, players on the ME, culling on the ME.
