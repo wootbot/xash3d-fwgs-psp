@@ -608,6 +608,68 @@ static qboolean R_EntitySeesSky( const cl_entity_t *ent, const vec3_t origin, co
 	c->test = cell->test;
 	return c->test.sky;
 }
+
+/*
+===============
+R_EntityFloorLight
+
+the light traces of R_EntityDynamicLight kept per entity: the trace down
+and, where it finds no light direction, four more around it for a
+gradient, 20-150 us a model on the PSP, for the same answer while the
+entity stays where it is. Kept 0.25 s for the light styles, and while the
+entity is within 2 units of where it was traced (an animated prop in a
+firefight was ~120 us a frame).
+===============
+*/
+typedef struct
+{
+	const cl_entity_t *ent;
+	const model_t *world;
+	vec3_t origin;
+	float time;
+	int effects;
+	colorVec light;
+	vec3_t lightdir, lightspot, lightvec;
+} floorlight_t;
+
+static floorlight_t r_floorlight[256];
+
+static floorlight_t *R_EntityFloorLightSlot( const cl_entity_t *ent )
+{
+	// by address: temp entities (shells, gibs) all have index 0
+	return &r_floorlight[((uint)(uintptr_t)ent * 2654435761u ) >> 24];
+}
+
+static qboolean R_EntityFloorLightCached( const cl_entity_t *ent, const vec3_t origin, float time, colorVec *light, vec3_t lightdir, vec3_t lightspot, vec3_t lightvec )
+{
+	const floorlight_t *f = R_EntityFloorLightSlot( ent );
+
+	if( f->ent != ent || f->world != gp_cl->models[1] || f->effects != ( ent->curstate.effects & EF_INVLIGHT ))
+		return false;
+	if( time < f->time || time >= f->time + 0.25f || VectorDistance2( f->origin, origin ) > 2.0f * 2.0f )
+		return false;
+
+	*light = f->light;
+	VectorCopy( f->lightdir, lightdir );
+	if( lightspot ) VectorCopy( f->lightspot, lightspot );
+	if( lightvec ) VectorCopy( f->lightvec, lightvec );
+	return true;
+}
+
+static void R_EntityFloorLightStore( const cl_entity_t *ent, const vec3_t origin, float time, colorVec light, const vec3_t lightdir, const vec3_t lightspot, const vec3_t lightvec )
+{
+	floorlight_t *f = R_EntityFloorLightSlot( ent );
+
+	f->ent = ent;
+	f->world = gp_cl->models[1];
+	f->effects = ent->curstate.effects & EF_INVLIGHT;
+	VectorCopy( origin, f->origin );
+	f->time = time;
+	f->light = light;
+	VectorCopy( lightdir, f->lightdir );
+	if( lightspot ) VectorCopy( lightspot, f->lightspot ); else VectorClear( f->lightspot );
+	if( lightvec ) VectorCopy( lightvec, f->lightvec ); else VectorClear( f->lightvec );
+}
 #endif
 
 /*
@@ -678,7 +740,11 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 		}
 	}
 
+#if XASH_PSP
+	if(( light.r + light.g + light.b ) == 0 && !R_EntityFloorLightCached( ent, origin, (float)time, &light, lightDir, lightspot, lightvec ))
+#else
 	if(( light.r + light.g + light.b ) == 0 )
+#endif
 	{
 		VectorScale( lightDir, 2048.0f, vecEnd );
 		VectorAdd( vecEnd, vecSrc, vecEnd );
@@ -724,6 +790,9 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 		{
 			VectorCopy( lightvec, lightDir );
 		}
+#if XASH_PSP
+		R_EntityFloorLightStore( ent, origin, (float)time, light, lightDir, lightspot, lightvec );
+#endif
 	}
 
 	if( ent->curstate.renderfx == kRenderFxLightMultiplier && ent->curstate.iuser4 != 10 )
