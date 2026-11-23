@@ -1012,10 +1012,19 @@ need, and who may draw it), then computes the bones of the models that were
 visible in the last frame. The second does the same for the complete lists,
 until the world's job is posted (the main CPU waits for that one first). With
 the view known R_StudioMePrepare culls with the table and posts the third: the
-other bones, and for the models R_StudioDrawMeModels
-draws (medraw_t) the exact cull, the attachments and the GE commands.
-R_StudioSetupBones takes the bones of the rest only if what it sees matches
-what they were computed from (mebones_key_t), else it computes them here.
+other bones, and for the models the ME draws (medraw_t) the exact cull, the
+attachments, the light and the GE commands. Only the GE waits for those
+(r_mebones_gates); R_StudioFinishMeModels does events and attachments at the
+end of the frame. R_StudioSetupBones takes the bones of the rest only if what
+it sees matches what they were computed from (mebones_key_t), else it computes
+them here.
+
+The light: the traces for the floor's and the sky, with caches of the ME's own,
+the dynamic lights of the moment the first job was posted, the entity lights of
+the third. A light an event makes shows up a frame later than on the main CPU.
+
+Translucent models are drawn the same way, each called where it's due in the
+sorted list: blending and alpha are the main CPU's, the light and the rest the ME's.
 
 Players: the gait is processed before the first job (R_StudioMePlayer), the
 gait sequence's legs and the weapon model are the ME's.
@@ -1027,15 +1036,52 @@ the view model and the random render effects stay on the main CPU.
 ====================
 */
 static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "cull studio models and compute the bones of animated ones on the Media Engine" );
-static CVAR_DEFINE_AUTO( r_studio_me_draw, "1", FCVAR_ARCHIVE, "write the draw commands of solid ones there too, without the client DLL's renderer" );
+static CVAR_DEFINE_AUTO( r_studio_me_draw, "1", FCVAR_ARCHIVE, "light them and write their draw commands there too, without the client DLL's renderer" );
 static CVAR_DEFINE_AUTO( r_studio_me_players, "1", FCVAR_ARCHIVE, "players too (needs r_studio_me_draw)" );
 
-#define MEBONES_MAXENTS	40
+#define MEBONES_MAXENTS	64
 #define MEBONES_POOL	1536	// bones in the output pool
 #define MEBONES_ATTACHMENTS	4	// cl_entity_t.attachment
 #define MEBONES_CMDS	16384	// GE commands of all models
 #define MEBONES_MAXPLAYERS	16
 #define MEMERGE_CACHE	16
+#define MELIGHT_MAXPHYS	64	// brush models the floor light may come from
+#define MELIGHT_MAXELIGHTS	16
+#define MELIGHT_CACHE	256
+#define MELIGHT_CELLS	512
+
+// the light of a model, as alight_t
+typedef struct
+{
+	float		ambient, shade;
+	vec3_t		vec;
+	float		color[3];
+	uint32_t		floor;	// cl_entity_t.cvFloorColor, 8 bits each; bit 31: none
+} melight_t;
+
+typedef struct
+{
+	vec3_t		origin;
+	float		radius;
+	float		color[3];
+} medlight_t;
+
+typedef struct
+{
+	vec3_t		origin;
+	float		r2;
+	int		key;
+	int		color[3];	// linear
+} meelight_t;
+
+// a brush model of the player's physents
+typedef struct
+{
+	model_t		*model;
+	qboolean		rotated;
+	vec3_t		offset;
+	matrix3x4		matrix;	// of a rotated one
+} mephys_t;
 
 typedef struct
 {
@@ -1091,6 +1137,8 @@ typedef struct mebones_ent_s
 	const memerge_t	*merge;	// a weapon's
 	struct mebones_ent_s *weapon;
 	int		done;	// the bones
+	int		lit;	// light is known, without the entity lights
+	melight_t		light;
 } __attribute__(( aligned( 64 ))) mebones_ent_t;
 
 // what both jobs need to know about this frame
@@ -1104,6 +1152,19 @@ typedef struct
 	int		framecount;
 	int		numplayers;
 	meplayer_t	players[MEBONES_MAXPLAYERS];
+
+	// if anything is drawn by R_StudioDrawMeModels
+	qboolean		draw;
+	float		frametime;
+	const model_t	*world;
+	qboolean		sky;	// there's sky light
+	vec3_t		skyvec, skyend;	// direction, and the end of the trace from an origin
+	uint		skycolor[3];
+	float		direct;
+	const uint16_t	*gamma;	// NULL: linear
+	int		numdlights, numphys;
+	medlight_t	dlights[MAX_DLIGHTS];
+	mephys_t		phys[MELIGHT_MAXPHYS];
 } mebones_frame_t;
 
 typedef struct
@@ -1119,28 +1180,36 @@ typedef struct
 	const struct medraw_s *draw, *wdraw;	// R_StudioDrawMeModels draws it
 	int		index;	// in the table
 	const meplayer_t	*player;
+	int		mode;	// MEMODE
 } mebones_item_t;
+
+enum { MEMODE_SOLID = 0, MEMODE_BLEND, MEMODE_ADD };
 
 typedef struct
 {
 	const mebones_frame_t *frame;
-	int		count;
+	int		count, numsolid;	// the solid ones come first
 	mebones_item_t	items[MEBONES_MAXENTS];
 
 	// for the ones with a medraw_t
 	int		numplanes;
 	float		planes[FRUSTUM_PLANES][4];	// normal, -dist
 	vec3_t		eye, vright;
+	int		numelights;
+	meelight_t	elights[MELIGHT_MAXELIGHTS];
 } mebones_job_t;
 
 // of an item, two cache lines
 typedef struct
 {
 	uint32_t		visible;	// of the ones with a medraw_t, else 1
-	uint32_t		cmds[4];	// addresses of its commands, smooth and flat items, the weapon's, 0: none
+	uint32_t		cmds;	// address of its commands, 0: none. The solid ones' are one list, of all
 	mebones_ent_t	*ent;	// NULL: not on the ME
 	uint32_t		blendprev;
 	float		prevframe;
+	uint32_t		events;	// R_StudioClientEvents may have something to do
+	uint32_t		floor;	// of melight_t
+	uint32_t		pad;
 	float		attachment[MEBONES_ATTACHMENTS][3];
 	matrix3x4		rotation;
 } mebones_res_t;
@@ -1155,6 +1224,8 @@ static struct
 	mebones_job_t	job;
 	uint32_t		ticket, early_ticket;
 	qboolean		begun;	// the first early job is posted
+	qboolean		finish;	// R_StudioFinishMeModels has something to do
+	double		refused;	// R_StudioMeRefused until then
 	qboolean		table;	// the table is this frame's
 	qboolean		tableread;	// it's in this CPU's cache
 	int		count;	// items valid for this frame's draw
@@ -1168,6 +1239,17 @@ static mesort_t r_mesort[MECULL_MAXTRANS] __attribute__(( aligned( 64 )));
 static matrix3x4 r_mebones_out[MEBONES_POOL] __attribute__(( aligned( 64 )));
 static mebones_res_t r_mebones_res[MEBONES_MAXENTS] __attribute__(( aligned( 64 )));
 static uint r_mebones_cmds[MEBONES_CMDS] __attribute__(( aligned( 64 )));
+
+/*
+The GE calls the list of the solid models, and those of the translucent ones,
+through gates (only accessed uncached): BASE and a jump to itself, until the ME
+is done with the commands and replaces the jump with a NOP, then BASE and a jump
+to them. The main CPU doesn't wait for the models
+*/
+#define MEBONES_GATEWORDS	4
+static volatile uint r_mebones_gates[( MEBONES_MAXENTS + 4 ) * MEBONES_GATEWORDS] __attribute__(( aligned( 64 ))); // whole cache lines
+#define MEBONES_GATE( i )	((volatile uint *)( 0x40000000 | (uintptr_t)&r_mebones_gates[( i ) * MEBONES_GATEWORDS] ))
+#define MEBONES_SOLIDGATE	MEBONES_MAXENTS
 static mebones_ent_t r_mebones_ents[MEBONES_MAXENTS * 2] __attribute__(( aligned( 64 )));
 
 // its own, in cache lines of their own (aligned as a type: the size is too)
@@ -1179,6 +1261,27 @@ typedef struct
 	byte	bones[MAXSTUDIOBONES];
 } megait_t;
 
+// the traces of an entity's light, as floorlight_t and the caches of R_EntitySeesSky
+typedef struct
+{
+	const cl_entity_t	*ent;	// NULL: no floor light
+	int	effects;
+	float	time;
+	vec3_t	origin;
+	vec3_t	dir;
+	uint	rgb[3];
+	const cl_entity_t	*skyent;
+	vec3_t	skyorigin;	// the trace's
+	int	sky;
+} melightcache_t;
+
+typedef struct
+{
+	int	x, y, z;
+	int	sky;	// 0: not known, 1: no, 2: yes
+	vec3_t	origin;
+} meskycell_t;
+
 typedef struct
 {
 	int	count;	// of r_mebones_ents
@@ -1189,6 +1292,9 @@ typedef struct
 	uint16_t	seen[256];	// when an entity was last not culled, by a hash of its address: the low bits of tr.framecount
 	megait_t	gait[4];	// R_MeGaitBones
 	int	nextgait;
+	const void	*lightkey[6];	// the map and its sky the caches are for
+	melightcache_t	light[MELIGHT_CACHE];
+	meskycell_t	skycells[MELIGHT_CELLS];
 } __attribute__(( aligned( 64 ))) mebones_me_t;
 
 static mebones_me_t r_mebones_me;
@@ -1425,7 +1531,7 @@ static void R_MeSequence( const mebones_ent_t *m, const mebones_seq_t *seq, int 
 	}
 }
 
-static void R_MeModelCommands( const mebones_job_t *job, const mebones_ent_t *m, const struct medraw_s *d, uint32_t *cmds );
+static uint *R_MeModelCommands( const mebones_job_t *job, const mebones_item_t *it, const mebones_ent_t *m, const melight_t *l );
 
 // R_StudioComputeBBox: the box of the model and the sequence, transformed
 static qboolean R_MeBonesCulled( const mebones_job_t *job, const mebones_ent_t *m, const model_t *mod )
@@ -1744,6 +1850,7 @@ static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 	m->merge = NULL;
 	m->weapon = NULL;
 	m->done = false;
+	m->lit = false;
 	return m;
 }
 
@@ -1842,6 +1949,549 @@ static mebones_ent_t *R_MeGather( const mebones_frame_t *frame, const cl_entity_
 	return m;
 }
 
+/*
+====================
+the light of a model on the ME: R_EntityDynamicLight (ref_light.c), from the
+main CPU's lights and physents in the frame and caches of its own, then
+R_StudioEntityLight and R_StudioGEFoldElights
+====================
+*/
+typedef struct
+{
+	const model_t	*model;
+	float		fraction;
+	vec3_t		vec;
+	uint		rgb[3];
+} melighttrace_t;
+
+static float R_MeNormalize( vec3_t v )
+{
+	float len = DotProduct( v, v );
+
+	if( len > 0.0f )
+	{
+		len = __builtin_sqrtf( len );
+		const float k = 1.0f / len;
+		VectorScale( v, k, v );
+	}
+	return len;
+}
+
+// does the line hit the world's sky first, as PM_RecursiveSurfCheck: 0 nothing hit, 1 something else, 2 sky
+static int R_MeSkyTrace( const model_t *mod, const mnode_t *node, const vec3_t p1, const vec3_t p2 )
+{
+	const float eps = 0.03125f; // FRAC_EPSILON
+start:
+	if( node->contents < 0 )
+		return 0;
+
+	const float t1 = PlaneDiff( p1, node->plane );
+	const float t2 = PlaneDiff( p2, node->plane );
+
+	if( t1 >= -eps && t2 >= -eps )
+	{
+		node = node_child( node, 0, mod );
+		goto start;
+	}
+
+	if( t1 < eps && t2 < eps )
+	{
+		node = node_child( node, 1, mod );
+		goto start;
+	}
+
+	const int side = t1 < 0.0f;
+	float frac = t1 / ( t1 - t2 );
+	frac = bound( 0.0f, frac, 1.0f );
+
+	vec3_t mid;
+	VectorLerp( p1, frac, p2, mid );
+
+	const int hit = R_MeSkyTrace( mod, node_child( node, side, mod ), p1, mid );
+	if( hit )
+		return hit;
+
+	const int numsurfaces = node_numsurfaces( node, mod );
+	const msurface_t *surf = &mod->surfaces[node_firstsurface( node, mod )];
+
+	for( int i = 0; i < numsurfaces; i++, surf++ )
+	{
+		const mfacebevel_t *fb = surf->info->bevel;
+		vec3_t delta;
+		int j;
+
+		if( !fb )
+			continue;
+
+		VectorSubtract( mid, fb->origin, delta );
+		if( DotProduct( delta, delta ) >= fb->radius )
+			continue;
+
+		for( j = 0; j < fb->numedges; j++ )
+		{
+			if( PlaneDiff( mid, &fb->edges[j] ) > eps )
+				break;
+		}
+
+		if( j == fb->numedges )
+			return FBitSet( surf->flags, SURF_DRAWSKY ) ? 2 : 1;
+	}
+
+	return R_MeSkyTrace( mod, node_child( node, side ^ 1, mod ), mid, p2 );
+}
+
+static int R_MeCell( float f )
+{
+	const int i = (int)f;
+	return i > f ? i - 1 : i;
+}
+
+static qboolean R_MeSeesSky( const mebones_frame_t *frame, const cl_entity_t *e, melightcache_t *c, const vec3_t start )
+{
+	const vec_t *const origin = e->origin;
+
+	if( c->skyent == e && VectorDistance2( c->skyorigin, origin ) < 32.0f * 32.0f )
+		return c->sky;
+
+	const int x = R_MeCell( origin[0] * ( 1.0f / 16.0f ));
+	const int y = R_MeCell( origin[1] * ( 1.0f / 16.0f ));
+	const int z = R_MeCell( origin[2] * ( 1.0f / 16.0f ));
+	meskycell_t *cell = &r_mebones_me.skycells[((uint)x * 73856093u ^ (uint)y * 19349663u ^ (uint)z * 83492791u ) & ( MELIGHT_CELLS - 1 )];
+
+	if( !cell->sky || cell->x != x || cell->y != y || cell->z != z )
+	{
+		vec3_t end;
+
+		VectorSubtract( origin, frame->skyend, end );
+		cell->x = x;
+		cell->y = y;
+		cell->z = z;
+		VectorCopy( origin, cell->origin );
+		cell->sky = R_MeSkyTrace( frame->world, &frame->world->nodes[frame->world->hulls[0].firstclipnode], start, end ) == 2 ? 2 : 1;
+	}
+
+	c->skyent = e;
+	VectorCopy( cell->origin, c->skyorigin );
+	c->sky = cell->sky == 2;
+	return c->sky;
+}
+
+// R_RecursiveLightPoint
+static qboolean R_MeLightPoint( melighttrace_t *tr, const mnode_t *node, float p1f, float p2f, const vec3_t start, const vec3_t end )
+{
+	const model_t *const model = tr->model;
+restart:
+	if( !node || node->contents < 0 )
+	{
+		VectorClear( tr->rgb );
+		return false;
+	}
+
+	const float front = PlaneDiff( start, node->plane );
+	const float back = PlaneDiff( end, node->plane );
+	const int side = front < 0;
+
+	if(( back < 0 ) == side )
+	{
+		node = node_child( node, side, model );
+		goto restart;
+	}
+
+	const float frac = front / ( front - back );
+	vec3_t mid;
+	VectorLerp( start, frac, end, mid );
+
+	const float midf = p1f + ( p2f - p1f ) * frac;
+
+	if( R_MeLightPoint( tr, node_child( node, side, model ), p1f, midf, start, mid ))
+		return true;
+
+	const int numsurfaces = node_numsurfaces( node, model );
+	const msurface_t *surf = &model->surfaces[node_firstsurface( node, model )];
+
+	for( int i = 0; i < numsurfaces; i++, surf++ )
+	{
+		const mextrasurf_t *info = surf->info;
+
+		if( FBitSet( surf->flags, SURF_DRAWTILED ))
+			continue;
+
+		const float ds = DotProduct( mid, info->lmvecs[0] ) + info->lmvecs[0][3] - info->lightmapmins[0];
+		const float dt = DotProduct( mid, info->lmvecs[1] ) + info->lmvecs[1][3] - info->lightmapmins[1];
+
+		if( ds < 0.0f || dt < 0.0f || ds > info->lightextents[0] || dt > info->lightextents[1] )
+			continue;
+
+		VectorClear( tr->rgb );
+
+		if( !surf->samples )
+			return true;
+
+		const int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
+		const int smax = info->lightextents[0] / sample_size + 1;
+		const int tmax = info->lightextents[1] / sample_size + 1;
+		const int size = smax * tmax;
+		const int ofs = (int)( dt / sample_size + 0.5f ) * smax + (int)( ds / sample_size + 0.5f );
+		const color24 *lm = surf->samples + ofs;
+		const color24 *dm = info->deluxemap ? info->deluxemap + ofs : NULL;
+
+		tr->fraction = midf;
+
+		for( int map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++ )
+		{
+			const uint scale = g_lightstylevalue[surf->styles[map]];
+
+			tr->rgb[0] += lm->r * scale;
+			tr->rgb[1] += lm->g * scale;
+			tr->rgb[2] += lm->b * scale;
+			lm += size;
+
+			if( dm )
+			{
+				const float f = 1.0f / 128.0f;
+				const float n[3] = { ((float)dm->r - 128.0f) * f, ((float)dm->g - 128.0f) * f, ((float)dm->b - 128.0f) * f };
+				vec3_t s = { info->lmvecs[0][0], info->lmvecs[0][1], info->lmvecs[0][2] };
+				vec3_t u = { -info->lmvecs[1][0], -info->lmvecs[1][1], -info->lmvecs[1][2] };
+				const float sign = FBitSet( surf->flags, SURF_PLANEBACK ) ? -1.0f : 1.0f;
+
+				R_MeNormalize( s );
+				R_MeNormalize( u );
+				for( int k = 0; k < 3; k++ )
+					tr->vec[k] -= ( s[k] * n[0] + u[k] * n[1] + surf->plane->normal[k] * sign * n[2] ) * scale;
+				dm += size;
+			}
+		}
+
+		return true;
+	}
+
+	return R_MeLightPoint( tr, node_child( node, !side, model ), midf, p2f, mid, end );
+}
+
+// R_LightVecInternal
+static void R_MeLightVec( const mebones_frame_t *frame, const vec3_t start, const vec3_t end, uint rgb[3], vec3_t vec )
+{
+	float last = 1.0f;
+
+	VectorClear( rgb );
+	VectorClear( vec );
+
+	if( !frame->world->lightdata )
+	{
+		VectorSet( rgb, 255, 255, 255 );
+		return;
+	}
+
+	for( int i = 0; i < frame->numphys; i++ )
+	{
+		const mephys_t *pe = &frame->phys[i];
+		melighttrace_t tr;
+		vec3_t p1, p2;
+
+		VectorSubtract( start, pe->offset, p1 );
+		VectorSubtract( end, pe->offset, p2 );
+
+		if( pe->rotated )
+		{
+			const vec3_t s = { p1[0], p1[1], p1[2] }, e = { p2[0], p2[1], p2[2] };
+
+			for( int k = 0; k < 3; k++ )
+			{
+				p1[k] = s[0] * pe->matrix[0][k] + s[1] * pe->matrix[1][k] + s[2] * pe->matrix[2][k];
+				p2[k] = e[0] * pe->matrix[0][k] + e[1] * pe->matrix[1][k] + e[2] * pe->matrix[2][k];
+			}
+		}
+
+		tr.model = pe->model;
+		tr.fraction = 1.0f;
+		VectorClear( tr.vec );
+
+		if( !R_MeLightPoint( &tr, &pe->model->nodes[pe->model->hulls[0].firstclipnode], 0.0f, 1.0f, p1, p2 ))
+			continue;
+
+		if( tr.fraction < last )
+		{
+			VectorCopy( tr.vec, vec );
+			R_MeNormalize( vec );
+			for( int k = 0; k < 3; k++ )
+				rgb[k] = Q_min( tr.rgb[k] >> 8, 255 );
+			last = tr.fraction;
+
+			if( rgb[0] + rgb[1] + rgb[2] != 0 )
+				break;
+		}
+	}
+}
+
+static void R_MeFloorLight( const mebones_frame_t *frame, melightcache_t *c, const vec3_t origin, float dirz )
+{
+	const vec3_t start = { origin[0], origin[1], origin[2] - dirz * 8.0f };
+	const vec3_t end = { start[0], start[1], start[2] + dirz * 2048.0f };
+	vec3_t vec;
+
+	R_MeLightVec( frame, start, end, c->rgb, vec );
+
+	// from the ceiling
+	if( r_lighting_extended.value && c->rgb[0] + c->rgb[1] + c->rgb[2] == 0 )
+		R_MeLightVec( frame, end, start, c->rgb, vec );
+
+	if( VectorIsNull( vec ))
+	{
+		static const signed char ofs[4][2] = {{ -16, -16 }, { 16, -16 }, { 16, 16 }, { -16, 16 }};
+		float grad[4];
+
+		for( int i = 0; i < 4; i++ )
+		{
+			const vec3_t s = { start[0] + ofs[i][0], start[1] + ofs[i][1], start[2] };
+			const vec3_t e = { end[0] + ofs[i][0], end[1] + ofs[i][1], end[2] };
+			uint rgb[3];
+			vec3_t v;
+
+			R_MeLightVec( frame, s, e, rgb, v );
+			grad[i] = ( rgb[0] + rgb[1] + rgb[2] ) * ( 1.0f / 768.0f );
+		}
+
+		c->dir[0] = grad[0] - grad[1] - grad[2] + grad[3];
+		c->dir[1] = grad[1] + grad[0] - grad[2] - grad[3];
+		c->dir[2] = dirz;
+		R_MeNormalize( c->dir );
+	}
+	else VectorCopy( vec, c->dir );
+}
+
+// the caches are for the map and the sky they were filled in
+static void R_MeLightCheck( const mebones_frame_t *frame )
+{
+	const void *key[6] = { frame->world, frame->world->nodes, frame->world->surfaces, frame->world->lightdata, (const void *)frame->world->numnodes, NULL };
+
+	memcpy( &key[5], &frame->skyvec[0], sizeof( float ));
+	if( !memcmp( key, r_mebones_me.lightkey, sizeof( key )))
+		return;
+
+	memcpy( r_mebones_me.lightkey, key, sizeof( key ));
+	memset( r_mebones_me.light, 0, sizeof( r_mebones_me.light ));
+	memset( r_mebones_me.skycells, 0, sizeof( r_mebones_me.skycells ));
+}
+
+// R_EntityDynamicLight
+static void R_MeDynamicLight( const mebones_frame_t *frame, const cl_entity_t *e, qboolean small, melight_t *l )
+{
+	const int flags = e->model->type == mod_studio ? e->model->flags : 0;
+
+	l->floor = BIT( 31 );
+
+	if( FBitSet( e->curstate.effects, EF_FULLBRIGHT ))
+	{
+		l->shade = 0.0f;
+		l->ambient = 192.0f;
+		VectorSet( l->vec, 0.0f, 0.0f, -1.0f );
+		VectorSet( l->color, 1.0f, 1.0f, 1.0f );
+		return;
+	}
+
+	melightcache_t *c = &r_mebones_me.light[((uint)(uintptr_t)e * 2654435761u ) >> 24];
+	const int effects = e->curstate.effects & EF_INVLIGHT;
+	const float dirz = effects ? 1.0f : -1.0f;
+	vec3_t dir = { 0.0f, 0.0f, dirz };
+	uint rgb[3] = { 0, 0, 0 };
+
+	if( frame->sky )
+	{
+		const vec3_t start = { e->origin[0], e->origin[1], e->origin[2] - dirz * 8.0f };
+
+		if( FBitSet( flags, STUDIO_FORCE_SKYLIGHT ) || R_MeSeesSky( frame, e, c, start ))
+		{
+			VectorCopy( frame->skyvec, dir );
+			VectorCopy( frame->skycolor, rgb );
+		}
+	}
+
+	if( rgb[0] + rgb[1] + rgb[2] == 0 )
+	{
+		const float time = frame->time;
+		const float dist = small ? 16.0f : 2.0f; // shells and gibs fly
+
+		if( c->ent != e || c->effects != effects || time < c->time || time >= c->time + 0.25f || VectorDistance2( c->origin, e->origin ) > dist * dist )
+		{
+			R_MeFloorLight( frame, c, e->origin, dirz );
+			c->ent = e;
+			c->effects = effects;
+			c->time = time;
+			VectorCopy( e->origin, c->origin );
+		}
+		VectorCopy( c->dir, dir );
+		VectorCopy( c->rgb, rgb );
+	}
+
+	if( e->curstate.renderfx == kRenderFxLightMultiplier && e->curstate.iuser4 != 10 )
+	{
+		for( int i = 0; i < 3; i++ )
+			rgb[i] *= e->curstate.iuser4 * ( 1.0f / 10.0f );
+	}
+
+	l->floor = Q_min( rgb[0], 255 ) | Q_min( rgb[1], 255 ) << 8 | Q_min( rgb[2], 255 ) << 16;
+
+	float final[3] = { rgb[0], rgb[1], rgb[2] };
+	float total = Q_max( Q_max( final[0], final[1] ), final[2] );
+	if( total == 0.0f )
+		total = 1.0f;
+
+	VectorScale( dir, total, dir );
+
+	for( int i = 0; i < frame->numdlights; i++ )
+	{
+		const medlight_t *dl = &frame->dlights[i];
+		vec3_t d;
+
+		VectorSubtract( e->origin, dl->origin, d );
+
+		const float d2 = DotProduct( d, d );
+		if( d2 >= dl->radius * dl->radius )
+			continue;
+
+		const float dist = __builtin_sqrtf( d2 );
+		const float add = dl->radius - dist;
+
+		total += add;
+		VectorMA( dir, dist > 1.0f ? add / dist : add, d, dir );
+		VectorMA( final, add * ( 1.0f / 256.0f ), dl->color, final );
+	}
+
+	VectorScale( dir, FBitSet( flags, STUDIO_AMBIENT_LIGHT ) ? 0.6f : frame->direct, dir );
+
+	l->shade = R_MeNormalize( dir );
+	l->ambient = total - l->shade;
+	VectorCopy( dir, l->vec );
+
+	total = Q_max( Q_max( final[0], final[1] ), final[2] );
+	if( total > 0.0f )
+		VectorScale( final, 1.0f / total, l->color );
+	else VectorSet( l->color, 1.0f, 1.0f, 1.0f );
+
+	if( l->ambient > 128.0f )
+		l->ambient = 128.0f;
+	if( l->ambient + l->shade > 255.0f )
+		l->shade = 255.0f - l->ambient;
+}
+
+// R_StudioEntityLight and R_StudioGEFoldElights
+static void R_MeEntityLight( const mebones_job_t *job, const mebones_ent_t *m, const cl_entity_t *e, const float attachment[][3], melight_t *l )
+{
+	const vec3_t origin = { m->rotation[0][3], m->rotation[1][3], m->rotation[2][3] };
+	int lights[MAX_LOCALLIGHTS], num = 0;
+	float strength[MAX_LOCALLIGHTS], dist2 = 1000000.0f;
+
+	for( int i = 0; i < job->numelights; i++ )
+	{
+		const meelight_t *el = &job->elights[i];
+		vec3_t at = { el->origin[0], el->origin[1], el->origin[2] }, mid;
+		int k = num;
+
+		if(( el->key & 0xFFF ) == e->index )
+		{
+			const int att = ( el->key >> 12 ) & 0xF;
+
+			if( !att ) VectorCopy( e->origin, at );
+			else if( att < m->hdr->numattachments ) VectorCopy( attachment[att], at );
+			else if( att < MEBONES_ATTACHMENTS ) VectorCopy( e->attachment[att], at );
+		}
+
+		VectorSubtract( origin, at, mid );
+
+		const float f = DotProduct( mid, mid );
+		const float s = f > el->r2 ? el->r2 / f : 1.0f;
+
+		if( s <= 0.05f )
+			continue;
+
+		if( num >= MAX_LOCALLIGHTS )
+		{
+			k = -1;
+			for( int j = 0; j < num; j++ )
+			{
+				if( strength[j] < dist2 && strength[j] < s )
+				{
+					dist2 = strength[j];
+					k = j;
+				}
+			}
+			if( k < 0 )
+				continue;
+		}
+		else num++;
+
+		lights[k] = i;
+		strength[k] = s;
+	}
+
+	if( !num )
+		return;
+
+	vec3_t vec, color;
+	const float base = l->ambient + l->shade;
+	float ambient = l->ambient, total = base;
+
+	VectorScale( l->vec, l->shade, vec );
+	VectorScale( l->color, base, color );
+
+	for( int i = 0; i < num; i++ )
+	{
+		const meelight_t *el = &job->elights[lights[i]];
+		const float max = Q_max( Q_max( el->color[0], el->color[1] ), el->color[2] );
+		vec3_t dir;
+
+		if( max <= 0.0f )
+			continue;
+
+		VectorSubtract( origin, el->origin, dir );
+
+		const float d2 = DotProduct( dir, dir );
+		const float s = d2 > el->r2 ? __builtin_sqrtf( el->r2 / d2 ) : 1.0f;
+		const float strong = max * ( 1.0f / 4.0f ) * s;
+
+		if( d2 > 0.0f )
+			VectorMA( vec, ( strong * 0.5f ) / __builtin_sqrtf( d2 ), dir, vec );
+		ambient += strong * 0.5f;
+		total += strong;
+
+		for( int j = 0; j < 3; j++ )
+			color[j] += el->color[j] / max * strong;
+	}
+
+	l->shade = R_MeNormalize( vec );
+	if( l->shade > 0.0f )
+		VectorCopy( vec, l->vec );
+	l->ambient = ambient;
+
+	const float cm = Q_max( Q_max( color[0], color[1] ), color[2] );
+	if( cm > 0.0f && total > 0.0f )
+		VectorScale( color, 1.0f / cm, l->color );
+}
+
+// may R_StudioClientEvents have something to do
+static qboolean R_MeEvents( const mebones_frame_t *frame, const cl_entity_t *e, const mebones_ent_t *m )
+{
+	const mstudioseqdesc_t *pseqdesc = m->seq[0].pseqdesc;
+	const mstudioevent_t *pevent = (const mstudioevent_t *)((const byte *)m->hdr + pseqdesc->eventindex );
+	const float end = m->seq[0].f;
+	float start = end - e->curstate.framerate * frame->frametime * pseqdesc->fps;
+
+	if( FBitSet( e->curstate.effects, EF_MUZZLEFLASH ))
+		return true;
+
+	if( e->latched.sequencetime == e->curstate.animtime && !FBitSet( pseqdesc->flags, STUDIO_LOOPING ))
+		start = Q_min( start, -0.01f );
+
+	// it looks again exactly
+	for( int i = 0; i < pseqdesc->numevents; i++ )
+	{
+		if( pevent[i].event >= EVENT_CLIENT && pevent[i].frame >= start - 0.1f && pevent[i].frame <= end + 0.1f )
+			return true;
+	}
+
+	return false;
+}
+
 static inline uint16_t *R_MeBonesSeen( const cl_entity_t *e )
 {
 	return &r_mebones_me.seen[((uint)(uintptr_t)e * 2654435761u ) >> 24];
@@ -1924,6 +2574,7 @@ static void R_MeClassify( const mebones_frame_t *frame, const cl_entity_t *e, me
 
 	R_MeSphere( frame, e, mod, hdr, c );
 	c->type = MECULL_TEST;
+	c->mode = MEMODE_SOLID;
 	c->small = hdr->numbones <= 2;
 
 	if( e->curstate.renderfx == kRenderFxDistort || e->curstate.renderfx == kRenderFxHologram || e->curstate.renderfx == kRenderFxExplode )
@@ -1934,8 +2585,12 @@ static void R_MeClassify( const mebones_frame_t *frame, const cl_entity_t *e, me
 	if( !c->small )
 		c->type = MECULL_BONES;
 
-	if( e->curstate.rendermode == kRenderNormal && e->curstate.renderfx == kRenderFxNone && !e->curstate.colormap
-		&& e->curstate.body >= 0 && e->curstate.body <= 0xffff
+	if( e->curstate.rendermode == kRenderTransAdd )
+		c->mode = MEMODE_ADD;
+	else c->mode = e->curstate.rendermode == kRenderNormal ? MEMODE_SOLID : MEMODE_BLEND;
+
+	if( e->curstate.rendermode >= kRenderNormal && e->curstate.rendermode <= kRenderTransAdd && e->curstate.renderfx != kRenderFxGlowShell
+		&& !e->curstate.colormap && e->curstate.body >= 0 && e->curstate.body <= 0xffff
 		&& hdr->numattachments <= MEBONES_ATTACHMENTS && !FBitSet( hdr->flags, STUDIO_HAS_BONEWEIGHTS ))
 		c->type = c->small ? MECULL_SMALL : MECULL_DRAW;
 }
@@ -1978,7 +2633,7 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 		const cl_entity_t *e = r_mebones_me.ents[i]; // the main CPU may be sorting the list
 		const meplayer_t *player = NULL;
 
-		if( c->type != MECULL_BONES && c->type != MECULL_DRAW && c->type != MECULL_PLAYER )
+		if( c->type != MECULL_BONES && c->type != MECULL_DRAW && c->type != MECULL_PLAYER && ( c->type != MECULL_SMALL || !frame->draw ))
 			continue;
 		if( r_mebones_me.slot[i] || *R_MeBonesSeen( e ) != last )
 			continue;
@@ -1996,6 +2651,11 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 			continue;
 
 		R_MeBones( m, NULL );
+		if( frame->draw && c->type != MECULL_BONES )
+		{
+			R_MeDynamicLight( frame, e, c->small, &m->light );
+			m->lit = true;
+		}
 		r_mebones_me.slot[i] = m - r_mebones_ents + 1;
 	}
 }
@@ -2011,8 +2671,9 @@ static void R_MeEarlyJob( void *arg )
 	if( number == 1 )
 	{
 		r_mebones_me.count = r_mebones_me.used = 0;
-		r_mebones_me.p = r_mebones_cmds;
 		memset( r_mebones_me.slot, 0, sizeof( r_mebones_me.slot ));
+		if( frame->draw )
+			R_MeLightCheck( frame );
 	}
 
 	for( int i = job->firstsolid; i < numsolid; i++ )
@@ -2035,6 +2696,7 @@ static void R_MeEarlyJob( void *arg )
 
 		R_MeSphere( frame, frame->solid[p->index], p->mod, p->hdr, c );
 		c->type = MECULL_PLAYER;
+		c->mode = MEMODE_SOLID;
 		c->small = false;
 		c->rpx = 1e6f; // never too small
 	}
@@ -2048,24 +2710,63 @@ static void R_MeEarlyJob( void *arg )
 	R_MeEarlyBones( job, MECULL_MAXSOLID, numtrans, number );
 }
 
+static void R_MeGateClose( int i )
+{
+	volatile uint *const gate = MEBONES_GATE( i );
+	const uintptr_t self = (uintptr_t)&r_mebones_gates[i * MEBONES_GATEWORDS + 1];
+
+	gate[0] = 0x10000000 | (( self >> 8 ) & 0xf0000 ); // BASE
+	gate[1] = 0x08000000 | ( self & 0xffffff ); // JUMP
+}
+
+// to the commands, NULL: to nothing
+static void R_MeGateOpen( int i, uintptr_t cmds )
+{
+	volatile uint *const gate = MEBONES_GATE( i );
+
+	if( cmds )
+	{
+		gate[2] = 0x10000000 | (( cmds >> 8 ) & 0xf0000 );
+		gate[3] = 0x08000000 | ( cmds & 0xffffff );
+		__asm__ volatile( "sync" ::: "memory" );
+	}
+	gate[1] = cmds ? 0 : 0x0B000000; // NOP, RET
+}
+
+// the GE may have the solid models
+static void R_MeSolidDone( void )
+{
+	uint *p = r_mebones_me.p;
+
+	*p++ = 0x0B000000; // RET
+	PSP_MeWriteback( r_mebones_me.p, sizeof( *p ));
+	r_mebones_me.p = p;
+	R_MeGateOpen( MEBONES_SOLIDGATE, (uintptr_t)r_mebones_cmds );
+}
+
 static void R_MeBonesJob( void *arg )
 {
 	const mebones_job_t *job = arg;
 
+	r_mebones_me.p = r_mebones_cmds;
+
 	for( int i = 0; i < job->count; i++ )
 	{
+		if( i == job->numsolid )
+			R_MeSolidDone();
+
 		const mebones_item_t *it = &job->items[i];
 		const int slot = r_mebones_me.slot[it->index];
 		const mecull_t *c = &r_mecull[it->index];
 		mebones_ent_t *m = slot ? &r_mebones_ents[slot - 1] : R_MeGather( job->frame, it->e, c->hdr, it->player );
 		mebones_res_t *res = &r_mebones_res[i];
 
-		res->cmds[0] = res->cmds[1] = res->cmds[2] = res->cmds[3] = 0;
+		res->cmds = 0;
 		res->ent = m;
 		res->visible = true;
+		res->events = true;
 
-		if( !c->small )
-			*R_MeBonesSeen( it->e ) = job->frame->framecount + 1;
+		*R_MeBonesSeen( it->e ) = job->frame->framecount + 1;
 
 		if( m )
 		{
@@ -2081,6 +2782,7 @@ static void R_MeBonesJob( void *arg )
 			{
 				const mstudioattachment_t *pAtt = (const mstudioattachment_t *)((const byte *)m->hdr + m->hdr->attachmentindex );
 				uint *const cmds = r_mebones_me.p;
+				melight_t light;
 
 				for( int k = 0; k < m->hdr->numattachments; k++ )
 				{
@@ -2090,31 +2792,47 @@ static void R_MeBonesJob( void *arg )
 						res->attachment[k][j] = DotProduct( pAtt[k].org, b[j] ) + b[j][3];
 				}
 
-				R_MeModelCommands( job, m, it->draw, res->cmds );
-				if( it->wdraw && m->weapon && ( res->cmds[0] || res->cmds[1] ))
-				{
-					R_MeModelCommands( job, m->weapon, it->wdraw, res->cmds + 2 );
+				// as R_StudioClientEvents
+				for( int k = 0; k < MEBONES_ATTACHMENTS && m->hdr->numattachments <= 0; k++ )
+					Matrix3x4_OriginFromMatrix( m->rotation, res->attachment[k] );
 
-					// no space: all of it is for the main CPU
-					if( !res->cmds[2] && !res->cmds[3] )
-						res->cmds[0] = res->cmds[1] = 0;
+				res->events = R_MeEvents( job->frame, it->e, m );
+
+				if( !m->lit )
+					R_MeDynamicLight( job->frame, it->e, c->small, &m->light );
+				light = m->light;
+				res->floor = light.floor;
+				if( job->numelights )
+					R_MeEntityLight( job, m, it->e, (const float (*)[3])res->attachment, &light );
+
+				uint *const p = R_MeModelCommands( job, it, m, &light );
+				if( p )
+				{
+					res->cmds = (uint32_t)cmds;
+					r_mebones_me.p = p;
 				}
 				PSP_MeWriteback( cmds, (byte *)r_mebones_me.p - (byte *)cmds );
 			}
 		}
 
 		PSP_MeWriteback( res, sizeof( *res ));
+		if( i >= job->numsolid && it->draw )
+			R_MeGateOpen( i, res->cmds );
 		MEBONES_SYNC[MESYNC_ITEMS] = i + 1;
 	}
+
+	if( job->numsolid == job->count )
+		R_MeSolidDone();
 }
 
 static const struct medraw_s *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap );
-static qboolean R_StudioPropForMe( const cl_entity_t *e );
+static void R_StudioMeElights( mebones_job_t *job );
 static model_t *R_StudioSetupPlayerModel( int index );
 static void R_StudioProcessGait( entity_state_t *pplayer );
 
 static void R_StudioMeReset( void )
 {
+	r_mebones.finish = false;
 	// the last jobs still read the frame and write the pool
 	PSP_MeWaitFor( r_mebones.early_ticket );
 	PSP_MeWaitFor( r_mebones.ticket );
@@ -2129,7 +2847,7 @@ void R_StudioMeSceneCleared( void )
 	r_mebones.table = false;
 }
 
-// solid models may be drawn by R_StudioDrawMeModels: what R_StudioGEAllowed and R_StudioGEDrawPlan check, or draw besides
+// models may be drawn by R_StudioDrawMeModels and R_StudioDrawMeModel: what R_StudioGEAllowed and R_StudioGEDrawPlan check, or draw besides
 static qboolean R_StudioMeDrawAllowed( void )
 {
 	return r_studio_me_draw.value && r_studio_ge.value && r_studio_geplan.value && r_studio_ge_hwlight.value
@@ -2285,6 +3003,57 @@ static qboolean R_StudioMePlayer( cl_entity_t *e, meplayer_t *p )
 	return true;
 }
 
+// what the light of the models comes from
+static void R_StudioMeLights( mebones_frame_t *frame )
+{
+	const movevars_t *mv = gp_movevars;
+	const float time = frame->time;
+
+	frame->frametime = gp_host->frametime;
+	frame->world = WORLDMODEL;
+	frame->sky = mv->skycolor[0] + mv->skycolor[1] + mv->skycolor[2] != 0;
+	VectorCopy( mv->skyvec, frame->skyvec );
+	VectorScale( mv->skyvec, FBitSet( gp_host->features, ENGINE_WRITE_LARGE_COORD ) ? 65536.0f : 8192.0f, frame->skyend );
+	for( int i = 0; i < 3; i++ )
+		frame->skycolor[i] = mv->skycolor[i];
+	frame->direct = bound( 0.75f, v_direct->value, 1.0f );
+	frame->gamma = FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ) ? NULL : tr.lightgammatable;
+
+	frame->numdlights = 0;
+	for( int i = 0; i < MAX_DLIGHTS && r_dynamic->value; i++ )
+	{
+		const dlight_t *dl = &gp_dlights[i];
+		medlight_t *l = &frame->dlights[frame->numdlights];
+
+		if( !( dl->radius > 0.0f ) || dl->die < time )
+			continue;
+
+		VectorCopy( dl->origin, l->origin );
+		l->radius = dl->radius;
+		VectorSet( l->color, dl->color.r, dl->color.g, dl->color.b );
+		frame->numdlights++;
+	}
+
+	frame->numphys = 0;
+	for( int i = 0; i < ( r_lighting_extended.value ? MAX_PHYSENTS : 1 ) && frame->numphys < MELIGHT_MAXPHYS; i++ )
+	{
+		const physent_t *pe = gEngfuncs.EV_GetPhysent( i );
+		mephys_t *p = &frame->phys[frame->numphys];
+
+		if( !pe )
+			break;
+		if( !pe->model || pe->model->type != mod_brush )
+			continue;
+
+		p->model = pe->model;
+		VectorAdd( pe->model->hulls[0].clip_mins, pe->origin, p->offset );
+		p->rotated = !VectorIsNull( pe->angles );
+		if( p->rotated )
+			Matrix3x4_CreateFromEntity( p->matrix, pe->angles, p->offset, 1.0f );
+		frame->numphys++;
+	}
+}
+
 /*
 ====================
 R_StudioMeEarly
@@ -2323,8 +3092,11 @@ static qboolean R_StudioMeBegin( void )
 	frame->trans = (cl_entity_t **)list->trans_entities;
 	frame->framecount = tr.framecount;
 	frame->numplayers = 0;
+	frame->draw = R_StudioMeDrawAllowed();
+	if( frame->draw )
+		R_StudioMeLights( frame );
 
-	if( r_studio_me_players.value && list->num_players > 0 && R_StudioMeDrawAllowed( ))
+	if( r_studio_me_players.value && list->num_players > 0 && frame->draw )
 	{
 		tr.realframecount++; // the one they'll be drawn in
 
@@ -2438,6 +3210,36 @@ const mecull_t *R_StudioMeTable( int *numsolid, int *numtrans, const mesort_t **
 	return r_mecull;
 }
 
+// models the ME couldn't draw (out of space, a sequence group not loaded) are the main CPU's for half a second
+static struct
+{
+	const cl_entity_t	*e;
+	double		time;
+} r_merefused[16];
+
+static void R_StudioMeRefuse( const cl_entity_t *e )
+{
+	static uint next;
+
+	r_merefused[next % 16].e = e;
+	r_merefused[next++ % 16].time = gp_cl->time;
+	r_mebones.refused = gp_cl->time + 0.5;
+}
+
+static qboolean R_StudioMeRefused( const cl_entity_t *e )
+{
+	if( gp_cl->time >= r_mebones.refused )
+		return false;
+
+	for( int i = 0; i < 16; i++ )
+	{
+		if( r_merefused[i].e == e && gp_cl->time >= r_merefused[i].time && gp_cl->time < r_merefused[i].time + 0.5 )
+			return true;
+	}
+
+	return false;
+}
+
 // true: R_StudioDrawMeModels draws it
 static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw )
 {
@@ -2451,6 +3253,13 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	it->index = c - r_mecull;
 	it->draw = it->wdraw = NULL;
 	it->player = NULL;
+	it->mode = c->mode;
+
+	// the solid ones are drawn in one go
+	if( it->mode != MEMODE_SOLID && it->index < MECULL_MAXSOLID )
+		draw = false;
+	if( R_StudioMeRefused( e ))
+		draw = false;
 
 	switch( c->type )
 	{
@@ -2478,8 +3287,7 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 		}
 		break;
 	case MECULL_SMALL:
-		// props of 1 or 2 bones are kept if they stay still (R_StudioPropCache), their bones are cheap
-		if( !draw || !R_StudioPropForMe( e ))
+		if( !draw )
 			return false;
 		// fallthrough
 	case MECULL_DRAW:
@@ -2527,6 +3335,11 @@ static void R_StudioMePost( void )
 	}
 	VectorCopy( RI.rvp.vieworigin, job->eye );
 	VectorCopy( RI.vright, job->vright );
+	R_StudioMeElights( job );
+
+	R_MeGateClose( MEBONES_SOLIDGATE );
+	for( int i = job->numsolid; i < job->count; i++ )
+		R_MeGateClose( i );
 
 	MEBONES_SYNC[MESYNC_ITEMS] = 0;
 	r_mebones.ticket = PSP_MeRunKeep( R_MeBonesJob, job );
@@ -3101,6 +3914,48 @@ static void R_StudioCollectElights( void )
 			r_live_elights.index[r_live_elights.count++] = lnum;
 	}
 }
+
+#if XASH_PSP
+// the live ones for the Media Engine's models
+static void R_StudioMeElights( mebones_job_t *job )
+{
+	job->numelights = 0;
+
+	if( !r_dynamic->value )
+		return;
+
+	R_StudioCollectElights();
+
+	for( int i = 0; i < r_live_elights.count && job->numelights < MELIGHT_MAXELIGHTS; i++ )
+	{
+		const dlight_t *el = &tr.elights[r_live_elights.index[i]];
+		meelight_t *l = &job->elights[job->numelights++];
+
+		VectorCopy( el->origin, l->origin );
+		l->r2 = el->radius * el->radius;
+		l->key = el->key;
+		l->color[0] = LinearGammaTable( el->color.r << 2 );
+		l->color[1] = LinearGammaTable( el->color.g << 2 );
+		l->color[2] = LinearGammaTable( el->color.b << 2 );
+	}
+}
+
+// an entity's own ones move with it
+static void R_StudioMoveElights( const cl_entity_t *e )
+{
+	for( int i = 0; i < r_live_elights.count; i++ )
+	{
+		dlight_t *el = &tr.elights[r_live_elights.index[i]];
+		const int att = ( el->key >> 12 ) & 0xF;
+
+		if(( el->key & 0xFFF ) != e->index )
+			continue;
+
+		if( !att ) VectorCopy( e->origin, el->origin );
+		else if( att < MEBONES_ATTACHMENTS ) VectorCopy( e->attachment[att], el->origin );
+	}
+}
+#endif
 
 static void R_StudioEntityLight( alight_t *lightinfo )
 {
@@ -5783,13 +6638,13 @@ static void R_StudioSubmitMesh( short *ptricmds, vec3_t *pstudionorms, float s, 
 draw lists for the Media Engine
 
 The models R_StudioMeAdd takes that are drawn from plans only: the ME
-culls them, computes bones and attachments and writes the GE commands of all
-their body parts, R_StudioDrawMeModels does the rest, events and lighting,
-without the client DLL's renderer. A medraw_t has the plan items of a model, body
+culls them, computes bones, attachments and light and writes the GE commands of
+all their body parts, R_StudioFinishMeModels does the rest, without the client
+DLL's renderer. A medraw_t has the plan items of a model, body
 and skin.
 ===============
 */
-#define MEDRAW_CACHE	32
+#define MEDRAW_CACHE	64
 #define MEDRAW_MAXITEMS	40
 
 typedef struct medraw_s
@@ -5853,7 +6708,6 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 		for( int j = 0; j < pl->numitems; j++ )
 		{
 			const geplanitem_t *it = &pl->items[j];
-
 			int at = d->numitems++;
 
 			if( !it->flat )
@@ -5863,12 +6717,12 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 				d->firstflat++;
 			}
 			d->items[at] = it;
-			d->words += 2 + it->numbatches * ( GE_MAXBONES * 13 + 13 + 2 );
+			d->words += 4 + it->numbatches * ( GE_MAXBONES * 13 + 13 + 2 );
 		}
 		d->polys += pl->polys;
 	}
 
-	d->words += 2; // RETs
+	d->words += 3 + 2 * 2 + 1; // light, smooth and flat, RET
 	d->gen = ge_rec_gen; // it may have built batches
 	d->usable = d->numitems > 0;
 }
@@ -5987,17 +6841,53 @@ static uint *R_MeChromeMatrix( const mebones_job_t *job, const mebones_ent_t *m,
 	return p;
 }
 
-/*
-the draws of a model, as R_StudioGEDrawPlan and R_StudioGEBones write them, at
-r_mebones_me.p if they fit
-*/
-static void R_MeModelCommands( const mebones_job_t *job, const mebones_ent_t *m, const medraw_t *d, uint32_t *cmds )
+// R_StudioGELightColor
+static uint R_MeLightColor( const mebones_frame_t *frame, const melight_t *l, float d, int rgb[3] )
 {
-	uint *p = r_mebones_me.p;
-	int slot_bone[GE_MAXBONES];
+	float illum = l->ambient + l->shade;
 
-	if( p + d->words > r_mebones_cmds + MEBONES_CMDS )
-		return;
+	d += SHADE_LAMBERT - 1.0f;
+	if( d > 0.0f )
+		illum -= l->shade * ( 1.0f / SHADE_LAMBERT ) * d;
+	illum = bound( 0.0f, illum, 255.0f );
+
+	const int b = (int)( illum * 4.0f );
+	const float g = frame->gamma ? frame->gamma[b] : b;
+
+	for( int i = 0; i < 3; i++ )
+	{
+		const int c = (int)( l->color[i] * ( 255.0f / 1023.0f ) * g );
+		rgb[i] = bound( 0, c, 255 );
+	}
+
+	return rgb[0] | rgb[1] << 8 | rgb[2] << 16;
+}
+
+// R_StudioGEHwLight, the alpha is the main CPU's
+static uint *R_MeLightCommands( const mebones_frame_t *frame, uint *p, const melight_t *l, qboolean flat )
+{
+	int lo[3], hi[3];
+
+	if( flat )
+	{
+		*p++ = GE_CMD( 0x5C, R_MeLightColor( frame, l, 1.0f - 0.8f * SHADE_LAMBERT, lo ));
+		*p++ = GE_CMD( 0x90, 0 );
+	}
+	else
+	{
+		*p++ = GE_CMD( 0x5C, R_MeLightColor( frame, l, 0.0f, lo )); // global ambient
+		R_MeLightColor( frame, l, -1.0f, hi );
+		*p++ = GE_CMD( 0x90, Q_max( hi[0] - lo[0], 0 ) | Q_max( hi[1] - lo[1], 0 ) << 8 | Q_max( hi[2] - lo[2], 0 ) << 16 ); // diffuse of light 0
+	}
+	return p;
+}
+
+/*
+the draws of a model, as R_StudioGEDrawPlan and R_StudioGEBones write them
+*/
+static uint *R_MeDrawCommands( const mebones_job_t *job, uint *p, const mebones_ent_t *m, const medraw_t *d, const melight_t *l, int mode )
+{
+	int slot_bone[GE_MAXBONES];
 
 	for( int i = 0; i < GE_MAXBONES; i++ )
 		slot_bone[i] = -1;
@@ -6006,14 +6896,17 @@ static void R_MeModelCommands( const mebones_job_t *job, const mebones_ent_t *m,
 	{
 		const geplanitem_t *it = d->items[i];
 
-		if( i == 0 || i == d->firstflat )
-		{
-			if( i > 0 )
-				*p++ = GE_CMD( 0x0B, 0 ); // RET
-			cmds[i >= d->firstflat] = (uint)p;
-		}
+		if( mode != MEMODE_ADD && ( i == 0 || i == d->firstflat ))
+			p = R_MeLightCommands( job->frame, p, l, i >= d->firstflat );
 
 		p = R_StudioGECall( p, d->blocks[i] );
+		if( mode != MEMODE_SOLID )
+		{
+			// over the skin block's
+			*p++ = GE_CMD( 0x21, 1 ); // blend
+			if( mode == MEMODE_ADD )
+				*p++ = GE_CMD( 0xE7, 1 ); // no depth writes
+		}
 
 		for( int k = 0; k < it->numbatches; k++ )
 		{
@@ -6047,8 +6940,31 @@ static void R_MeModelCommands( const mebones_job_t *job, const mebones_ent_t *m,
 		}
 	}
 
-	*p++ = GE_CMD( 0x0B, 0 ); // RET
-	r_mebones_me.p = p;
+	return p;
+}
+
+/*
+the light and the draws of an item at r_mebones_me.p, NULL if they don't fit
+*/
+static uint *R_MeModelCommands( const mebones_job_t *job, const mebones_item_t *it, const mebones_ent_t *m, const melight_t *l )
+{
+	uint *p = r_mebones_me.p;
+
+	if( p + it->draw->words + ( it->wdraw ? it->wdraw->words : 0 ) >= r_mebones_cmds + MEBONES_CMDS )
+		return NULL;
+
+	// toward the light
+	*p++ = GE_CMD( 0x63, GE_Float( -l->vec[0] ));
+	*p++ = GE_CMD( 0x64, GE_Float( -l->vec[1] ));
+	*p++ = GE_CMD( 0x65, GE_Float( -l->vec[2] ));
+
+	p = R_MeDrawCommands( job, p, m, it->draw, l, it->mode );
+	if( it->wdraw && m->weapon )
+		p = R_MeDrawCommands( job, p, m->weapon, it->wdraw, l, it->mode );
+
+	if( it->index >= MECULL_MAXSOLID )
+		*p++ = GE_CMD( 0x0B, 0 ); // RET
+	return p;
 }
 
 /*
@@ -7811,24 +8727,6 @@ static propcache_t *R_StudioPropRecorded( const cl_entity_t *e )
 	return pc;
 }
 
-/*
-a small model: the ME's, unless it's drawn from recorded commands. Every 16th
-time the normal path gets a few frames to record a prop that came to rest
-*/
-static qboolean R_StudioPropForMe( const cl_entity_t *e )
-{
-	static byte tries[PROP_SLOTS];
-	const uint h = ((uint)(uintptr_t)e * 2654435761u ) >> 26;
-
-	if( R_StudioPropRecorded( e ))
-	{
-		tries[h] = 0;
-		return false;
-	}
-
-	return ( tries[h]++ & 15 ) >= 3;
-}
-
 static qboolean R_StudioPropDrawRecorded( cl_entity_t *e )
 {
 	propcache_t *pc = R_StudioPropRecorded( e );
@@ -8242,9 +9140,14 @@ void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *
 	g_precull.time = gp_cl->time;
 
 	if( r_mebones.ticket )
-		R_StudioMeReset(); // a second view
+	{
+		// a second view
+		R_StudioFinishMeModels();
+		R_StudioMeReset();
+	}
 
 	cull = R_StudioMeTable( &numsolid, &numtrans, NULL );
+	const qboolean draw = r_mebones.frame.draw && R_StudioMeDrawAllowed();
 	r_mebones.job.count = r_mebones.count = 0;
 
 	cl_entity_t *saveent = RI.currententity;
@@ -8253,8 +9156,9 @@ void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *
 	const uint savedtex = glState.currentTexture; // the skin block lookups set it
 
 	R_StudioSetupTimings();
-	R_StudioMePrepareList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled, cull, numsolid, NULL, R_StudioMeDrawAllowed( ));
-	R_StudioMePrepareList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled, cull ? cull + MECULL_MAXSOLID : NULL, numtrans, trans_order, false );
+	R_StudioMePrepareList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled, cull, numsolid, NULL, draw );
+	r_mebones.job.numsolid = r_mebones.job.count;
+	R_StudioMePrepareList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled, cull ? cull + MECULL_MAXSOLID : NULL, numtrans, trans_order, draw );
 
 	glState.currentTexture = savedtex;
 	RI.currententity = saveent;
@@ -8336,146 +9240,204 @@ void R_DrawStudioModel( cl_entity_t *e )
 	}
 }
 
+#if XASH_PSP
+static void R_StudioMeOpen( int mode )
+{
+	sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
+	sceGuDisable( GU_ALPHA_TEST );
+	sceGuShadeModel( GU_SMOOTH );
+	if( glState.faceCull != GL_NONE )
+	{
+		tr.fFlipViewModel = false;
+		GL_Cull( GL_FRONT );
+	}
+
+	// the rest is in the model's commands
+	switch( mode )
+	{
+	case MEMODE_SOLID:
+		sceGuAmbient( 0xffffffff );
+		break;
+	case MEMODE_BLEND:
+		sceGuBlendFunc( GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0 );
+		sceGuAmbient( GUCOLOR4F( 1.0f, 1.0f, 1.0f, tr.blend ));
+		break;
+	case MEMODE_ADD:
+		sceGuBlendFunc( GU_ADD, GU_FIX, GU_FIX, GUBLEND1, GUBLEND1 );
+		sceGuAmbient( GUCOLOR4F( tr.blend, tr.blend, tr.blend, 1.0f ));
+		sceGuLightColor( 0, GU_DIFFUSE, 0 );
+		break;
+	}
+
+	const ScePspFVector3 dir = { 0.0f, 0.0f, 1.0f };
+
+	R_StudioGEViewMatrix( true );
+	sceGuLight( 0, GU_DIRECTIONAL, GU_DIFFUSE, &dir );
+	sceGuEnable( GU_LIGHT0 );
+	sceGuEnable( GU_LIGHTING );
+}
+
+static void R_StudioMeClose( void )
+{
+	sceGuDisable( GU_LIGHTING );
+	sceGuDisable( GU_LIGHT0 );
+	R_StudioGERestore();
+	R_StudioGEViewMatrix( false );
+	extGuUpdateStall();
+	sceGuTexFunc( GU_TFX_REPLACE, GU_TCC_RGBA );
+	sceGuShadeModel( GU_FLAT );
+	ge_slots_valid = 0;
+}
+
 /*
 =================
-R_StudioDrawMeModels
+R_StudioMeItem
 
-the models with a medraw_t, as R_StudioDrawModel draws them: in the solid list
-they're marked R_STUDIO_ME
+what's left to do here for a model the ME draws, NULL if it's not the ME's after all
 =================
 */
-void R_StudioDrawMeModels( void )
+static const mebones_res_t *R_StudioMeItem( int i )
 {
-	static byte rest[MEBONES_MAXENTS];
-	int numrest = 0;
-	qboolean open = false;
+	const mebones_item_t *it = &r_mebones.job.items[i];
+	const medraw_t *d = it->draw;
+	cl_entity_t *e = it->e;
+	const mebones_res_t *res = R_StudioMeWait( i );
 
-	if( !r_mebones.count )
-		return;
+	if( !res || !res->ent || ( res->visible && !res->cmds ))
+		return NULL;
 
-	R_StudioSetupTimings();
-	R_StudioSetChromeOrigin();
-	R_StudioSetForceFaceFlags( 0 );
+	if( !res->visible )
+		return res;
 
-	for( int i = 0; i < r_mebones.count; i++ )
+	r_stats.c_studio_models_drawn++;
+	r_stats.c_studio_polys += d->polys + ( it->wdraw ? it->wdraw->polys : 0 );
+	g_studio.framecount++; // render data cache cookie
+
+	if( !res->blendprev )
+		e->latched.prevframe = res->prevframe;
+
+	if( !FBitSet( res->floor, BIT( 31 )))
 	{
-		const mebones_item_t *it = &r_mebones.job.items[i];
-		const medraw_t *d = it->draw;
-		cl_entity_t *e = it->e;
-		const mebones_res_t *res;
-		alight_t lighting;
-		vec3_t dir;
+		e->cvFloorColor.r = res->floor & 255;
+		e->cvFloorColor.g = ( res->floor >> 8 ) & 255;
+		e->cvFloorColor.b = ( res->floor >> 16 ) & 255;
+	}
 
-		if( !d )
-			continue;
+	// R_StudioCalcAttachments
+	memcpy( e->attachment, res->attachment, sizeof( vec3_t ) * ( d->hdr->numattachments > 0 ? d->hdr->numattachments : MEBONES_ATTACHMENTS ));
 
-		res = R_StudioMeWait( i );
-		if( !res || !res->ent || ( res->visible && !res->cmds[0] && !res->cmds[1] )
-			|| extGuListUsed() > guRender.context_list_size - 128 * 1024 )
-		{
-			rest[numrest++] = i;
-			continue;
-		}
-
-		if( !res->visible )
-			continue;
-
+	if( res->events )
+	{
 		RI.currententity = e;
 		RI.currentmodel = it->player ? (model_t *)it->player->mod : e->model;
 		R_StudioSetHeader( (studiohdr_t *)d->hdr );
 		Matrix3x4_Copy( g_studio.rotationmatrix, res->rotation );
-
-		r_stats.c_studio_models_drawn++;
-		g_studio.framecount++; // render data cache cookie
-
-		if( !res->blendprev )
-			e->latched.prevframe = res->prevframe;
-
-		// R_StudioCalcAttachments
-		memcpy( e->attachment, res->attachment, sizeof( vec3_t ) * d->hdr->numattachments );
 		R_StudioClientEvents();
-
-		// copy attachments into global entity array
-		if( e->index > 0 )
-		{
-			cl_entity_t *ent = CL_GetEntityByIndex( e->index );
-
-			if( ent != e )
-				memcpy( ent->attachment, e->attachment, sizeof( vec3_t ) * 4 );
-		}
-
-		lighting.plightvec = dir;
-		R_EntityDynamicLight( e, &lighting, true, g_studio.time, g_studio.lightspot, g_studio.lightvec );
-		R_StudioEntityLight( &lighting );
-
-		// R_StudioSetupLighting without the bones
-		g_studio.ambientlight = lighting.ambientlight;
-		g_studio.shadelight = lighting.shadelight;
-		VectorCopy( lighting.plightvec, g_studio.lightvec );
-		VectorCopy( lighting.color, g_studio.lightcolor );
-		R_StudioGEFoldElights( false );
-
-		if( !open )
-		{
-			open = true;
-			sceGuTexFunc( GU_TFX_MODULATE, GU_TCC_RGBA );
-			sceGuDisable( GU_ALPHA_TEST );
-			sceGuShadeModel( GU_SMOOTH );
-			if( glState.faceCull != GL_NONE )
-			{
-				tr.fFlipViewModel = false;
-				GL_Cull( GL_FRONT );
-			}
-			R_StudioGEViewMatrix( true );
-			sceGuEnable( GU_LIGHT0 );
-			sceGuEnable( GU_LIGHTING );
-		}
-
-		const ScePspFVector3 lightdir = { -g_studio.lightvec[0], -g_studio.lightvec[1], -g_studio.lightvec[2] };
-
-		sceGuLight( 0, GU_DIRECTIONAL, GU_DIFFUSE, &lightdir );
-
-		// the weapon's after the player's
-		for( int k = 0; k < 4; k++ )
-		{
-			if( !res->cmds[k] )
-				continue;
-
-			R_StudioGEHwLight( k & 1 );
-			extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)res->cmds[k] ));
-		}
-
-		ge_last_skinblock = d->blocks[d->numitems - 1];
-		r_stats.c_studio_polys += d->polys;
-		if( it->wdraw )
-		{
-			ge_last_skinblock = it->wdraw->blocks[it->wdraw->numitems - 1];
-			r_stats.c_studio_polys += it->wdraw->polys;
-		}
 	}
 
-	ge_slots_valid = 0;
-
-	if( open )
+	// copy attachments into global entity array
+	if( e->index > 0 )
 	{
-		sceGuDisable( GU_LIGHTING );
-		sceGuDisable( GU_LIGHT0 );
-		R_StudioGERestore();
-		R_StudioGEViewMatrix( false );
-		extGuUpdateStall();
-		sceGuTexFunc( GU_TFX_REPLACE, GU_TCC_RGBA );
-		sceGuShadeModel( GU_FLAT );
+		cl_entity_t *ent = CL_GetEntityByIndex( e->index );
+
+		if( ent != e )
+			memcpy( ent->attachment, e->attachment, sizeof( vec3_t ) * 4 );
+		if( r_mebones.job.numelights )
+			R_StudioMoveElights( e );
 	}
 
-	for( int i = 0; i < numrest; i++ )
-	{
-		cl_entity_t *e = r_mebones.job.items[rest[i]].e;
-
-		RI.currententity = e;
-		RI.currentmodel = e->model;
-		R_DrawStudioModel( e );
-	}
+	return res;
 }
+
+static const uint *R_StudioMeLastSkin( const mebones_item_t *it )
+{
+	const medraw_t *d = it->wdraw ? it->wdraw : it->draw;
+
+	return d->blocks[d->numitems - 1];
+}
+
+/*
+=================
+R_StudioDrawMeModels
+
+the solid models of the ME (in the list they're marked R_STUDIO_ME): the GE
+waits for their commands, this CPU doesn't
+=================
+*/
+void R_StudioDrawMeModels( void )
+{
+	const mebones_item_t *last = NULL;
+
+	r_mebones.finish = r_mebones.count > 0;
+
+	for( int i = 0; i < r_mebones.job.numsolid && r_mebones.count; i++ )
+	{
+		if( r_mebones.job.items[i].draw )
+			last = &r_mebones.job.items[i];
+	}
+
+	if( !last )
+		return;
+
+	R_StudioMeOpen( MEMODE_SOLID );
+	extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)&r_mebones_gates[MEBONES_SOLIDGATE * MEBONES_GATEWORDS] ));
+	ge_last_skinblock = R_StudioMeLastSkin( last );
+	R_StudioMeClose();
+}
+
+// a translucent one, marked the same way
+void R_StudioDrawMeModel( cl_entity_t *e )
+{
+	const int i = R_StudioMeFind( e );
+
+	if( i < r_mebones.job.numsolid || !r_mebones.job.items[i].draw )
+		return;
+
+	R_StudioMeOpen( r_mebones.job.items[i].mode );
+	extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)&r_mebones_gates[i * MEBONES_GATEWORDS] ));
+	ge_last_skinblock = R_StudioMeLastSkin( &r_mebones.job.items[i] );
+	R_StudioMeClose();
+}
+
+/*
+=================
+R_StudioFinishMeModels
+
+events and attachments of these models, as late in the frame as possible: the
+ME may still be at it. In the next frames the main CPU draws the ones the ME
+couldn't
+=================
+*/
+void R_StudioFinishMeModels( void )
+{
+	if( !r_mebones.finish )
+		return;
+
+	r_mebones.finish = false;
+
+	cl_entity_t *saveent = RI.currententity;
+	model_t *savemodel = RI.currentmodel;
+
+	R_StudioSetupTimings();
+
+	for( int i = 0; i < r_mebones.count; i++ )
+	{
+		const mebones_item_t *it = &r_mebones.job.items[i];
+
+		if( it->draw && !R_StudioMeItem( i ))
+			R_StudioMeRefuse( it->e );
+	}
+
+	// it was given up on: the GE skips the others
+	if( MEBONES_SYNC[MESYNC_ITEMS] < r_mebones.job.numsolid )
+		R_MeGateOpen( MEBONES_SOLIDGATE, 0 );
+	for( int i = Q_max( MEBONES_SYNC[MESYNC_ITEMS], r_mebones.job.numsolid ); i < r_mebones.count; i++ )
+		R_MeGateOpen( i, 0 );
+
+	RI.currententity = saveent;
+	RI.currentmodel = savemodel;
+}
+#endif
 
 /*
 =================

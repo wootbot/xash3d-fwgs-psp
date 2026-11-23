@@ -625,6 +625,8 @@ void R_StudioPreCullEnd( void );
 qboolean R_ViewModelSolid( void );
 #define R_STUDIO_ME	2	// in the culled flags: drawn by R_StudioDrawMeModels
 void R_StudioDrawMeModels( void );
+void R_StudioFinishMeModels( void );
+void R_StudioDrawMeModel( cl_entity_t *e );
 extern void (*psp_entities_hook)( qboolean complete );
 
 // a brush model for the Media Engine
@@ -663,7 +665,7 @@ typedef struct
 	};
 
 	uint16_t		body, skin;
-	byte		type, small, pad[2];
+	byte		type, small, mode, pad;
 } mecull_t;
 
 #define MECULL_MAXSOLID	384

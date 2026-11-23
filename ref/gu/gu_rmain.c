@@ -893,8 +893,9 @@ static void R_PrepareEntities( void )
 
 	memset( solid_grouped, 0, sizeof( solid_grouped ));
 	memset( trans_grouped, 0, sizeof( trans_grouped ));
-	R_StudioMePrepare( solid_culled, trans_culled, trans_order );
+	// the brush models first: this CPU waits for them, only the GE for the studio models
 	R_MeBrushesBegin( solid_grouped, trans_grouped, trans_order );
+	R_StudioMePrepare( solid_culled, trans_culled, trans_order );
 	R_StudioMeSceneCleared(); // a second view in this frame starts over
 
 	// the world walk adds static entities
@@ -1003,9 +1004,9 @@ static void R_DrawEntitiesOnList( void )
 	}
 
 #if XASH_PSP
+	R_DrawMeBrushes();
 	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
 		R_StudioDrawMeModels();
-	R_DrawMeBrushes();
 #endif
 
 	// quake-specific feature
@@ -1086,7 +1087,9 @@ static void R_DrawEntitiesOnList( void )
 			R_DrawAliasModel( RI.currententity );
 			break;
 		case mod_studio:
-			if( !trans_culled[i] )
+			if( trans_culled[i] == R_STUDIO_ME )
+				R_StudioDrawMeModel( RI.currententity );
+			else if( !trans_culled[i] )
 				R_DrawStudioModel( RI.currententity );
 			break;
 		case mod_sprite:
@@ -1297,6 +1300,7 @@ void R_EndFrame( void )
 
 	// flush any remaining 2D bits
 	R_Set2DMode( false );
+	R_StudioFinishMeModels();
 
 	// finish rendering: the GE draws it while the next frame's game code runs,
 	// R_WaitFrame waits for it before anything touches what it reads
