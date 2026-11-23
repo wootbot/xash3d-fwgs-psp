@@ -55,11 +55,13 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [~] Benchmark that measures what matters: `timedemo` now also prints the in-game frames only
       (no level load), the 1% low, the minimum and how many frames were under 60 / 100 fps.
       Still to do: a stress scene with many bots and monsters on the test server.
-- [-] Batched studio renderer in the engine: run each phase (transform + cull, bones,
+- [~] Batched studio renderer in the engine: run each phase (transform + cull, bones,
       lighting, GE output) for all models in a row instead of the whole pipeline per model.
-      Checked first (2026-11-22): drawing every studio model a second time right after the
-      first (warm caches) costs 5.9 ms a frame vs 6.6 ms for the cold draws, so batching
-      could buy ~0.7 ms at best. Not worth the rewrite for now.
+      The first check (a whole model drawn twice in a row, 5.9 vs 6.6 ms) missed the point:
+      the cost is instruction cache misses, and a whole model's code doesn't fit the 16 KB
+      icache, so the repeat is cold too. Per phase cold vs warm repeat: ~45% misses. Done:
+      the solid list's plain models in passes (`r_studio_batch`, 56.9 -> 57.9 fps). Left:
+      players and followers, the GE output split further.
 - [ ] Animation: decode only the bones that matter (reduced skeletons). A cache of decoded
       keyframes was tried twice and saves almost nothing (see the progress log).
 - [ ] PSP model variants generated offline (fewer bones, decimated meshes, small textures),
@@ -913,3 +915,23 @@ music), launched from the XMB.
   controller values alone is 1.0 us, and the VFPU's latencies, ulv.q and reading the result
   back cost ~0.6 us. Four bones a pass would hide the latency, but the per bone gather costs
   as much as it saves. The bench's "getanim" figure included a calcrot loop (it's ~4 us).
+- 2026-11-22 (evening): **Sound, water, brush models, instruction cache** (fight1, clean
+  builds, A/B of 2-4 timedemo runs each). Mixing at 11 kHz (`c1e4bef8`, most HL sounds are
+  11 kHz and mix at the unit rate; the 22 kHz ones lose their top octave): 54.6 -> 55.5.
+  Static water whose box is inside the clip planes in one draw (`789a94b7`: the brush model
+  water was ~100 us a surface of per polygon clip tests): 55.75 -> 56.8. Static brush model
+  surfaces through the world's surface chains (`d35978a2`, ~55 of ~60 a frame, most of them
+  kRenderTransAlpha func_walls) and dlights culled by the brush model's box (`dd97b2f2`):
+  56.75 -> 57.1, screenshots identical. **The per model studio overhead is instruction
+  cache misses**: `R_StudioCheckBBox` is 15-18 us cold, 3.5 us called again right away,
+  16 us again after `sceKernelIcacheInvalidateAll` (only ~9 after a data cache flush).
+  Cold/warm per phase, us a frame: header+transform 88/35, dynamic light 207/81, bbox
+  125/31, light setup 56/43, GE output 814/498. The studio code a model can run is ~69 KB.
+  Solid studio models in passes over the list (`487172ca`): 56.9 -> 57.9. Tried: `-Os` for
+  everything (EBOOT 4.9 -> 3.8 MB) is slower, 57.5 -> 55.7 (loses inlining in hot loops);
+  recorded props replayed in the precull pass: only ~4 a frame hit, the rest were tested
+  twice, no gain. Bone setup itself is FPU bound (amortized over 30 bones), and a full
+  pre-decode of the animations doesn't fit (hgrunt ~1.5 MB of quaternions). Mixing is still
+  ~1 ms a frame at ~50 fps (26-28 channels, most through the pitched loop: 22 kHz sounds and
+  random weapon pitch). A third pass for the light alone (bones and light restored
+  per model) was no faster: 57.7 vs 58.0.
