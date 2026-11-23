@@ -863,7 +863,6 @@ static void R_DrawEntitiesOnList( void )
 	{
 		R_StudioPreCullList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled );
 		R_StudioPreCullList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
-		R_StudioDrawBatched( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled );
 	}
 
 	// first draw solid entities
