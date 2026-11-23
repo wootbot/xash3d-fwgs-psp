@@ -844,6 +844,8 @@ static void R_DrawStaticBrushGroup( cl_entity_t **list, int count, int start, by
 }
 
 static byte solid_culled[MAX_VISIBLE_PACKET], trans_culled[MAX_VISIBLE_PACKET];
+static byte solid_grouped[MAX_VISIBLE_PACKET], trans_grouped[MAX_VISIBLE_PACKET];
+static qboolean viewmodel_drawn; // before the world, see R_RenderScene
 
 /*
 =============
@@ -862,6 +864,35 @@ static void R_PrepareEntities( void )
 	R_StudioPreCullList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
 	R_StudioMeBonesBegin( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled,
 		tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
+
+	// the world walk adds static entities
+	memset( solid_culled + tr.draw_list->num_solid_entities, 0, sizeof( solid_culled ) - tr.draw_list->num_solid_entities );
+	memset( trans_culled + tr.draw_list->num_trans_entities, 0, sizeof( trans_culled ) - tr.draw_list->num_trans_entities );
+	memset( solid_grouped, 0, sizeof( solid_grouped ));
+	memset( trans_grouped, 0, sizeof( trans_grouped ));
+}
+
+/*
+=============
+R_DrawStaticBrushes
+
+the static brush models, none of them blends: before the world, while the Media
+Engine walks it
+=============
+*/
+static void R_DrawStaticBrushes( void )
+{
+	for( int i = 0; i < tr.draw_list->num_solid_entities; i++ )
+	{
+		if( !solid_grouped[i] && R_StaticBrushModel( tr.draw_list->solid_entities[i] ))
+			R_DrawStaticBrushGroup( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, i, solid_grouped, false );
+	}
+
+	for( int i = 0; i < tr.draw_list->num_trans_entities; i++ )
+	{
+		if( !trans_grouped[i] && R_StaticBrushModel( tr.draw_list->trans_entities[i] ))
+			R_DrawStaticBrushGroup( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, i, trans_grouped, true );
+	}
 }
 
 /*
@@ -871,11 +902,6 @@ R_DrawEntitiesOnList
 */
 static void R_DrawEntitiesOnList( void )
 {
-	static byte solid_grouped[MAX_VISIBLE_PACKET], trans_grouped[MAX_VISIBLE_PACKET];
-
-	memset( solid_grouped, 0, tr.draw_list->num_solid_entities );
-	memset( trans_grouped, 0, tr.draw_list->num_trans_entities );
-
 	tr.blend = 1.0f;
 
 	// first draw solid entities
@@ -1018,7 +1044,7 @@ static void R_DrawEntitiesOnList( void )
 	sceGuDisable( GU_BLEND );	// Trinity Render issues
 	R_StudioPreCullEnd();
 
-	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
+	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ) && !viewmodel_drawn )
 		R_DrawViewModel();
 	gEngfuncs.CL_ExtraUpdate();
 }
@@ -1057,8 +1083,26 @@ void R_RenderScene( void )
 	R_DrawFog ();
 
 	R_CheckGLFog();
+#if XASH_PSP
+	if( r_drawworld.value )
+		R_MeWorldBegin();
+#endif
 	R_PrepareEntities();
 #if XASH_PSP
+	viewmodel_drawn = false;
+	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
+	{
+		// instead of waiting for the ME
+		if( R_MeWorldBusy( ))
+			R_DrawStaticBrushes();
+
+		if( R_MeWorldBusy() && R_ViewModelSolid( ))
+		{
+			R_DrawViewModel();
+			viewmodel_drawn = true;
+		}
+	}
+
 	if( r_drawworld.value )
 #endif
 	R_DrawWorld();

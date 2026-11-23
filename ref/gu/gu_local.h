@@ -369,6 +369,7 @@ void GL_BackendStartFrame( void );
 void GL_BackendEndFrame( void );
 void GL_CleanUpTextureUnits( int last );
 void GL_Bind( int tmu, unsigned int texnum );
+uint *GL_BindCommands( const gl_texture_t *texture, uint *p );
 void GL_LoadTexMatrixExt( const float *glmatrix );
 void GL_LoadMatrix( const matrix4x4 source );
 void GL_CleanupAllTextureUnits( void );
@@ -601,8 +602,19 @@ qboolean GU_ClipBoxInside( const vec3_t mins, const vec3_t maxs );
 void GU_WorldSurfDecals( const msurface_t *surf );
 void GU_WorldSurfDlit( const msurface_t *surf );
 void GU_WorldSurfsNewFrame( void );
+void GU_ClipGetWorldPlanes( float planes[4][4] );
+void R_MeWorldRegister( void );
+void R_MeWorldBegin( void );
+qboolean R_MeWorldBusy( void );
+// engine/platform/psp/me_psp.c: the renderer is linked into the engine
+qboolean PSP_MeStart( void );
+uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );
+void PSP_MeWaitFor( uint32_t ticket );
+qboolean PSP_MeDone( uint32_t ticket );
+void PSP_MeFlushDcache( void );
 void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled );
 void R_StudioPreCullEnd( void );
+qboolean R_ViewModelSolid( void );
 void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, const byte *solid_culled, cl_entity_t **trans, int ntrans, const byte *trans_culled );
 void GU_ClipLoadFrustum( const mplane_t *plane ); // Experimental
 int GU_ClipIsRequired( gu_vert_t *uv, int uvc );

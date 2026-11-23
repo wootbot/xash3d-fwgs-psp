@@ -307,6 +307,7 @@ static void GL_InitCommands( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_novis );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_drawworld );
+	R_MeWorldRegister();
 #endif
 	gEngfuncs.Cvar_RegisterVariable( &r_nocull );
 	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );

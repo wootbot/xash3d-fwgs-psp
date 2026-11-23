@@ -28,6 +28,9 @@ Differences from ref_gl's gl_rsurf.c:
 #include "xash3d_mathlib.h"
 #include "mod_local.h"
 #include "atlas.h"
+#if XASH_PSP
+#include <malloc.h>
+#endif
 
 #define TURBSCALE		( 256.0f / ( M_PI2 ))
 
@@ -905,6 +908,9 @@ typedef struct
 	uint16_t	pad[3];
 } gu_wsurf_t;
 
+static void R_MeWorldFree( void );
+static qboolean R_HasLightmap( void );
+
 typedef char ws_size_check[sizeof( gu_wsurf_t ) == 32 ? 1 : -1];
 
 static void		*ws_alloc;
@@ -1424,6 +1430,7 @@ static void R_WorldSurfsBuild( void )
 	const model_t *world = WORLDMODEL;
 
 	R_BrushSurfsBuild();
+	R_MeWorldFree();
 
 	if( ws_alloc )
 		Mem_Free( ws_alloc );
@@ -1636,6 +1643,46 @@ static void R_WorldSurfsBeginWalk( void )
 	}
 }
 
+// a visible surface for R_RenderBrushPoly
+static void R_WorldSurfSlow( int i )
+{
+	gu_wsurf_t *w = &ws_surfs[i];
+	msurface_t *surf = &WORLDMODEL->surfaces[i];
+
+	// R_RenderBrushPoly updates it this frame, unless dlit
+	if( !FBitSet( w->texflags, WS_DLIT ))
+		ClearBits( w->texflags, WS_STALE );
+
+	if( !surf->texinfo || !surf->texinfo->texture )
+		return;
+
+	if( surf->flags & SURF_DRAWSKY )
+	{
+		// make sky chain to right clip the skybox
+		surf->texturechain = skychain;
+		skychain = surf;
+	}
+	else
+	{
+		surf->texturechain = surf->texinfo->texture->texturechain;
+		surf->texinfo->texture->texturechain = surf;
+	}
+}
+
+// a visible plain one into the chains of the two passes
+static void R_WorldSurfChain( int i )
+{
+	gu_wsurf_t *w = &ws_surfs[i];
+	const int tex = w->texflags & WS_TEXTURE;
+
+	if( ws_texhead[tex] == WS_NONE )
+		ws_textures[ws_numtextures++] = tex;
+	w->texnext = ws_texhead[tex];
+	ws_texhead[tex] = i;
+	w->lmnext = ws_lmhead[w->lightmap];
+	ws_lmhead[w->lightmap] = i;
+}
+
 /*
 =================
 R_WorldSurfsCull
@@ -1670,31 +1717,8 @@ static void R_WorldSurfsCull( int first, int count, uint clipflags )
 			// part of the box it shows, ~10 us a polygon, ~30 a frame: the box is
 			// drawn behind the world, its visible faces whole show the same
 			if( ws_skybox && w->texflags == WS_SKY )
-			{
 				ws_skyseen = true;
-				continue;
-			}
-
-			msurface_t *surf = &WORLDMODEL->surfaces[i];
-
-			// R_RenderBrushPoly updates it this frame, unless dlit
-			if( !FBitSet( w->texflags, WS_DLIT ))
-				ClearBits( w->texflags, WS_STALE );
-
-			if( !surf->texinfo || !surf->texinfo->texture )
-				continue;
-
-			if( surf->flags & SURF_DRAWSKY )
-			{
-				// make sky chain to right clip the skybox
-				surf->texturechain = skychain;
-				skychain = surf;
-			}
-			else
-			{
-				surf->texturechain = surf->texinfo->texture->texturechain;
-				surf->texinfo->texture->texturechain = surf;
-			}
+			else R_WorldSurfSlow( i );
 			continue;
 		}
 
@@ -1702,13 +1726,7 @@ static void R_WorldSurfsCull( int first, int count, uint clipflags )
 			SetBits( w->texflags, WS_NOCLIP );
 		else ClearBits( w->texflags, WS_NOCLIP );
 
-		const int tex = w->texflags & WS_TEXTURE;
-		if( ws_texhead[tex] == WS_NONE )
-			ws_textures[ws_numtextures++] = tex;
-		w->texnext = ws_texhead[tex];
-		ws_texhead[tex] = i;
-		w->lmnext = ws_lmhead[w->lightmap];
-		ws_lmhead[w->lightmap] = i;
+		R_WorldSurfChain( i );
 	}
 }
 
@@ -1759,6 +1777,561 @@ static void R_WorldSurfsDrawLightmaps( int page )
 		R_WorldSurfDraw( &ws_surfs[s], ws_surfs[s].verts + ws_surfs[s].numverts );
 
 	ws_lmhead[page] = WS_NONE;
+}
+
+/*
+=============================================================
+
+THE WORLD ON THE MEDIA ENGINE
+
+The walk of the world and the draws of the plain surfaces, from the view on:
+R_MeWorldBegin posts a job for the second CPU (engine/platform/psp/me_psp.c)
+while the main CPU prepares the entities. The job marks and culls like
+R_WorldNodesWalk and R_WorldSurfsCull and writes the GE commands of the
+texture pass and the lightmap pass as two lists, which R_DrawTextureChains and
+R_BlendLightmaps call. What it can't draw (the slow surfaces, polygons that
+need clipping, leaves with efrags) it lists for the main CPU (R_MeWorldEnd).
+If it runs out of space the main CPU walks the world as before.
+
+No VFPU, no syscalls, and only its output and the job are written (cache lines
+of their own): see me_psp.c.
+
+=============================================================
+*/
+static CVAR_DEFINE_AUTO( r_world_me, "1", FCVAR_ARCHIVE, "walk the world and write its draw commands on the Media Engine" );
+
+#define MEWORLD_MAXVIS	2048	// visible plain surfaces
+#define MEWORLD_MAXLIST	1024	// surfaces for the main CPU, of each kind
+#define MEWORLD_MAXLEAFS	256	// leaves with efrags
+#define MEWORLD_CMDS	12288	// GE commands of both lists
+#define MEWORLD_MAXBIND	48	// GE commands of one bind
+
+typedef struct
+{
+	uint32_t		framecount;	// the job's, if it didn't run out of space
+	uint32_t		numslow, numclip, numleafs;
+	uint32_t		numpolys, leafs, skyseen;
+	uint32_t		texlist, lmlist;	// offsets in cmds, 0: nothing to draw
+	uint32_t		pad[7];
+
+	uint16_t		slow[MEWORLD_MAXLIST];
+	uint16_t		clip[MEWORLD_MAXLIST];
+	uint16_t		leaf[MEWORLD_MAXLEAFS];
+
+	// the ME's own
+	struct
+	{
+		uint16_t		surf, texnext, lmnext, pad;
+	} vis[MEWORLD_MAXVIS];
+	uint16_t		texhead[WS_TEXTURE + 1], textures[WS_TEXTURE + 1];
+	uint16_t		lmhead[MAX_LIGHTMAPS];
+	uint32_t		cmds[MEWORLD_CMDS] __attribute__(( aligned( 64 )));
+} meworld_out_t;
+
+typedef struct
+{
+	meworld_out_t	*out;
+	uint16_t		*visframe;	// ws_visframe for the ME, after out in the same block
+	int		visfill;		// fill it with this value first, -1 don't
+	uint32_t		framecount;
+	uint16_t		visframecount;
+	byte		allslow, skybox;
+	uint		clipflags;
+	vec3_t		org;
+	int		time10, time20;	// animated textures: frames at 10 and 20 fps
+	float		planes[12][4];	// normal, -dist; the clip planes from 8 on, as in the clip flags
+	float		absplanes[12][4];
+
+	// the ME's own
+	uint		*p;		// end of the commands
+	int		full;
+	int		numvis, numtextures;
+} meworld_job_t;
+
+static struct
+{
+	meworld_job_t	job __attribute__(( aligned( 64 )));
+	void		*alloc __attribute__(( aligned( 64 )));
+	uint32_t		ticket;		// not waited for yet
+	int		visfill;
+	uint		vert_frame;	// of the last job: one per GE list
+	qboolean		draw;		// R_DrawWorld draws with the lists
+} r_meworld __attribute__(( aligned( 64 )));
+
+// uncached view
+#define MEWORLD_OUT	((volatile meworld_out_t *)( 0x40000000 | (uintptr_t)r_meworld.job.out ))
+
+// R_WorldBoxClip without the VFPU
+static int R_MeBoxClip( const meworld_job_t *job, const short *box, uint clipflags )
+{
+	const float x0 = box[0], y0 = box[1], z0 = box[2];
+	const float x1 = box[3], y1 = box[4], z1 = box[5];
+	const float cx = ( x0 + x1 ) * 0.5f, cy = ( y0 + y1 ) * 0.5f, cz = ( z0 + z1 ) * 0.5f;
+	const float ex = ( x1 - x0 ) * 0.5f, ey = ( y1 - y0 ) * 0.5f, ez = ( z1 - z0 ) * 0.5f;
+	uint flags = clipflags;
+
+	while( flags )
+	{
+		const int i = __builtin_ctz( flags );
+		const float *p = job->planes[i];
+		const float *a = job->absplanes[i];
+		const float dist = p[0] * cx + p[1] * cy + p[2] * cz + p[3];
+		const float reach = a[0] * ex + a[1] * ey + a[2] * ez;
+
+		flags &= flags - 1;
+
+		if( dist >= reach )
+			clipflags &= ~BIT( i );
+		else if( i < 8 && dist + reach < 0.0f )
+			return -1;
+	}
+
+	return clipflags;
+}
+
+// GU_ClipIsRequired without the VFPU
+static qboolean R_MeClipIsRequired( const meworld_job_t *job, const gu_vert_t *v, int numverts )
+{
+	for( ; numverts > 0; numverts--, v++ )
+	{
+		for( int i = 8; i < 12; i++ )
+		{
+			const float *p = job->planes[i];
+
+			if( p[0] * v->xyz[0] + p[1] * v->xyz[1] + p[2] * v->xyz[2] + p[3] < 0.0f )
+				return true;
+		}
+	}
+
+	return false;
+}
+
+// R_WorldSurfsCull
+static void R_MeSurfsCull( meworld_job_t *job, int first, int count, uint clipflags )
+{
+	meworld_out_t *out = job->out;
+	const uint16_t visframe = job->framecount;
+	const gu_wsurf_t *w = &ws_surfs[first];
+
+	for( int i = first; i < first + count; i++, w++ )
+	{
+		if( job->visframe[i] != visframe )
+			continue;
+
+		int left = 0;
+
+		if( clipflags )
+		{
+			left = R_MeBoxClip( job, w->mins, clipflags );
+
+			if( left < 0 )
+				continue;
+		}
+
+		if( FBitSet( w->texflags, WS_SLOW|WS_DLIT|WS_DECALS|WS_STALE ) || job->allslow )
+		{
+			if( job->skybox && w->texflags == WS_SKY )
+				out->skyseen = true;
+			else if( out->numslow < MEWORLD_MAXLIST )
+				out->slow[out->numslow++] = i;
+			else job->full = true;
+			continue;
+		}
+
+		if( FBitSet( left, WB_GUARD ) && R_MeClipIsRequired( job, w->verts, w->numverts ))
+		{
+			if( out->numclip < MEWORLD_MAXLIST )
+				out->clip[out->numclip++] = i;
+			else job->full = true;
+			continue;
+		}
+
+		if( job->numvis >= MEWORLD_MAXVIS )
+		{
+			job->full = true;
+			continue;
+		}
+
+		const int n = job->numvis++;
+		const int tex = w->texflags & WS_TEXTURE;
+
+		out->vis[n].surf = i;
+		if( out->texhead[tex] == WS_NONE )
+			out->textures[job->numtextures++] = tex;
+		out->vis[n].texnext = out->texhead[tex];
+		out->texhead[tex] = n;
+		out->vis[n].lmnext = out->lmhead[w->lightmap];
+		out->lmhead[w->lightmap] = n;
+	}
+}
+
+// R_WorldNodesWalk
+static void R_MeNodesWalk( meworld_job_t *job, int n, uint clipflags )
+{
+	const uint16_t visframe = job->visframecount;
+
+	for( ;; )
+	{
+		const gu_wnode_t *w = &wn_nodes[n];
+
+		if( w->type == WN_SOLID )
+			return;
+
+		if( clipflags )
+		{
+			const int left = R_MeBoxClip( job, w->mins, clipflags );
+
+			if( left < 0 )
+				return;
+			clipflags = left;
+		}
+
+		if( w->type == WN_LEAF )
+		{
+			const uint16_t *mark = &wn_marks[w->firstmark];
+			const uint16_t framecount = job->framecount;
+
+			for( int i = 0; i < w->child[0]; i++ )
+				job->visframe[mark[i]] = framecount;
+
+			if( WORLDMODEL->leafs[w->child[1]].efrags )
+			{
+				if( job->out->numleafs < MEWORLD_MAXLEAFS )
+					job->out->leaf[job->out->numleafs++] = w->child[1];
+				else job->full = true;
+			}
+
+			job->out->leafs++;
+			return;
+		}
+
+		const float dot = ( w->type < 3 ? job->org[w->type] : DotProduct( job->org, WORLDMODEL->planes[w->plane].normal )) - w->dist;
+		const int side = ( dot >= 0.0f ) ? 0 : 1;
+
+		if( wn_visframe[w->child[side]] == visframe )
+			R_MeNodesWalk( job, w->child[side], clipflags );
+
+		if( w->numsurf )
+			R_MeSurfsCull( job, w->firstsurf, w->numsurf, clipflags );
+
+		n = w->child[!side];
+		if( wn_visframe[n] != visframe )
+			return;
+	}
+}
+
+static qboolean R_MeSpace( meworld_job_t *job, int words )
+{
+	if( job->p + words <= job->out->cmds + MEWORLD_CMDS )
+		return true;
+
+	job->full = true;
+	return false;
+}
+
+static qboolean R_MeBind( meworld_job_t *job, int texnum )
+{
+	const gl_texture_t *t = texnum > 0 && texnum < MAX_TEXTURES ? R_GetTexture( texnum ) : NULL;
+
+	// GL_Bind would use the default texture: leave that to the main CPU
+	if( !t || !t->dstTexture || (( t->format == GU_PSM_T8 || t->format == GU_PSM_T4 ) && !t->dstPalette ))
+		job->full = true;
+
+	if( !R_MeSpace( job, MEWORLD_MAXBIND ) || job->full )
+		return false;
+
+	job->p = GL_BindCommands( t, job->p );
+	return true;
+}
+
+// extGuDrawArrayNoStall with the vertex type set before
+static qboolean R_MeDrawVerts( meworld_job_t *job, const gu_vert_t *verts, int numverts )
+{
+	uint *p = job->p;
+
+	if( !R_MeSpace( job, 3 ))
+		return false;
+
+	*p++ = ( 16 << 24 ) | (((uint)verts >> 8 ) & 0xf0000 ); // BASE
+	*p++ = ( 1 << 24 ) | ((uint)verts & 0xffffff ); // VADDR
+	*p++ = ( 4 << 24 ) | ( GU_TRIANGLE_FAN << 16 ) | numverts; // PRIM
+	job->p = p;
+	return true;
+}
+
+static uint32_t R_MeListBegin( meworld_job_t *job )
+{
+	if( !R_MeSpace( job, 2 ))
+		return 0;
+
+	*job->p++ = 0; // NOP, so that no list starts at 0
+	*job->p++ = ( 18 << 24 ) | GU_TEXTURE_32BITF | GU_VERTEX_32BITF; // VTYPE
+	return job->p - 1 - job->out->cmds;
+}
+
+static void R_MeListEnd( meworld_job_t *job )
+{
+	if( R_MeSpace( job, 1 ))
+		*job->p++ = 11 << 24; // RET
+}
+
+// R_WorldTextureFrame
+static const texture_t *R_MeTextureFrame( const meworld_job_t *job, const texture_t *base )
+{
+	if( !base->anim_total || base->name[0] == '-' )
+		return base;
+
+	const int reletive = ( FBitSet( R_GetTexture( base->gl_texturenum )->flags, TF_QUAKEPAL ) ? job->time10 : job->time20 ) % base->anim_total;
+	const texture_t *t = base;
+	int count = 0;
+
+	while( t->anim_min > reletive || t->anim_max <= reletive )
+	{
+		t = t->anim_next;
+
+		if( !t || ++count > MOD_FRAMES )
+			return base;
+	}
+
+	return t;
+}
+
+static void R_MeWorldCommands( meworld_job_t *job )
+{
+	meworld_out_t *out = job->out;
+
+	out->texlist = R_MeListBegin( job );
+
+	for( int i = 0; i < job->numtextures; i++ )
+	{
+		const int tex = out->textures[i];
+
+		if( !R_MeBind( job, R_MeTextureFrame( job, WORLDMODEL->textures[tex] )->gl_texturenum ))
+			return;
+
+		for( int n = out->texhead[tex]; n != WS_NONE; n = out->vis[n].texnext )
+		{
+			const gu_wsurf_t *w = &ws_surfs[out->vis[n].surf];
+
+			if( !R_MeDrawVerts( job, w->verts, w->numverts ))
+				return;
+		}
+	}
+
+	R_MeListEnd( job );
+	out->lmlist = R_MeListBegin( job );
+
+	for( int i = 0; i < MAX_LIGHTMAPS; i++ )
+	{
+		if( out->lmhead[i] == WS_NONE )
+			continue;
+
+		if( !R_MeBind( job, tr.lightmapTextures[i] ))
+			return;
+
+		for( int n = out->lmhead[i]; n != WS_NONE; n = out->vis[n].lmnext )
+		{
+			const gu_wsurf_t *w = &ws_surfs[out->vis[n].surf];
+
+			if( !R_MeDrawVerts( job, w->verts + w->numverts, w->numverts ))
+				return;
+		}
+	}
+
+	R_MeListEnd( job );
+}
+
+static void R_MeWorldJob( void *arg )
+{
+	meworld_job_t *job = arg;
+	meworld_out_t *out = job->out;
+
+	job->full = false;
+	job->numvis = job->numtextures = 0;
+	job->p = out->cmds;
+	out->framecount = 0;
+	out->numslow = out->numclip = out->numleafs = 0;
+	out->leafs = out->skyseen = 0;
+	out->texlist = out->lmlist = 0;
+	memset( out->texhead, 0xff, sizeof( out->texhead ));
+	memset( out->lmhead, 0xff, sizeof( out->lmhead ));
+
+	if( job->visfill >= 0 )
+	{
+		for( int i = 0; i < ws_numsurfs; i++ )
+			job->visframe[i] = job->visfill;
+	}
+
+	if( wn_visframe[0] == job->visframecount )
+		R_MeNodesWalk( job, 0, job->clipflags );
+
+	if( job->numvis && !job->full )
+		R_MeWorldCommands( job );
+
+	out->numpolys = job->numvis;
+	if( !job->full )
+		out->framecount = job->framecount;
+}
+
+static void R_MeWorldFree( void )
+{
+	PSP_MeWaitFor( r_meworld.ticket );
+	r_meworld.ticket = 0;
+	r_meworld.draw = false;
+	if( r_meworld.alloc )
+		free( r_meworld.alloc );
+	r_meworld.alloc = NULL;
+}
+
+void R_MeWorldRegister( void )
+{
+	gEngfuncs.Cvar_RegisterVariable( &r_world_me );
+}
+
+/*
+=================
+R_MeWorldBegin
+
+the view, the dlights, the PVS and the fog are set up: the walk starts on the ME
+=================
+*/
+void R_MeWorldBegin( void )
+{
+	meworld_job_t *job = &r_meworld.job;
+
+	PSP_MeWaitFor( r_meworld.ticket );
+	r_meworld.ticket = 0;
+	r_meworld.draw = false;
+
+	if( !r_world_me.value || !wn_nodes || !ws_surfs || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD )
+		|| FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW|RF_DRAW_OVERVIEW ) || !PSP_MeStart( ))
+		return;
+
+	// the GE reads the commands until R_WaitFrame: one view a frame
+	if( r_meworld.vert_frame == guRender.vert_frame )
+		return;
+
+	// R_BlendLightmaps has nothing to do, or binds the white texture
+	RI.currententity = CL_GetEntityByIndex( 0 );
+	if( !RI.currententity || !R_HasLightmap() || r_lightmap->value )
+		return;
+
+	if( !r_meworld.alloc )
+	{
+		const size_t outsize = ( sizeof( meworld_out_t ) + 63 ) & ~63;
+		const size_t size = outsize + (( ws_numsurfs * sizeof( uint16_t ) + 63 ) & ~63 );
+
+		r_meworld.alloc = memalign( 64, size );
+		if( !r_meworld.alloc )
+		{
+			gEngfuncs.Con_Printf( S_WARN "%s: out of memory\n", __func__ );
+			gEngfuncs.Cvar_SetValue( "r_world_me", 0.0f );
+			return;
+		}
+
+		memset( r_meworld.alloc, 0, size );
+		job->out = r_meworld.alloc;
+		job->visframe = (uint16_t *)((byte *)r_meworld.alloc + outsize );
+		r_meworld.visfill = -1;
+	}
+
+	r_meworld.vert_frame = guRender.vert_frame;
+
+	R_WorldSurfsBeginWalk();
+
+	job->visfill = -1;
+	if(( tr.framecount >> 15 ) != r_meworld.visfill )
+	{
+		r_meworld.visfill = tr.framecount >> 15;
+		job->visfill = ( tr.framecount & 0x8000 ) ^ 0x8000;
+	}
+
+	job->framecount = tr.framecount;
+	job->visframecount = tr.visframecount;
+	job->allslow = ws_allslow;
+	job->skybox = ws_skybox;
+	job->clipflags = ( r_nocull.value ? 0 : RI.frustum.clipFlags )|WB_GUARD;
+	VectorCopy( RI.cullorigin, job->org );
+	job->time10 = (int)( gp_cl->time * 10 );
+	job->time20 = (int)( gp_cl->time * 20 );
+
+	for( int i = 0; i < FRUSTUM_PLANES; i++ )
+	{
+		VectorCopy( RI.frustum.planes[i].normal, job->planes[i] );
+		job->planes[i][3] = -RI.frustum.planes[i].dist;
+	}
+	GU_ClipGetWorldPlanes( job->planes + 8 );
+
+	for( int i = 0; i < 12; i++ )
+	{
+		for( int j = 0; j < 3; j++ )
+			job->absplanes[i][j] = fabsf( job->planes[i][j] );
+	}
+
+	r_meworld.ticket = PSP_MeRun( R_MeWorldJob, job );
+}
+
+// the job isn't done yet (R_MeWorldEnd)
+qboolean R_MeWorldBusy( void )
+{
+	return r_meworld.ticket && !PSP_MeDone( r_meworld.ticket );
+}
+
+static void R_MeCallList( uint offset )
+{
+	const uint list = (uint)( r_meworld.job.out->cmds + offset );
+	uint *p = extGuCmdBegin();
+
+	*p++ = ( 16 << 24 ) | (( list >> 8 ) & 0xf0000 ); // BASE
+	*p++ = ( 10 << 24 ) | ( list & 0xffffff ); // CALL
+	extGuCmdEnd( p );
+	glState.currentTexture = -1;
+}
+
+/*
+=================
+R_MeWorldEnd
+
+the rest of the walk for the main CPU; false if it has to walk the world itself
+=================
+*/
+static qboolean R_MeWorldEnd( void )
+{
+	if( !r_meworld.ticket )
+		return false;
+
+	PSP_MeWaitFor( r_meworld.ticket );
+	r_meworld.ticket = 0;
+
+	const volatile meworld_out_t *out = MEWORLD_OUT;
+
+	if( out->framecount != (uint32_t)tr.framecount )
+		return false;
+
+	const int numslow = out->numslow, numclip = out->numclip, numleafs = out->numleafs;
+
+	for( int i = 0; i < numleafs; i++ )
+	{
+		mleaf_t *pleaf = &WORLDMODEL->leafs[out->leaf[i]];
+		gEngfuncs.R_StoreEfrags( &pleaf->efrags, tr.realframecount );
+	}
+
+	for( int i = 0; i < numslow; i++ )
+		R_WorldSurfSlow( out->slow[i] );
+
+	for( int i = 0; i < numclip; i++ )
+	{
+		const int surf = out->clip[i];
+
+		ClearBits( ws_surfs[surf].texflags, WS_NOCLIP );
+		R_WorldSurfChain( surf );
+	}
+
+	ws_skyseen = out->skyseen;
+	r_stats.c_world_leafs += out->leafs;
+	r_stats.c_world_polys += out->numpolys;
+	r_meworld.draw = true;
+	return true;
 }
 
 /*
@@ -2146,6 +2719,12 @@ static void R_BlendLightmaps( void )
 		}
 	}
 
+#if XASH_PSP
+	if( r_meworld.draw && MEWORLD_OUT->lmlist )
+		R_MeCallList( MEWORLD_OUT->lmlist );
+	r_meworld.draw = false;
+#endif
+
 	// render dynamic lightmaps
 	if( r_dynamic->value )
 	{
@@ -2520,6 +3099,8 @@ static void R_DrawTextureChains( void )
 	}
 
 #if XASH_PSP
+	if( r_meworld.draw && MEWORLD_OUT->texlist )
+		R_MeCallList( MEWORLD_OUT->texlist );
 	R_WorldSurfsDrawTextures();
 #endif
 }
@@ -3413,11 +3994,18 @@ void R_DrawWorld( void )
 
 	R_ClearSkyBox ();
 #if XASH_PSP
-	if( ws_surfs )
+	const qboolean walked = R_MeWorldEnd();
+
+	if( !walked && ws_surfs )
 		R_WorldSurfsBeginWalk();
 #endif
 
 	double start = gEngfuncs.pfnTime();
+#if XASH_PSP
+	if( walked )
+		; // on the Media Engine
+	else
+#endif
 	if( FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ))
 		R_DrawWorldTopView( WORLDMODEL->nodes, RI.frustum.clipFlags );
 #if XASH_PSP
@@ -3468,6 +4056,8 @@ void R_DrawWorld( void )
 	tr.num_draw_decals = 0;
 	skychain = NULL;
 #if XASH_PSP
+	r_meworld.draw = false;
+
 	// not drawn when the world has no lightmap pass, not for brush models either
 	memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
 #endif

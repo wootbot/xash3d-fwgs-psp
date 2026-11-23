@@ -171,6 +171,12 @@ void GU_ClipSetWorldFrustum( const matrix4x4 in )
 	);
 }
 
+// for code without the VFPU: inside is normal * point + [3] >= 0
+void GU_ClipGetWorldPlanes( float planes[4][4] )
+{
+	memcpy( planes, clip_planes_world, sizeof( clip_planes_world ));
+}
+
 /*
 =================
 GU_ClipRestoreWorldFrustum

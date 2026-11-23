@@ -1078,13 +1078,6 @@ static struct
 	vec4_t	q[5][MAXSTUDIOBONES];
 } r_mebones_tmp __attribute__(( aligned( 64 )));
 
-// engine/platform/psp/me_psp.c: the renderer is linked into the engine
-qboolean PSP_MeStart( void );
-uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );
-void PSP_MeWaitFor( uint32_t ticket );
-qboolean PSP_MeDone( uint32_t ticket );
-void PSP_MeFlushDcache( void );
-
 /*
 sine and cosine of x in float, ~1e-7 off: x reduced to [-pi/4, pi/4] around
 a multiple of pi/2 (in two parts), then the minimax polynomials of Cephes' sinf and cosf
@@ -6820,6 +6813,36 @@ void R_RunViewmodelEvents( void )
 	RI.currentmodel = RI.currententity->model;
 
 	R_StudioDrawModelInternal( RI.currententity, STUDIO_EVENTS );
+}
+
+/*
+=================
+R_ViewModelSolid
+
+nothing of the view model blends with what is behind it: its depth range puts it
+in front of everything, so it can be drawn first
+=================
+*/
+qboolean R_ViewModelSolid( void )
+{
+	const cl_entity_t *view = tr.viewent;
+
+	if( !view->model || view->model->type != mod_studio || view->curstate.rendermode != kRenderNormal || view->curstate.renderfx )
+		return false;
+
+	const studiohdr_t *hdr = gEngfuncs.Mod_Extradata( mod_studio, view->model );
+	if( !hdr )
+		return false;
+
+	const mstudiotexture_t *ptex = (const mstudiotexture_t *)((const byte *)hdr + hdr->textureindex );
+
+	for( int i = 0; i < hdr->numtextures; i++ )
+	{
+		if( FBitSet( ptex[i].flags, STUDIO_NF_ADDITIVE ))
+			return false;
+	}
+
+	return true;
 }
 
 /*

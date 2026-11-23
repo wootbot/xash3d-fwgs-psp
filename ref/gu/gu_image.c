@@ -86,13 +86,97 @@ gl_texture_t *R_GetTexture( unsigned int texnum )
 
 /*
 =================
+GL_BindCommands
+
+the GE commands that bind a texture, at p; returns their end. The Media Engine
+runs it too (R_MeWorldJob): no VFPU, no syscalls, and the display list isn't its
+=================
+*/
+static uint *GL_TexImageCommands( uint *p, int level, int width, int height, int stride, const byte *data )
+{
+	*p++ = (( 0xa0 + level ) << 24 ) | ((uint)data & 0xffffff );
+	*p++ = (( 0xa8 + level ) << 24 ) | ((( (uint)data >> 8 ) & 0x0f0000 ) | stride );
+	*p++ = (( 0xb8 + level ) << 24 ) | (( 31 - __builtin_clz( height & 0x3ff )) << 8 ) | ( 31 - __builtin_clz( width & 0x3ff ));
+	return p;
+}
+
+uint *GL_BindCommands( const gl_texture_t *texture, uint *p )
+{
+	// Set palette
+	if( texture->format == GU_PSM_T8 || texture->format == GU_PSM_T4 )
+	{
+		const qboolean t8 = texture->format == GU_PSM_T8;
+
+		*p++ = ( 0xc5 << 24 ) | (( t8 ? 0xff : 0x0f ) << 8 ) | texture->clutFormat; // CMODE
+		*p++ = ( 0xb0 << 24 ) | ((uint)texture->dstPalette & 0xffffff ); // CBP
+		*p++ = ( 0xb1 << 24 ) | (((uint)texture->dstPalette >> 8 ) & 0x0f0000 ); // CBPH
+		*p++ = ( 0xc4 << 24 ) | ( t8 ? PALETTE_BLOCKS : PALETTE_SIZE_T4 / 32 ); // CLOAD
+	}
+
+	// Set texture parameters
+	*p++ = ( 0xc2 << 24 ) | (( texture->numMips - 1 ) << 16 ) | ( FBitSet( texture->flags, TF_IMG_SWIZZLED ) ? GU_TRUE : GU_FALSE ); // TMODE
+	*p++ = ( 0xc3 << 24 ) | texture->format; // TPSM
+
+	int min, mag;
+
+	if( texture->numMips > 1 )
+	{
+		const int bias = (int)( gl_texture_lodbias.value * 16.0f );
+		union { float f; uint u; } slope = { gl_texture_lodslope.value };
+
+		min = GU_LINEAR_MIPMAP_LINEAR;
+		mag = GU_LINEAR;
+		if( FBitSet( texture->flags, TF_NEAREST ) || gl_texture_nearest.value )
+		{
+			min = GU_NEAREST_MIPMAP_NEAREST;
+			mag = GU_NEAREST;
+		}
+
+		*p++ = ( 0xc8 << 24 ) | (( bound( -128, bias, 127 ) << 16 ) & 0xff0000 ) | (int)gl_texture_lodfunc.value; // TBIAS
+		*p++ = ( 0xd0 << 24 ) | ( slope.u >> 8 ); // TSLOPE
+	}
+	else
+	{
+		min = mag = GU_LINEAR;
+		if( FBitSet( texture->flags, TF_NEAREST ) || ( IsLightMap( texture ) && gl_lightmap_nearest.value ))
+			min = mag = GU_NEAREST;
+	}
+
+	const int wrap = FBitSet( texture->flags, TF_CLAMP|TF_BORDER ) ? GU_CLAMP : GU_REPEAT;
+
+	*p++ = ( 0xc6 << 24 ) | ( mag << 8 ) | min; // TFLT
+	*p++ = ( 0xc7 << 24 ) | ( wrap << 8 ) | wrap; // TWRAP
+
+	// Set base texture
+	p = GL_TexImageCommands( p, 0, texture->width, texture->height, texture->stride ? texture->stride : texture->width, texture->dstTexture );
+
+	// Set mip textures
+	if( texture->numMips > 1 )
+	{
+		int offset = texture->width * GL_TextureRows( texture, 0 ) * texture->bpp;
+
+		for( int i = 1; i < texture->numMips; i++ )
+		{
+			const int width = Q_max( TEXTURE_SIZE_MIN, ( texture->width >> i ));
+			const int height = Q_max( TEXTURE_SIZE_MIN, ( texture->height >> i ));
+
+			p = GL_TexImageCommands( p, i, width, height, width, &texture->dstTexture[offset] );
+			offset += width * GL_TextureRows( texture, i ) * texture->bpp;
+		}
+	}
+
+	*p++ = 0xcb << 24; // TFLUSH
+	return p;
+}
+
+/*
+=================
 GL_Bind
 =================
 */
 void GL_Bind( int tmu, unsigned int texnum )
 {
 	gl_texture_t	*texture;
-	int		i, offset, width, height;
 
 	// missed or invalid texture?
 	if( texnum <= 0 || texnum >= MAX_TEXTURES )
@@ -118,59 +202,7 @@ void GL_Bind( int tmu, unsigned int texnum )
 		texture = &gl_textures[texnum];
 	}
 
-	// Set palette
-	if( texture->format == GU_PSM_T8 )
-	{
-		sceGuClutMode( texture->clutFormat, 0, 0xff, 0 );
-		sceGuClutLoad( PALETTE_BLOCKS, texture->dstPalette );
-	}
-	else if( texture->format == GU_PSM_T4 )
-	{
-		sceGuClutMode( texture->clutFormat, 0, 0x0f, 0 );
-		sceGuClutLoad( PALETTE_SIZE_T4 / 32, texture->dstPalette );
-	}
-
-	// Set texture parameters
-	sceGuTexMode( texture->format, texture->numMips - 1, 0, FBitSet( texture->flags, TF_IMG_SWIZZLED ) ? GU_TRUE : GU_FALSE );
-	if( texture->numMips > 1 )
-	{
-		//sceGuTexFilter( GU_LINEAR_MIPMAP_LINEAR, GU_LINEAR_MIPMAP_LINEAR );
-		if( FBitSet( texture->flags, TF_NEAREST ) || gl_texture_nearest.value )
-			sceGuTexFilter( GU_NEAREST_MIPMAP_NEAREST, GU_NEAREST );
-		else
-			sceGuTexFilter( GU_LINEAR_MIPMAP_LINEAR, GU_LINEAR );
-
-		sceGuTexLevelMode( gl_texture_lodfunc.value, gl_texture_lodbias.value );
-		sceGuTexSlope( gl_texture_lodslope.value );
-	}
-	else
-	{
-		if( FBitSet( texture->flags, TF_NEAREST ) || ( IsLightMap( texture ) && gl_lightmap_nearest.value ))
-			sceGuTexFilter( GU_NEAREST, GU_NEAREST );
-		else
-			sceGuTexFilter( GU_LINEAR, GU_LINEAR );
-	}
-
-	if( FBitSet( texture->flags, TF_CLAMP ) || FBitSet( texture->flags, TF_BORDER ))
-		sceGuTexWrap( GU_CLAMP, GU_CLAMP );
-	else
-		sceGuTexWrap( GU_REPEAT, GU_REPEAT );
-
-	// Set base texture
-	sceGuTexImage( 0, texture->width, texture->height, texture->stride ? texture->stride : texture->width, texture->dstTexture );
-
-	// Set mip textures
-	if( texture->numMips > 1 )
-	{
-		offset = texture->width * GL_TextureRows( texture, 0 ) * texture->bpp;
-		for ( i = 1; i < texture->numMips; i++ )
-		{
-			width = Q_max( TEXTURE_SIZE_MIN, ( texture->width >> i ));
-			height = Q_max( TEXTURE_SIZE_MIN, ( texture->height >> i ));
-			sceGuTexImage( i, width, height, width,  &texture->dstTexture[offset] );
-			offset += width * GL_TextureRows( texture, i ) * texture->bpp;
-		}
-	}
+	extGuCmdEnd( GL_BindCommands( texture, extGuCmdBegin( )));
 	glState.currentTexture = texnum;
 }
 
