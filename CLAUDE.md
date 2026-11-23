@@ -13,7 +13,9 @@ play Half-Life online on **official GoldSrc (HLDS) servers**:
 
 The only working PSP port is Crow-bar's fork, based on upstream from Oct 2020 (~5,700 upstream
 commits behind). This repo starts from fresh upstream and re-implements the PSP port on top of it.
-The step-by-step plan and progress tracking live in **[PLAN.md](PLAN.md)** — keep it updated.
+The plan (targets, open items, phase summaries) is **[PLAN.md](PLAN.md)** — keep it short and updated.
+Details per phase are in `Documentation/psp/phases.md`; the chronological log of experiments and
+measurements is `Documentation/psp/progress-log.md` (large: grep it, don't read it whole; append at the end).
 
 ## Repository layout
 
@@ -27,7 +29,7 @@ The step-by-step plan and progress tracking live in **[PLAN.md](PLAN.md)** — k
     `grep -rl XASH_PSP` there lists every touched file. Our last 5 commits there are toolchain fixes.
   - `reference/hlsdk-portable/` — game code, branch `psp-hl` (Crow-bar/hlsdk-xash3d), builds
     `valve/dlls/server.prx` and `valve/cl_dlls/client.prx` with `make -f Makefile.psp`.
-- Upstream already contains a partial, untested PSP scaffold from 2023 (see PLAN.md, phase 1):
+- Upstream already contains a partial, untested PSP scaffold from 2023 (see `Documentation/psp/phases.md`, phase 1):
   `XASH_PSP` in `3rdparty/library_suffix/include/build.h`, `*_PSP` backends in `common/backends.h` /
   `common/defaults.h`, a `PSP` class + `--psp=` option in `scripts/waifulib/xcompile.py`, and EBOOT/PRX
   tasks in `scripts/waifulib/psp.py`. It has known bugs — don't trust it blindly.
@@ -43,7 +45,7 @@ The step-by-step plan and progress tracking live in **[PLAN.md](PLAN.md)** — k
   `engine: platform: psp: ...`. LF line endings (watch out when editing from Windows tools).
 - **Commit as you make progress** — small, focused commits whenever a piece of work builds or a
   step in PLAN.md is done; don't wait until the end of a session. Update PLAN.md (checkboxes,
-  progress log, measured numbers) in the same or a following commit. Don't push unless asked.
+  current numbers) and append to `Documentation/psp/progress-log.md` in the same or a following commit. Don't push unless asked.
 - **Keep personal info out of tracked files, commits and PR text.** This repo is public-bound. Local
   IP addresses, Wi-Fi SSIDs, passwords (rcon etc.), account or Windows user names, absolute paths that
   contain them, SteamIDs and similar details go **only** into the untracked, git-ignored
