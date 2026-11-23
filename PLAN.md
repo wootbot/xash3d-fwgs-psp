@@ -79,9 +79,11 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
       Left: the walk is still ~0.9 ms (~0.45 node traversal, ~0.25 VFPU box tests, the rest
       leaf marks and surface culling), decals.
 - [~] Media Engine (second CPU): sound mixing, studio bones, the world walk with its GE commands,
-      static brush models, whole solid studio models, players with their weapons and the culling are
-      ME jobs (fight1 66 -> 84 fps, 2026-11-23). Left: translucent models, the light of the models.
-      From the packet entities on the ME is as busy as the main CPU until the models are drawn.
+      static brush models, whole studio models with their light (translucent ones and props too),
+      players with their weapons and the culling are ME jobs (fight1 66 -> 88.6 fps, 2026-11-23).
+      The main CPU waits for the world and the brush models only, the GE for the studio models. Left:
+      the ME is the longer path from the packet entities on, what it does has to get faster or start
+      earlier; particles and sprites.
 - [ ] GE time: ~8 ms of a fight1 frame (world ~4, models ~3.5; half fill, half vertices), and its
       texture and vertex fetches from RAM slow the CPU down. At 100 fps it is the limit: textures of
       models into VRAM (HUD and menu images take 500 KB), fewer vertices, less overdraw.

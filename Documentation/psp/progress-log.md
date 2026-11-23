@@ -780,3 +780,21 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   before). Pitfall: `__attribute__(( aligned( 64 )))` on a variable doesn't pad its size, the last
   cache line is shared with whatever follows: align the type of anything the ME writes. A Wi-Fi join
   that never finishes after a pushed restart looks like a crash from the PC, the game was fine.
+- 2026-11-23 (4): **Light and translucent models on the Media Engine** (`8eed13a6`, fight1 clean 84.1 ->
+  88.6, frames under 60 5-8 -> 4). Measured before, us a frame on the main CPU: light of the ME's
+  models 115-160 (15 a model), their events 100, commands 60, fading grunts 140-310 (1.3 ms each,
+  drawn on the CPU with every vertex), props and shells 530-850 (crossbow clips, shotguns, shells:
+  recorded commands that had to be recorded again every quarter second, or lit 5 traces at a time
+  while they fly). Now: those props always on the ME (they were only there between recordings), a
+  fading grunt 32 us, events only looked at if the ME says there may be one. The light on the ME has
+  its own traces and caches (sky by entity and 16 unit cell, floor for 0.25 s within 2 units, 16 for
+  models of 1 or 2 bones). Translucent: blend function and alpha (the global ambient's alpha) from the
+  main CPU, the ME turns blending on after each skin block. All that alone gave +1 fps: the main CPU
+  waited 0.5-0.6 ms for the models job (0.5 -> 1 ms on the ME). It doesn't need the commands, the GE
+  does, and that one is still at the world: the lists are called through gates (BASE, a jump to
+  itself, replaced with a NOP by the ME with uncached writes), events and attachments moved to
+  R_EndFrame, the brush models' job before the models'. +3.5 fps. What the ME can't draw (no space, a
+  sequence group not loaded) is missing for one frame, then the main CPU draws it for half a second.
+  Lights made by an event show a frame later. Compared with the main CPU: solid, texture and additive
+  grunts look the same, also in a live firefight. A pushed restart left the Wi-Fi join hanging twice
+  more (menu running fine the first time); cause not known.
