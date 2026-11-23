@@ -947,3 +947,16 @@ music), launched from the XMB.
   57.75. Pitfall: `FCVAR_ARCHIVE` cvars toggled for an A/B are saved to config.cfg on the
   next restart and carry over to every build after it. Clean split now (ms a frame): all
   16.6, entities ~6.9, floor 6.6, world 2.3, view model/particles/beams/tracers 1.05.
+- 2026-11-22 (night): **Floor and studio leftovers** (fight1 clean A/B): 8 bit mono mixing
+  with one multiply for both channels and the volumes in locals (`99711055`, 59.95 ->
+  61.35); the floor light of a studio model kept per entity for 0.25 s while it stays within
+  2 units (`a6cc3a30`, 60.6 -> 61.55: where the trace down finds no light direction four
+  more traces build a gradient, an animated prop was ~120 us a frame); small rigid models
+  (<= 2 bones) skipped under 6 pixels instead of 2 (`d3e1a637`, 60.9 -> 64.0: a shell goes
+  at ~120 units, an item at ~400, players and monsters keep 2); the channel position to
+  fixed point from the double's bits (`e3af08ef`, 63.95 -> 64.2); the view model's bones
+  set up once a frame instead of twice (`b37b0ab8`, 64.1 -> 64.7). Sound in the fight:
+  ~47 channels at once, mostly loud (a higher inaudible threshold drops few). Temp entity
+  traces are for flying ones only (landed ones drop their collide flags). Studio GE output
+  after the GE lighting, per frame: bone uploads ~0.25 ms (~3.5 us a batch), light setup
+  ~0.15, skin blocks ~0.15, the rest of the plan loop ~0.4.
