@@ -3398,7 +3398,7 @@ everything else takes the CPU path.
 */
 CVAR_DEFINE_AUTO( r_studio_ge, "1", 0, "draw studio models with GE skinning and lighting where possible" );
 
-#define GE_MAXBONES		8
+#define GE_MAXBONES		4
 #define GE_RAMP_SIZE	32
 #define GE_CACHE_SIZE	512	// submodels
 
