@@ -1990,6 +1990,9 @@ qboolean S_Init( void )
 	Cvar_RegisterVariable( &s_musicvolume );
 	Cvar_RegisterVariable( &s_musicfadetime );
 	Cvar_RegisterVariable( &s_mixahead );
+#if XASH_PSP
+	{ extern convar_t s_mixchannels; Cvar_RegisterVariable( &s_mixchannels ); }
+#endif
 	Cvar_RegisterVariable( &s_show );
 	Cvar_RegisterVariable( &s_lerping );
 	Cvar_RegisterVariable( &s_ambient_level );

@@ -411,6 +411,14 @@ fixed point: with no double precision FPU, its double math cost ~30 us per chann
 and paint call (~60 software calls), a third of all mixing in a firefight.
 chan->sample stays a double for the rest of the engine, converted once each way
 */
+/*
+the loudest s_mixchannels channels are mixed, the others only move on through
+their sound (s_mix_dry): a firefight has ~45 at once, the quiet ones under the
+gunfire of the loud ones, and mixing them was ~0.4 ms a frame
+*/
+CVAR_DEFINE_AUTO( s_mixchannels, "16", FCVAR_ARCHIVE, "mix only this many of the loudest sounds, the others play on silently (0 = all)" );
+static qboolean s_mix_dry;
+
 static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, s_pitch_t pitch, int offset, int timecompress )
 {
 	const int initial_offset = offset;
@@ -507,7 +515,8 @@ static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, i
 			out_count = 1;
 		}
 
-		S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, frac, read_step, out_count, lerp );
+		if( !s_mix_dry )
+			S_MixAudio( pbuf + offset, pvol, audio, wav->channels, wav->width, frac, read_step, out_count, lerp );
 
 		S_FixedAdvance( &pos, &frac, pos_step, out_count );
 		offset += out_count;
@@ -653,6 +662,39 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 
 	int num_mixed_channels = 0;
 
+#if XASH_PSP
+	// the volume from which on channels are mixed, and how many at exactly that one
+	int mix_volume = 0, mix_at_volume = MAX_CHANNELS;
+
+	if( s_mixchannels.value > 0 )
+	{
+		static int count[256];
+		int audible = 0;
+
+		memset( count, 0, sizeof( count ));
+		for( int i = 0; i < snd.total_channels; i++ )
+		{
+			const channel_t *ch = &snd.channels[i];
+			const int vol = Q_max( ch->leftvol, ch->rightvol );
+
+			if( ch->sfx && !ch->words && vol >= 8 )
+			{
+				count[bound( 0, vol, 255 )]++;
+				audible++;
+			}
+		}
+
+		if( audible > s_mixchannels.value )
+		{
+			int left = s_mixchannels.value;
+
+			for( mix_volume = 255; mix_volume > 0 && count[mix_volume] < left; mix_volume-- )
+				left -= count[mix_volume];
+			mix_at_volume = left;
+		}
+	}
+#endif
+
 	if( num_samples <= 0 )
 		return num_mixed_channels;
 
@@ -737,7 +779,14 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 		}
 		else
 		{
+#if XASH_PSP
+			const int vol = bound( 0, Q_max( ch->leftvol, ch->rightvol ), 255 );
+			s_mix_dry = vol < mix_volume || ( vol == mix_volume && mix_at_volume-- <= 0 );
+#endif
 			S_MixChannelToBuffer( dst, ch, num_samples, out_rate, pitch, 0, 0 );
+#if XASH_PSP
+			s_mix_dry = false;
+#endif
 
 			if( FBitSet( ch->flags, FL_CHAN_FINISHED ))
 				S_FreeChannel( ch );
