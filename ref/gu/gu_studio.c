@@ -158,7 +158,7 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
+static convar_t r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
 #endif
 
 void R_StudioInit( void )
@@ -177,6 +177,7 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_atlas );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_minpixels_small );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_propcache );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_proplist );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_geplan );
@@ -6040,6 +6041,7 @@ skips its events: StudioDrawModel returns before them for culled models.
 */
 static CVAR_DEFINE_AUTO( r_studio_precull, "1", FCVAR_ARCHIVE, "cull studio models off screen before the client renderer sees them" );
 static CVAR_DEFINE_AUTO( r_studio_minpixels, "2", FCVAR_ARCHIVE, "skip studio models whose bounding radius is less than this many pixels on screen (0 = draw all)" );
+static CVAR_DEFINE_AUTO( r_studio_minpixels_small, "6", FCVAR_ARCHIVE, "r_studio_minpixels for models of at most 2 bones: shells, gibs, items, weapons on the floor" );
 
 // per frame values of the test, set by R_StudioPreCullList
 static struct
@@ -6047,6 +6049,7 @@ static struct
 	qboolean	active;	// the draw lists were tested: R_DrawStudioModel_ skips its own test
 	qboolean	enabled;
 	float	minpixels;	// 0 = no screen size test
+	float	minpixels_small;	// for models of at most 2 bones
 	float	px_scale;	// pixels on screen of one unit at distance 1
 	float	time;
 } g_precull;
@@ -6089,14 +6092,15 @@ static qboolean R_StudioPreCull( cl_entity_t *e )
 		r *= e->curstate.scale;
 
 	// too small on screen to make out (a shell far away is a pixel or two, and costs as
-	// much as a big prop): skip it. Radius r over the distance, in pixels
-	if( g_precull.minpixels > 0.0f )
+	// much as a big prop): skip it. Radius r over the distance, in pixels. Small rigid
+	// models (~100 us each, shells, gibs and items) go sooner than animated ones
+	const float min = hdr->numbones <= 2 ? g_precull.minpixels_small : g_precull.minpixels;
+	if( min > 0.0f )
 	{
 		vec3_t d;
 		VectorSubtract( e->origin, RI.rvp.vieworigin, d );
 
 		const float px = r * g_precull.px_scale;
-		const float min = g_precull.minpixels;
 
 		if( px * px < min * min * DotProduct( d, d ))
 			return true;
@@ -6139,7 +6143,8 @@ void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled )
 {
 	g_precull.enabled = r_studio_precull.value && !r_nocull.value;
 	g_precull.minpixels = r_studio_minpixels.value > 0.0f && RI.rvp.fov_x > 0.0f ? r_studio_minpixels.value : 0.0f;
-	g_precull.px_scale = g_precull.minpixels > 0.0f ? RI.rvp.viewport[2] * 0.5f / tanf( RI.rvp.fov_x * ( M_PI_F / 360.0f )) : 0.0f;
+	g_precull.minpixels_small = r_studio_minpixels_small.value > 0.0f && RI.rvp.fov_x > 0.0f ? r_studio_minpixels_small.value : 0.0f;
+	g_precull.px_scale = RI.rvp.fov_x > 0.0f ? RI.rvp.viewport[2] * 0.5f / tanf( RI.rvp.fov_x * ( M_PI_F / 360.0f )) : 0.0f;
 	g_precull.time = gp_cl->time;
 
 	for( int i = 0; i < count; i++ )
