@@ -482,6 +482,7 @@ static struct
 {
 	qboolean	active;
 	int		start, end;
+	uint32_t	ticket;
 } s_me_pending;
 
 static int S_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan, int num_samples, int out_rate, s_pitch_t pitch, int offset, int timecompress )
@@ -1096,7 +1097,7 @@ S_PaintDiscard: or it's dropped (the DMA buffer is cleared)
 */
 void S_PaintSync( void )
 {
-	PSP_MeWait();
+	PSP_MeWaitFor( s_me_pending.ticket );
 }
 
 static void S_PaintFinish( void )
@@ -1105,14 +1106,14 @@ static void S_PaintFinish( void )
 		return;
 
 	s_me_pending.active = false;
-	PSP_MeWait();
+	PSP_MeWaitFor( s_me_pending.ticket );
 	sceKernelDcacheInvalidateRange( s_me.out16, sizeof( s_me.out16 ));
 	S_TransferSamples16( s_me.out16, s_me_pending.start, s_me_pending.end );
 }
 
 void S_PaintDiscard( void )
 {
-	PSP_MeWait();
+	PSP_MeWaitFor( s_me_pending.ticket );
 	s_me_pending.active = false;
 }
 #endif
@@ -1157,7 +1158,7 @@ void S_PaintChannels( int endtime )
 			s_me.job.gain = gain;
 			s_me.job.dsp = cls.key_dest != key_menu && SX_RoomFXPrepare();
 			s_me.job.out16 = s_me.out16;
-			PSP_MeRun( S_MeMixJob, &s_me.job );
+			s_me_pending.ticket = PSP_MeRun( S_MeMixJob, &s_me.job );
 
 			s_me_pending.active = true;
 			s_me_pending.start = snd.paintedtime;

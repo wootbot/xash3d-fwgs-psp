@@ -27,7 +27,8 @@ coherent: a job's memory is written back from the main CPU's cache before the
 ME starts it (PSP_MeRun) and the ME writes its cache back before it reports
 the job done. Between run and wait the main CPU must not touch the job's
 memory, and output buffers must not share a 64 byte cache line with anything
-the main CPU uses meanwhile.
+the main CPU uses meanwhile. Jobs queue up (ME_QUEUE) and run in order:
+PSP_MeRun returns a ticket to wait for one of them.
 */
 
 #include "common.h"
@@ -40,6 +41,7 @@ the main CPU uses meanwhile.
 #define ME_SRAM_ENTRY		0x100		// words the handler loads: entry, argument, stack
 #define HW( addr )		( *(volatile uint32_t *)( addr ))
 #define ME_STACK_SIZE		( 32 * 1024 )
+#define ME_QUEUE		8		// jobs posted and not done yet, a power of 2
 
 typedef void (*psp_mejob_t)( void *arg );
 
@@ -49,11 +51,15 @@ typedef struct
 	volatile uint32_t	stop;		// main: park
 	volatile uint32_t	req;		// main: job number posted
 	volatile uint32_t	done;		// ME: last job number finished
-	psp_mejob_t volatile	func;
-	void * volatile		arg;
 	volatile uint32_t	idle;		// ME: idle polls, to see it's alive
-	uint32_t		pad[9];		// a cache line of its own
-} me_ctl_t;
+	uint32_t		fcsr;		// main: its FPU control word, for the ME's
+	uint32_t		pad[10];
+	struct
+	{
+		psp_mejob_t volatile	func;
+		void * volatile		arg;
+	} queue[ME_QUEUE];			// job n in queue[n % ME_QUEUE]
+} me_ctl_t;				// two cache lines of its own
 
 // SystemCtrlForUser / KUBridge, as in sys_psp.c
 typedef struct
@@ -66,6 +72,7 @@ int kuKernelCall( void *func_addr, psp_kcall_args_t *args );
 static me_ctl_t *me_ctl;		// uncached view
 static void *me_ctl_mem, *me_stack;
 static int me_state;			// 0 not tried, 1 running, -1 failed
+static int me_local;			// a job is running on the main CPU (the ME reads 0 here)
 static char me_status[128] = "not started";
 
 /*
@@ -131,18 +138,20 @@ static void __attribute__(( noinline )) PSP_MeMain( me_ctl_t *ctl )
 {
 	uint32_t done = ctl->done, polls = 0;
 
+	// the same rounding and denormal flushing as the main CPU
+	__asm__ volatile( "ctc1 %0, $31" :: "r"( ctl->fcsr ));
 	ctl->alive = 1;
 
 	for( ;; )
 	{
-		const uint32_t req = ctl->req;
-
-		if( req != done )
+		if( ctl->req != done )
 		{
+			const uint32_t next = done + 1;
+
 			PSP_MeDcacheFlushAll(); // nothing stale from the last job
-			ctl->func( ctl->arg );
+			ctl->queue[next % ME_QUEUE].func( ctl->queue[next % ME_QUEUE].arg );
 			PSP_MeDcacheFlushAll(); // results into RAM before they're reported
-			ctl->done = done = req;
+			ctl->done = done = next;
 			continue;
 		}
 
@@ -161,6 +170,27 @@ static void __attribute__(( noinline )) PSP_MeMain( me_ctl_t *ctl )
 	ctl->alive = 2;
 	for( ;; )
 		__asm__ volatile( "nop" );
+}
+
+/*
+PSP_MeFlushDcache
+
+for a job on the ME that reports results before it ends: its data cache into
+RAM (the main CPU still has to invalidate the range before reading it). Run
+on the main CPU (the ME wasn't running) it does nothing: the cache
+instructions are kernel only there
+*/
+void PSP_MeFlushDcache( void )
+{
+	if( !me_local )
+		PSP_MeDcacheFlushAll();
+}
+
+static void PSP_MeRunLocal( psp_mejob_t func, void *arg )
+{
+	me_local = 1;
+	func( arg );
+	me_local = 0;
 }
 
 static int PSP_MeBootKernel( void )
@@ -210,6 +240,7 @@ qboolean PSP_MeStart( void )
 	}
 
 	memset( me_ctl_mem, 0, sizeof( me_ctl_t ));
+	__asm__ volatile( "cfc1 %0, $31" : "=r"( ((me_ctl_t *)me_ctl_mem )->fcsr ));
 	sceKernelDcacheWritebackInvalidateAll();
 	me_ctl = (me_ctl_t *)( 0x40000000 | (uint32_t)me_ctl_mem );
 
@@ -236,43 +267,22 @@ qboolean PSP_MeActive( void )
 	return me_state > 0;
 }
 
-/*
-PSP_MeRun
-
-starts func( arg ) on the ME, or runs it here if the ME isn't running
-*/
-void PSP_MeWait( void );
-void PSP_MeRun( psp_mejob_t func, void *arg )
-{
-	if( me_state <= 0 )
-	{
-		func( arg );
-		return;
-	}
-
-	PSP_MeWait();
-	sceKernelDcacheWritebackInvalidateAll();
-	me_ctl->func = func;
-	me_ctl->arg = arg;
-	__asm__ volatile( "sync" ::: "memory" );
-	me_ctl->req++;
-}
-
-qboolean PSP_MeBusy( void )
-{
-	return me_state > 0 && me_ctl->req != me_ctl->done;
-}
-
 static int PSP_MeHaltKernel( void );
-void PSP_MeWait( void )
+
+/*
+PSP_MeWaitFor
+
+until job ticket is done (0: nothing to wait for)
+*/
+void PSP_MeWaitFor( uint32_t ticket )
 {
 	uint32_t t0;
 
-	if( me_state <= 0 || me_ctl->req == me_ctl->done )
+	if( me_state <= 0 || !ticket || (int32_t)( me_ctl->done - ticket ) >= 0 )
 		return;
 
 	t0 = sceKernelGetSystemTimeLow();
-	while( me_ctl->req != me_ctl->done )
+	while( (int32_t)( me_ctl->done - ticket ) < 0 )
 	{
 		// a crashed ME never answers: give up on it, the jobs run here from now on
 		if( sceKernelGetSystemTimeLow() - t0 > 500000 )
@@ -286,6 +296,55 @@ void PSP_MeWait( void )
 			return;
 		}
 	}
+}
+
+qboolean PSP_MeDone( uint32_t ticket )
+{
+	return me_state <= 0 || !ticket || (int32_t)( me_ctl->done - ticket ) >= 0;
+}
+
+void PSP_MeWait( void )
+{
+	if( me_state > 0 )
+		PSP_MeWaitFor( me_ctl->req );
+}
+
+qboolean PSP_MeBusy( void )
+{
+	return me_state > 0 && me_ctl->req != me_ctl->done;
+}
+
+/*
+PSP_MeRun
+
+queues func( arg ) on the ME and returns its ticket, or runs it here (ticket 0)
+if the ME isn't running
+*/
+uint32_t PSP_MeRun( psp_mejob_t func, void *arg )
+{
+	uint32_t next;
+
+	if( me_state <= 0 )
+	{
+		PSP_MeRunLocal( func, arg );
+		return 0;
+	}
+
+	// the queue is full: wait for the oldest
+	next = me_ctl->req + 1;
+	PSP_MeWaitFor( next - ME_QUEUE );
+	if( me_state <= 0 )
+	{
+		PSP_MeRunLocal( func, arg );
+		return 0;
+	}
+
+	sceKernelDcacheWritebackInvalidateAll();
+	me_ctl->queue[next % ME_QUEUE].func = func;
+	me_ctl->queue[next % ME_QUEUE].arg = arg;
+	__asm__ volatile( "sync" ::: "memory" );
+	me_ctl->req = next;
+	return next;
 }
 
 void PSP_MeShutdown( void )
