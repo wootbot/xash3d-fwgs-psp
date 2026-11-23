@@ -221,7 +221,7 @@ uint32_t PSP_MeRun( void (*func)( void *arg ), void *arg );
 uint32_t PSP_MeRunKeep( void (*func)( void *arg ), void *arg );
 void PSP_MeWaitFor( uint32_t ticket );
 qboolean PSP_MeDone( uint32_t ticket );
-extern void (*psp_entities_hook)( void ); // the renderer's, after CL_EmitEntities
+extern void (*psp_entities_hook)( qboolean complete ); // the renderer's: the packet entities are in the draw lists, or all of them are
 void PSP_MeWriteback( const void *start, size_t size );
 qboolean PSP_MeBusy( void );
 void PSP_MeWait( void );

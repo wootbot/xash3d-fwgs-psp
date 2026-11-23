@@ -3940,9 +3940,9 @@ void Host_ClientFrame( void )
 	CL_EmitEntities ();
 
 #if XASH_PSP
-	// their bones start on the Media Engine
+	// the rest of the draw lists for the Media Engine
 	if( cls.state == ca_active && cl.video_prepped && psp_entities_hook )
-		psp_entities_hook();
+		psp_entities_hook( true );
 #endif
 
 	// in case we lost connection

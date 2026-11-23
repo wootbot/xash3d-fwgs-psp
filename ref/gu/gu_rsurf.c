@@ -1816,7 +1816,7 @@ R_BlendLightmaps call. What it can't draw (the slow surfaces, polygons that
 need clipping, leaves with efrags) it lists for the main CPU (R_MeWorldEnd).
 
 R_MeBrushesBegin posts a second one for the static brush models in the draw
-lists, after the bones (R_StudioMeBonesBegin): culled like R_SortBrushModelSurfaces,
+lists (R_StudioMeTable), after the bones (R_StudioMePrepare): culled like R_SortBrushModelSurfaces,
 two lists for the opaque ones and two for the alpha tested ones
 (R_MeBrushesDraw).
 
@@ -1875,14 +1875,6 @@ typedef struct
 	uint16_t		lmhead[MAX_LIGHTMAPS];
 	uint32_t		cmds[MEWORLD_CMDS] __attribute__(( aligned( 64 )));
 } meworld_out_t;
-
-typedef struct
-{
-	short		mins[3], maxs[3];	// rounded outwards
-	uint16_t		firstsurf, numsurfs;
-	byte		result, cullsurfs, watersides, pad;
-	float		waterz;		// water planes up to here aren't drawn
-} meworld_brush_t;
 
 typedef struct
 {
@@ -2443,6 +2435,7 @@ void R_MeWorldBegin( void )
 			job->absplanes[i][j] = fabsf( job->planes[i][j] );
 	}
 
+	R_StudioMeYield( 2 );
 	r_meworld.ticket = PSP_MeRunKeep( R_MeWorldJob, job );
 	r_meworld.begun = r_meworld.ticket != 0;
 }
@@ -2453,52 +2446,64 @@ qboolean R_MeWorldBusy( void )
 	return r_meworld.ticket && !PSP_MeDone( r_meworld.ticket );
 }
 
-// for the ME: R_DrawStaticBrushModels with the chains, and bs_surfs
-static qboolean R_MeBrushAllowed( const cl_entity_t *e )
+/*
+=================
+R_MeBrushClassify
+
+runs on the ME (R_StudioMeEarly): whether it can draw the entity, R_DrawStaticBrushModels
+with the chains and bs_surfs
+=================
+*/
+qboolean R_MeBrushClassify( const cl_entity_t *e, meworld_brush_t *m )
 {
 	const model_t *mod = e->model;
 
-	return mod && mod->type == mod_brush && mod->surfaces == WORLDMODEL->surfaces && mod->firstmodelsurface >= bs_first
-		&& mod->firstmodelsurface + mod->nummodelsurfaces <= bs_first + bs_numsurfs
-		&& !FBitSet( e->curstate.effects, EF_FULLBRIGHT ) && !e->curstate.frame && R_StaticBrushModel( e );
+	if( mod->surfaces != WORLDMODEL->surfaces || !bs_surfs || mod->firstmodelsurface < bs_first
+		|| mod->firstmodelsurface + mod->nummodelsurfaces > bs_first + bs_numsurfs )
+		return false;
+
+	// R_StaticBrushModel
+	if( !VectorIsNull( e->origin ) || !VectorIsNull( e->angles ) || FBitSet( e->curstate.effects, EF_FULLBRIGHT ) || e->curstate.frame )
+		return false;
+
+	// with an effect it may be invisible: CL_FxBlend
+	if( e->curstate.rendermode != kRenderNormal && ( e->curstate.rendermode != kRenderTransAlpha || e->curstate.renderfx != kRenderFxNone || e->curstate.renderamt <= 0 ))
+		return false;
+
+	for( int j = 0; j < 3; j++ )
+	{
+		m->mins[j] = bound( -32768, (int)( mod->mins[j] - 1.0f ), 32767 );
+		m->maxs[j] = bound( -32768, (int)( mod->maxs[j] + 1.0f ), 32767 );
+	}
+
+	m->firstsurf = mod->firstmodelsurface;
+	m->numsurfs = mod->nummodelsurfaces;
+	m->result = e->curstate.rendermode == kRenderNormal ? MEWORLD_BRUSHES : MEWORLD_ABRUSHES;
+	m->cullsurfs = true;
+	m->watersides = FBitSet( e->curstate.effects, EF_WATERSIDES ) ? true : false;
+	m->waterz = mod->mins[2] + 1.0f;
+	return true;
 }
 
-static void R_MeBrushesAdd( cl_entity_t **list, int count, byte *grouped, qboolean trans )
+static void R_MeBrushesAdd( cl_entity_t **list, int count, const mecull_t *cull, int numcull, const uint16_t *order, byte *grouped, qboolean dlights )
 {
 	meworld_brushjob_t *bjob = &r_meworld.brushjob;
 
 	for( int i = 0; i < count && bjob->numbrushes < MEWORLD_MAXBRUSHES; i++ )
 	{
-		cl_entity_t *e = list[i];
-		model_t *mod = e->model;
+		const int index = order ? order[i] : i;
+		const mecull_t *c = &cull[index];
 
-		if( !R_MeBrushAllowed( e ))
+		// the table doesn't have the ones added since
+		if( index >= numcull || c->type != MECULL_BRUSH )
 			continue;
 
 		grouped[i] = R_GROUPED_ME;
+		r_meworld.ents[bjob->numbrushes] = list[i];
+		bjob->brushes[bjob->numbrushes++] = c->brush;
 
-		// skipped like the translucent loop does
-		if( trans && e->curstate.rendermode != kRenderNormal && CL_FxBlend( e ) <= 0 )
-			continue;
-
-		r_meworld.ents[bjob->numbrushes] = e;
-		meworld_brush_t *m = &bjob->brushes[bjob->numbrushes++];
-
-		for( int j = 0; j < 3; j++ )
-		{
-			m->mins[j] = bound( -32768, (int)floorf( mod->mins[j] ), 32767 );
-			m->maxs[j] = bound( -32768, (int)ceilf( mod->maxs[j] ), 32767 );
-		}
-
-		m->firstsurf = mod->firstmodelsurface;
-		m->numsurfs = mod->nummodelsurfaces;
-		m->result = e->curstate.rendermode == kRenderNormal ? MEWORLD_BRUSHES : MEWORLD_ABRUSHES;
-		m->cullsurfs = R_StaticEntity( e );
-		m->watersides = FBitSet( e->curstate.effects, EF_WATERSIDES ) ? true : false;
-		m->waterz = mod->mins[2] + 1.0f;
-
-		R_PushDlightsForBmodel( mod, tr.dlightframecount, RI.objectMatrix );
-		e->visframe = tr.realframecount;
+		if( dlights )
+			R_PushDlightsForBmodel( list[i]->model, tr.dlightframecount, RI.objectMatrix );
 	}
 }
 
@@ -2509,21 +2514,30 @@ R_MeBrushesBegin
 the static brush models of the draw lists, marked R_GROUPED_ME in grouped, for R_MeBrushesDraw
 =================
 */
-void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped )
+void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped, const uint16_t *trans_order )
 {
 	meworld_brushjob_t *bjob = &r_meworld.brushjob;
+	const mecull_t *cull;
+	int numsolid, numtrans;
+	qboolean dlights = false;
 
-	if( !r_brushes_me.value || !r_meworld.begun || !bs_surfs || r_nocull.value || FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
+	if( !r_brushes_me.value || !r_meworld.begun || r_nocull.value || FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) || r_showhull->value > 0.0f )
+		return;
+
+	if( !( cull = R_StudioMeTable( &numsolid, &numtrans, NULL )))
 		return;
 
 	R_LoadIdentity();
 	VectorCopy( RI.cullorigin, tr.modelorg );
 
+	for( int i = 0; i < MAX_DLIGHTS && !dlights; i++ )
+		dlights = gp_dlights[i].radius != 0.0f;
+
 	bjob->world = &r_meworld.job;
 	bjob->front = glState.faceCull == GL_NONE ? 0.0f : glState.faceCull == GL_FRONT ? 1.0f : -1.0f;
 	bjob->numbrushes = 0;
-	R_MeBrushesAdd( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_grouped, false );
-	R_MeBrushesAdd( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_grouped, true );
+	R_MeBrushesAdd( tr.draw_list->solid_entities, numsolid, cull, numsolid, NULL, solid_grouped, dlights );
+	R_MeBrushesAdd( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, cull + MECULL_MAXSOLID, numtrans, trans_order, trans_grouped, dlights );
 
 	if( bjob->numbrushes > 0 )
 	{

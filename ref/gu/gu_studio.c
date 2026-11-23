@@ -158,8 +158,8 @@ R_StudioInit
 ====================
 */
 #if XASH_PSP
-static void R_StudioMeBonesEarly( void );
-static convar_t r_studio_me, r_studio_me_draw, r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
+static void R_StudioMeEarly( qboolean complete );
+static convar_t r_studio_me, r_studio_me_draw, r_studio_me_players, r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
 #endif
 
 void R_StudioInit( void )
@@ -183,7 +183,8 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_proplist );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_geplan );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_me );
-	psp_entities_hook = R_StudioMeBonesEarly;
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_me_players );
+	psp_entities_hook = R_StudioMeEarly;
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_me_draw );
 #endif
 #endif
@@ -698,11 +699,11 @@ StudioCalcBoneAdj
 
 ====================
 */
-static void R_StudioCalcBoneAdj( float dadt, float *adj, const byte *pcontroller1, const byte *pcontroller2, byte mouthopen )
+static void R_StudioBoneAdj( const studiohdr_t *hdr, float dadt, float *adj, const byte *pcontroller1, const byte *pcontroller2, byte mouthopen )
 {
-	mstudiobonecontroller_t	*pbonecontroller = (mstudiobonecontroller_t *)((byte *)m_pStudioHeader + m_pStudioHeader->bonecontrollerindex);
+	const mstudiobonecontroller_t	*pbonecontroller = (const mstudiobonecontroller_t *)((const byte *)hdr + hdr->bonecontrollerindex);
 
-	for( int j = 0; j < m_pStudioHeader->numbonecontrollers; j++ )
+	for( int j = 0; j < hdr->numbonecontrollers; j++ )
 	{
 		float value = 0.0f;
 		int i = pbonecontroller[j].index;
@@ -752,6 +753,11 @@ static void R_StudioCalcBoneAdj( float dadt, float *adj, const byte *pcontroller
 			break;
 		}
 	}
+}
+
+static void R_StudioCalcBoneAdj( float dadt, float *adj, const byte *pcontroller1, const byte *pcontroller2, byte mouthopen )
+{
+	R_StudioBoneAdj( m_pStudioHeader, dadt, adj, pcontroller1, pcontroller2, mouthopen );
 }
 
 /*
@@ -997,30 +1003,39 @@ static inline void R_StudioConcat( matrix3x4 out, const matrix3x4 in1, const mat
 
 /*
 ====================
-bones on the Media Engine
+studio models on the Media Engine
 
-The ME (engine/platform/psp/me_psp.c) computes the bones of the animated
-models to draw while the main CPU draws the world: R_StudioMeBonesBegin
-gathers what R_StudioSetupBones will need (frames, blend weights, controller
-adjustments, the transform, the animation data) and queues one job for all
-of them. R_StudioSetupBones takes a model's result only if what it sees
-matches what was gathered (R_StudioMeBonesKey), else it computes the bones
-here as before. Players (gait), followers, the view model, small props and
-the random render effects stay here.
+Three jobs a frame on the ME (engine/platform/psp/me_psp.c). R_StudioMeEarly
+posts the first as soon as the packet entities are in the draw lists: it tells
+them apart (mecull_t: what the culling and the sort of the translucent ones
+need, and who may draw it), then computes the bones of the models that were
+visible in the last frame. The second does the same for the complete lists,
+until the world's job is posted (the main CPU waits for that one first). With
+the view known R_StudioMePrepare culls with the table and posts the third: the
+other bones, and for the models R_StudioDrawMeModels
+draws (medraw_t) the exact cull, the attachments and the GE commands.
+R_StudioSetupBones takes the bones of the rest only if what it sees matches
+what they were computed from (mebones_key_t), else it computes them here.
 
-The ME has no VFPU: its versions of the bone math are plain float code, with
-their own sine and cosine. It reads the job and the models' data and writes
-only r_mebones.out (each model's in whole cache lines) and the progress
-count, so the main CPU can take a model's bones as soon as they're done.
+Players: the gait is processed before the first job (R_StudioMePlayer), the
+gait sequence's legs and the weapon model are the ME's.
+
+The ME has no VFPU: its versions of the math are plain float code, with
+their own sine and cosine. It reads the entities, the jobs and the models'
+data and writes only cache lines the main CPU doesn't write to. Followers,
+the view model and the random render effects stay on the main CPU.
 ====================
 */
-static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "compute the bones of animated studio models on the Media Engine" );
+static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "cull studio models and compute the bones of animated ones on the Media Engine" );
 static CVAR_DEFINE_AUTO( r_studio_me_draw, "1", FCVAR_ARCHIVE, "write the draw commands of solid ones there too, without the client DLL's renderer" );
+static CVAR_DEFINE_AUTO( r_studio_me_players, "1", FCVAR_ARCHIVE, "players too (needs r_studio_me_draw)" );
 
-#define MEBONES_MAXENTS	32
-#define MEBONES_POOL	1024	// bones in the output pool
+#define MEBONES_MAXENTS	40
+#define MEBONES_POOL	1536	// bones in the output pool
 #define MEBONES_ATTACHMENTS	4	// cl_entity_t.attachment
-#define MEBONES_CMDS	12288	// GE commands of all models
+#define MEBONES_CMDS	16384	// GE commands of all models
+#define MEBONES_MAXPLAYERS	16
+#define MEMERGE_CACHE	16
 
 typedef struct
 {
@@ -1029,7 +1044,6 @@ typedef struct
 	int		interpolate, sequence, prevsequence, renderfx;
 	float		frame, animtime, framerate, prevanimtime, sequencetime, prevframe;
 	byte		controller[4], prevcontroller[4], blending[2], prevblending[2], prevseqblending[2], mouthopen, pad;
-	matrix3x4		rotation;
 } mebones_key_t;
 
 typedef struct
@@ -1040,77 +1054,156 @@ typedef struct
 	float		s[2];	// blend weights: [0] blends 1-2 and 3-4, [1] between the pairs
 } mebones_seq_t;
 
+// which bone of the player's model a weapon model's takes its transform from, -1: none
 typedef struct
 {
-	mebones_key_t	key;
-	const cl_entity_t	*e;
-	float		prevframe;	// what R_StudioSetupBones stores in latched.prevframe, if blendprev is off
+	const studiohdr_t	*hdr, *phdr;
+	uint		frame;	// tr.framecount it was last used in
+	signed char	map[MAXSTUDIOBONES];
+} memerge_t;
 
-	// for the ME
+// a player, from the main CPU
+typedef struct
+{
+	int		index;	// in the table
+	const model_t	*mod, *wmod;	// of the player and the weapon, or NULL
+	const studiohdr_t	*hdr, *whdr;
+	const memerge_t	*merge;	// of the weapon
+	float		yaw;	// of the legs
+	int		gaitsequence;	// 0: none
+	float		gaitframe;
+	int		number;
+} meplayer_t;
+
+// the ME's
+typedef struct mebones_ent_s
+{
+	mebones_key_t	key;	// what the bones were computed from, and the rotation
+	matrix3x4		rotation;
 	const studiohdr_t	*hdr;
-	mebones_seq_t	seq[2];	// the sequence, and the previous one to blend from
+	mebones_seq_t	seq[3];	// the sequence, the previous one to blend from, the gait
+	float		prevframe;	// what R_StudioSetupBones stores in latched.prevframe, if blendprev is off
 	int		blendprev;
 	float		sprev;
 	float		adj[MAXSTUDIOCONTROLLERS];
-	matrix3x4		rotation;
 	matrix3x4		*out;
-	const struct medraw_s *draw;	// R_StudioDrawMeModels draws it
-	int		early;		// its bones are the early job's
-	int		slot;		// in the list of the other one, -1: not in there
-} mebones_ent_t;
+	int		gait;
+	const memerge_t	*merge;	// a weapon's
+	struct mebones_ent_s *weapon;
+	int		done;	// the bones
+} __attribute__(( aligned( 64 ))) mebones_ent_t;
+
+// what both jobs need to know about this frame
+typedef struct
+{
+	double		time;
+	int		interpolate;
+	int		steplerp;	// the ones that step move between two positions
+	int		negpitch;
+	cl_entity_t	**solid, **trans;
+	int		framecount;
+	int		numplayers;
+	meplayer_t	players[MEBONES_MAXPLAYERS];
+} mebones_frame_t;
 
 typedef struct
 {
+	const mebones_frame_t *frame;
+	int		firstsolid, numsolid, firsttrans, numtrans;	// new in the table
+} mebones_early_t;
+
+// one to draw, or with bones for R_StudioSetupBones
+typedef struct
+{
+	cl_entity_t	*e;
+	const struct medraw_s *draw, *wdraw;	// R_StudioDrawMeModels draws it
+	int		index;	// in the table
+	const meplayer_t	*player;
+} mebones_item_t;
+
+typedef struct
+{
+	const mebones_frame_t *frame;
 	int		count;
-	mebones_ent_t	*ents;
-	volatile uint32_t	*progress;	// uncached: models done
-	byte		list[MEBONES_MAXENTS];	// of ents
+	mebones_item_t	items[MEBONES_MAXENTS];
 
 	// for the ones with a medraw_t
 	int		numplanes;
 	float		planes[FRUSTUM_PLANES][4];	// normal, -dist
 	vec3_t		eye, vright;
-	uint		*p;		// the ME's own: the end of the commands
 } mebones_job_t;
 
-// of a model, one cache line
+// of an item, two cache lines
 typedef struct
 {
 	uint32_t		visible;	// of the ones with a medraw_t, else 1
-	uint32_t		cmds[2];	// addresses of its commands, smooth and flat items, 0: none
+	uint32_t		cmds[4];	// addresses of its commands, smooth and flat items, the weapon's, 0: none
+	mebones_ent_t	*ent;	// NULL: not on the ME
+	uint32_t		blendprev;
+	float		prevframe;
 	float		attachment[MEBONES_ATTACHMENTS][3];
-	uint32_t		pad;
+	matrix3x4		rotation;
 } mebones_res_t;
 
-typedef char mebones_res_check[sizeof( mebones_res_t ) == 64 ? 1 : -1];
-
+typedef char mebones_res_check[sizeof( mebones_res_t ) == 128 ? 1 : -1];
+typedef char mecull_check[sizeof( mecull_t ) == 32 ? 1 : -1];
 
 static struct
 {
-	mebones_ent_t	ents[MEBONES_MAXENTS];
-	mebones_job_t	job __attribute__(( aligned( 64 ))); // the ME writes it: no line with anything else
-	mebones_job_t	early_job __attribute__(( aligned( 64 )));
-	uint32_t		ticket __attribute__(( aligned( 64 )));
-	uint32_t		early_ticket;
-	qboolean		early;	// the early job is this frame's
-	qboolean		local;	// the job ran on this CPU: the results are in its cache
-	int		count;	// valid for this frame's draw
-	int		used;	// bones of the pool
+	mebones_frame_t	frame;
+	mebones_early_t	early[2];
+	mebones_job_t	job;
+	uint32_t		ticket, early_ticket;
+	qboolean		begun;	// the first early job is posted
+	qboolean		table;	// the table is this frame's
+	qboolean		tableread;	// it's in this CPU's cache
+	int		count;	// items valid for this frame's draw
 	uint32_t		hits, misses;
-} r_mebones;
+	uint32_t		vert_frame;
+} r_mebones __attribute__(( aligned( 64 )));
 
-// written by the ME only, read by the main CPU after the progress count says so
+// written by the ME only, read by the main CPU after the progress counts say so
+static mecull_t r_mecull[MECULL_MAX] __attribute__(( aligned( 64 )));
+static mesort_t r_mesort[MECULL_MAXTRANS] __attribute__(( aligned( 64 )));
 static matrix3x4 r_mebones_out[MEBONES_POOL] __attribute__(( aligned( 64 )));
 static mebones_res_t r_mebones_res[MEBONES_MAXENTS] __attribute__(( aligned( 64 )));
 static uint r_mebones_cmds[MEBONES_CMDS] __attribute__(( aligned( 64 )));
-static volatile uint32_t r_mebones_progress[2][16] __attribute__(( aligned( 64 )));
+static mebones_ent_t r_mebones_ents[MEBONES_MAXENTS * 2] __attribute__(( aligned( 64 )));
+
+// its own, in cache lines of their own (aligned as a type: the size is too)
+typedef struct
+{
+	const studiohdr_t	*hdr;
+	int	length, numbones;
+	char	name[16];
+	byte	bones[MAXSTUDIOBONES];
+} megait_t;
+
+typedef struct
+{
+	int	count;	// of r_mebones_ents
+	int	used;	// of r_mebones_out
+	uint	*p;	// end of the commands
+	const cl_entity_t	*ents[MECULL_MAX];
+	byte	slot[MECULL_MAX];	// of r_mebones_ents + 1, by table index
+	uint16_t	seen[256];	// when an entity was last not culled, by a hash of its address: the low bits of tr.framecount
+	megait_t	gait[4];	// R_MeGaitBones
+	int	nextgait;
+} __attribute__(( aligned( 64 ))) mebones_me_t;
+
+static mebones_me_t r_mebones_me;
+
+// only accessed uncached: items done, the table is complete, the early job should stop
+static volatile uint32_t r_mebones_sync[16] __attribute__(( aligned( 64 )));
+#define MEBONES_SYNC	((volatile uint32_t *)( 0x40000000 | (uintptr_t)r_mebones_sync ))
+enum { MESYNC_ITEMS = 0, MESYNC_TABLE, MESYNC_YIELD };	// the number of the early job
 
 // ME scratch: the rotations of the sequence, its blends, the previous sequence
 static struct
 {
 	vec3_t	pos[5][MAXSTUDIOBONES];
 	vec4_t	q[5][MAXSTUDIOBONES];
-} r_mebones_tmp __attribute__(( aligned( 64 )));
+} __attribute__(( aligned( 64 ))) r_mebones_tmp;
 
 /*
 sine and cosine of x in float, ~1e-7 off: x reduced to [-pi/4, pi/4] around
@@ -1149,7 +1242,7 @@ static void R_MeAngleQuaternion( const float *angles, vec4_t q )
 	q[3] = cr * cp * cy + sr * sp * sy;
 }
 
-// QuaternionSlerp: q aligned with p, then a lerp below ~1 degree apart
+// QuaternionSlerp: q aligned with p, then a normalized lerp below ~25 degrees apart (off by < 0.1)
 static void R_MeQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t qt )
 {
 	float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
@@ -1162,7 +1255,7 @@ static void R_MeQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t
 		cosom = -cosom;
 	}
 
-	if( cosom < 0.99985f )
+	if( cosom < 0.975f )
 	{
 		const float omega = acosf( cosom );
 		float sinom, c, sa, sb;
@@ -1175,8 +1268,11 @@ static void R_MeQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t
 	}
 	else
 	{
-		sclp = 1.0f - t;
-		sclq = t;
+		// the length of the lerp
+		const float k = 1.0f / __builtin_sqrtf( 1.0f - 2.0f * t * ( 1.0f - t ) * ( 1.0f - cosom ));
+
+		sclp = ( 1.0f - t ) * k;
+		sclq = t * k;
 	}
 
 	qt[0] = sclp * p[0] + sclq * q0;
@@ -1185,63 +1281,132 @@ static void R_MeQuaternionSlerp( const vec4_t p, const vec4_t q, float t, vec4_t
 	qt[3] = sclp * p[3] + sclq * q3;
 }
 
-static void R_MeSlerpBones( int numbones, vec4_t q1[], float pos1[][3], const vec4_t q2[], const float pos2[][3], float s )
+// gait: bones not to touch, or NULL
+static void R_MeSlerpBones( int numbones, vec4_t q1[], float pos1[][3], const vec4_t q2[], const float pos2[][3], float s, const byte *gait )
 {
 	s = bound( 0.0f, s, 1.0f );
 
 	for( int i = 0; i < numbones; i++ )
 	{
+		if( gait && gait[i] )
+			continue;
 		R_MeQuaternionSlerp( q1[i], q2[i], s, q1[i] );
 		VectorLerp( pos1[i], s, pos2[i], pos1[i] );
 	}
 }
 
-// R_StudioCalcRotations with the controller adjustments given
-static void R_MeCalcRotations( const studiohdr_t *hdr, float pos[][3], vec4_t *q, const mstudioseqdesc_t *pseqdesc, const mstudioanim_t *panim, float f, const float *adj )
+// R_StudioCalcRotations of a bone, s between its keyframes v1 and v2
+static void R_MeCalcRotation( const float *v1, const float *v2, float s, vec3_t pos, vec4_t q )
 {
-	const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+	if( !VectorCompare( v1, v2 ))
+		VectorLerp( v1, s, v2, pos );
+	else VectorCopy( v1, pos );
 
+	// as PSP_StudioCalcBoneAngles: neighbouring keyframes interpolate as angles
+	const float d0 = v2[3] - v1[3], d1 = v2[4] - v1[4], d2 = v2[5] - v1[5];
+	if( fabsf( d0 ) < 0.25f && fabsf( d1 ) < 0.25f && fabsf( d2 ) < 0.25f )
+	{
+		const vec3_t a = { v1[3] + s * d0, v1[4] + s * d1, v1[5] + s * d2 };
+		R_MeAngleQuaternion( a, q );
+	}
+	else
+	{
+		vec4_t qa, qb;
+		R_MeAngleQuaternion( &v1[3], qa );
+		R_MeAngleQuaternion( &v2[3], qb );
+		R_MeQuaternionSlerp( qa, qb, s, q );
+	}
+}
+
+static int R_MeFrame( const mstudioseqdesc_t *pseqdesc, float f, float *s )
+{
 	if( f > pseqdesc->numframes - 1 )
 		f = 0.0f;
 	else if( f < -0.01f )
 		f = -0.01f;
 
 	const int frame = (int)f;
-	const float s = f - frame;
+	*s = f - frame;
+	return frame;
+}
 
-	for( int i = 0; i < hdr->numbones; i++, pbone++, panim++ )
-	{
-		float v1[6], v2[6];
-
-		PSP_StudioBoneValues( frame, pbone, panim, adj, v1, v2 );
-
-		if( !VectorCompare( v1, v2 ))
-			VectorLerp( v1, s, v2, pos[i] );
-		else VectorCopy( v1, pos[i] );
-
-		// as PSP_StudioCalcBoneAngles: neighbouring keyframes interpolate as angles
-		const float d0 = v2[3] - v1[3], d1 = v2[4] - v1[4], d2 = v2[5] - v1[5];
-		if( fabsf( d0 ) < 0.25f && fabsf( d1 ) < 0.25f && fabsf( d2 ) < 0.25f )
-		{
-			const vec3_t a = { v1[3] + s * d0, v1[4] + s * d1, v1[5] + s * d2 };
-			R_MeAngleQuaternion( a, q[i] );
-		}
-		else
-		{
-			vec4_t qa, qb;
-			R_MeAngleQuaternion( &v1[3], qa );
-			R_MeAngleQuaternion( &v2[3], qb );
-			R_MeQuaternionSlerp( qa, qb, s, q[i] );
-		}
-	}
-
+static void R_MeMotion( const mstudioseqdesc_t *pseqdesc, float pos[][3] )
+{
 	if( pseqdesc->motiontype & STUDIO_X ) pos[pseqdesc->motionbone][0] = 0.0f;
 	if( pseqdesc->motiontype & STUDIO_Y ) pos[pseqdesc->motionbone][1] = 0.0f;
 	if( pseqdesc->motiontype & STUDIO_Z ) pos[pseqdesc->motionbone][2] = 0.0f;
 }
 
+// R_StudioCalcRotations with the controller adjustments given, the bones with gait[i] == which
+static void R_MeCalcRotations( const studiohdr_t *hdr, float pos[][3], vec4_t *q, const mstudioseqdesc_t *pseqdesc, const mstudioanim_t *panim, float f, const float *adj, const byte *gait, int which )
+{
+	const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+	float s;
+	const int frame = R_MeFrame( pseqdesc, f, &s );
+
+	for( int i = 0; i < hdr->numbones; i++, pbone++, panim++ )
+	{
+		float v1[6], v2[6];
+
+		if( gait && gait[i] != which )
+			continue;
+		PSP_StudioBoneValues( frame, pbone, panim, adj, v1, v2 );
+		R_MeCalcRotation( v1, v2, s, pos[i], q[i] );
+	}
+
+	R_MeMotion( pseqdesc, pos );
+}
+
+/*
+two blends at once: most bones of a player are the same in both (only the
+spine aims up or down), they need no second rotation and no blend
+*/
+static void R_MeCalcRotations2( const studiohdr_t *hdr, float pos[][3], vec4_t *q, const mstudioseqdesc_t *pseqdesc, const mstudioanim_t *panim, float f, const float *adj, float blend, const byte *gait )
+{
+	const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+	const mstudioanim_t *panim2 = panim + hdr->numbones;
+	float s;
+	const int frame = R_MeFrame( pseqdesc, f, &s );
+
+	blend = bound( 0.0f, blend, 1.0f );
+
+	for( int i = 0; i < hdr->numbones; i++, pbone++, panim++, panim2++ )
+	{
+		const uint16_t *o1 = panim->offset, *o2 = panim2->offset;
+		float v1[6], v2[6], w1[6], w2[6];
+		qboolean same = true;
+
+		if( gait && gait[i] )
+			continue;
+
+		PSP_StudioBoneValues( frame, pbone, panim, adj, v1, v2 );
+
+		// animated in one of them
+		if( o1[0] | o1[1] | o1[2] | o1[3] | o1[4] | o1[5] | o2[0] | o2[1] | o2[2] | o2[3] | o2[4] | o2[5] )
+		{
+			PSP_StudioBoneValues( frame, pbone, panim2, adj, w1, w2 );
+			for( int k = 0; k < 6 && same; k++ )
+				same = v1[k] == w1[k] && v2[k] == w2[k];
+		}
+
+		R_MeCalcRotation( v1, v2, s, pos[i], q[i] );
+
+		if( !same )
+		{
+			vec3_t pos2;
+			vec4_t q2;
+
+			R_MeCalcRotation( w1, w2, s, pos2, q2 );
+			R_MeQuaternionSlerp( q[i], q2, blend, q[i] );
+			VectorLerp( pos[i], blend, pos2, pos[i] );
+		}
+	}
+
+	R_MeMotion( pseqdesc, pos );
+}
+
 // a sequence with its blends, into pos/q[dst], as R_StudioSetupBones; scratch 1-3
-static void R_MeSequence( const mebones_ent_t *m, const mebones_seq_t *seq, int dst, const float *adj )
+static void R_MeSequence( const mebones_ent_t *m, const mebones_seq_t *seq, int dst, const float *adj, const byte *gait )
 {
 	const studiohdr_t *hdr = m->hdr;
 	const int nb = hdr->numbones;
@@ -1249,33 +1414,23 @@ static void R_MeSequence( const mebones_ent_t *m, const mebones_seq_t *seq, int 
 	vec3_t *pos = r_mebones_tmp.pos[dst];
 	vec4_t *q = r_mebones_tmp.q[dst];
 
-	R_MeCalcRotations( hdr, pos, q, seq->pseqdesc, panim, seq->f, adj );
+	if( seq->pseqdesc->numblends <= 1 )
+		R_MeCalcRotations( hdr, pos, q, seq->pseqdesc, panim, seq->f, adj, gait, 0 );
+	else R_MeCalcRotations2( hdr, pos, q, seq->pseqdesc, panim, seq->f, adj, seq->s[0], gait );
 
-	if( seq->pseqdesc->numblends > 1 )
+	if( seq->pseqdesc->numblends == 4 )
 	{
-		panim += nb;
-		R_MeCalcRotations( hdr, r_mebones_tmp.pos[1], r_mebones_tmp.q[1], seq->pseqdesc, panim, seq->f, adj );
-		R_MeSlerpBones( nb, q, pos, r_mebones_tmp.q[1], r_mebones_tmp.pos[1], seq->s[0] );
-
-		if( seq->pseqdesc->numblends == 4 )
-		{
-			panim += nb;
-			R_MeCalcRotations( hdr, r_mebones_tmp.pos[2], r_mebones_tmp.q[2], seq->pseqdesc, panim, seq->f, adj );
-			panim += nb;
-			R_MeCalcRotations( hdr, r_mebones_tmp.pos[3], r_mebones_tmp.q[3], seq->pseqdesc, panim, seq->f, adj );
-			R_MeSlerpBones( nb, r_mebones_tmp.q[2], r_mebones_tmp.pos[2], r_mebones_tmp.q[3], r_mebones_tmp.pos[3], seq->s[0] );
-			R_MeSlerpBones( nb, q, pos, r_mebones_tmp.q[2], r_mebones_tmp.pos[2], seq->s[1] );
-		}
+		R_MeCalcRotations2( hdr, r_mebones_tmp.pos[2], r_mebones_tmp.q[2], seq->pseqdesc, panim + nb * 2, seq->f, adj, seq->s[0], gait );
+		R_MeSlerpBones( nb, q, pos, r_mebones_tmp.q[2], r_mebones_tmp.pos[2], seq->s[1], gait );
 	}
 }
 
-static void R_MeModelCommands( mebones_job_t *job, const mebones_ent_t *m, mebones_res_t *res );
+static void R_MeModelCommands( const mebones_job_t *job, const mebones_ent_t *m, const struct medraw_s *d, uint32_t *cmds );
 
 // R_StudioComputeBBox: the box of the model and the sequence, transformed
-static qboolean R_MeBonesCulled( const mebones_job_t *job, const mebones_ent_t *m )
+static qboolean R_MeBonesCulled( const mebones_job_t *job, const mebones_ent_t *m, const model_t *mod )
 {
 	const mstudioseqdesc_t *pseqdesc = m->seq[0].pseqdesc;
-	const model_t *mod = m->e->model;
 	const qboolean modbox = !VectorIsNull( mod->mins ) && !VectorIsNull( mod->maxs );
 	float c[3], e[3], tc[3], te[3];
 
@@ -1319,90 +1474,241 @@ static qboolean R_MeBonesCulled( const mebones_job_t *job, const mebones_ent_t *
 	return false;
 }
 
-static void R_MeBones( const mebones_ent_t *m )
+// which bones of a model the gait sequence moves, as R_StudioSetupBones
+static const byte *R_MeGaitBones( const studiohdr_t *hdr )
+{
+	megait_t *const cache = r_mebones_me.gait;
+	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+	qboolean copy_bones = true;
+	int n;
+
+	for( n = 0; n < 4; n++ )
+	{
+		if( cache[n].hdr == hdr && cache[n].length == hdr->length && cache[n].numbones == hdr->numbones && !memcmp( cache[n].name, hdr->name, sizeof( cache[n].name )))
+			return cache[n].bones;
+	}
+
+	n = r_mebones_me.nextgait;
+	r_mebones_me.nextgait = ( n + 1 ) & 3;
+	cache[n].hdr = hdr;
+	cache[n].length = hdr->length;
+	cache[n].numbones = hdr->numbones;
+	memcpy( cache[n].name, hdr->name, sizeof( cache[n].name ));
+
+	for( int i = 0; i < hdr->numbones; i++ )
+	{
+		if( !Q_strcmp( pbones[i].name, "Bip01 Spine" ))
+			copy_bones = false;
+		else if( pbones[i].parent >= 0 && !Q_strcmp( pbones[pbones[i].parent].name, "Bip01 Pelvis" ))
+			copy_bones = true;
+		cache[n].bones[i] = copy_bones;
+	}
+
+	return cache[n].bones;
+}
+
+// parentbones: the bones a weapon's are merged with
+static void R_MeBones( mebones_ent_t *m, matrix3x4 *parentbones )
 {
 	const studiohdr_t *hdr = m->hdr;
 	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
 	const int nb = hdr->numbones;
+	const byte *gait = m->gait ? R_MeGaitBones( hdr ) : NULL;
 
-	R_MeSequence( m, &m->seq[0], 0, m->adj );
+	if( m->merge )
+		R_MeCalcRotations( hdr, r_mebones_tmp.pos[0], r_mebones_tmp.q[0], m->seq[0].pseqdesc, m->seq[0].panim, m->seq[0].f, m->adj, (const byte *)m->merge->map, 0xff );
+	else R_MeSequence( m, &m->seq[0], 0, m->adj, gait );
 
 	if( m->blendprev )
 	{
-		R_MeSequence( m, &m->seq[1], 4, m->adj );
-		R_MeSlerpBones( nb, r_mebones_tmp.q[0], r_mebones_tmp.pos[0], r_mebones_tmp.q[4], r_mebones_tmp.pos[4], m->sprev );
+		R_MeSequence( m, &m->seq[1], 4, m->adj, gait );
+		R_MeSlerpBones( nb, r_mebones_tmp.q[0], r_mebones_tmp.pos[0], r_mebones_tmp.q[4], r_mebones_tmp.pos[4], m->sprev, gait );
 	}
+
+	if( gait )
+		R_MeCalcRotations( hdr, r_mebones_tmp.pos[0], r_mebones_tmp.q[0], m->seq[2].pseqdesc, m->seq[2].panim, m->seq[2].f, m->adj, gait, 1 );
 
 	for( int i = 0; i < nb; i++ )
 	{
 		matrix3x4 bonematrix;
 		const int parent = pbones[i].parent;
 
+		if( m->merge && m->merge->map[i] >= 0 )
+		{
+			Matrix3x4_Copy( m->out[i], parentbones[m->merge->map[i]] );
+			continue;
+		}
+
 		R_StudioBoneMatrix( bonematrix, r_mebones_tmp.q[0][i], r_mebones_tmp.pos[0][i] );
 		Matrix3x4_ConcatTransforms( m->out[i], parent == -1 ? m->rotation : m->out[parent], bonematrix );
 	}
 
 	PSP_MeWriteback( m->out, nb * sizeof( matrix3x4 ));
+	m->done = true;
+
+	if( m->weapon )
+		R_MeBones( m->weapon, m->out );
 }
 
-// before the view is known: only bones
-static void R_MeEarlyBonesJob( void *arg )
+// R_StudioGetAnim of what is loaded already
+static const mstudioanim_t *R_MeAnim( const studiohdr_t *hdr, const model_t *mod, const mstudioseqdesc_t *pseqdesc )
 {
-	mebones_job_t *job = arg;
+	const cache_user_t *seqs;
 
-	for( int i = 0; i < job->count; i++ )
-	{
-		R_MeBones( &job->ents[i] );
-		*job->progress = i + 1;
-	}
+	if( pseqdesc->seqgroup == 0 )
+		return (const mstudioanim_t *)((const byte *)hdr + pseqdesc->animindex );
+
+	seqs = (const cache_user_t *)mod->submodels;
+	if( !seqs || !seqs[pseqdesc->seqgroup].data )
+		return NULL;
+
+	return (const mstudioanim_t *)((const byte *)seqs[pseqdesc->seqgroup].data + pseqdesc->animindex );
 }
 
-static void R_MeBonesJob( void *arg )
+// Matrix3x4_CreateFromEntity from the sines and cosines
+static void R_MeAnglesMatrix( matrix3x4 out, const vec3_t origin, float sy, float cy, float sp, float cp, float sr, float cr )
 {
-	mebones_job_t *job = arg;
+	out[0][0] = cp * cy;
+	out[0][1] = sr * sp * cy - cr * sy;
+	out[0][2] = cr * sp * cy + sr * sy;
+	out[0][3] = origin[0];
+	out[1][0] = cp * sy;
+	out[1][1] = sr * sp * sy + cr * cy;
+	out[1][2] = cr * sp * sy - sr * cy;
+	out[1][3] = origin[1];
+	out[2][0] = -sp;
+	out[2][1] = sr * cp;
+	out[2][2] = cr * cp;
+	out[2][3] = origin[2];
+}
 
-	job->p = r_mebones_cmds;
+// AngleQuaternion( angles, q, false )
+static void R_MeEntityQuaternion( const vec3_t angles, vec4_t q )
+{
+	const vec3_t a = { DEG2RAD( angles[ROLL] ), DEG2RAD( angles[PITCH] ), DEG2RAD( angles[YAW] ) };
 
-	for( int i = 0; i < job->count; i++ )
+	R_MeAngleQuaternion( a, q );
+}
+
+// R_StudioSetUpTransform, of a player the legs' yaw
+static void R_MeTransform( const mebones_frame_t *frame, const cl_entity_t *e, const meplayer_t *player, matrix3x4 out )
+{
+	const float sign = frame->negpitch ? -1.0f : 1.0f;
+	vec3_t origin, angles;
+	float sy, cy, sp, cp, sr = 0.0f, cr = 1.0f;
+
+	if( e->curstate.movetype == MOVETYPE_STEP && frame->steplerp && !player )
 	{
-		const mebones_ent_t *m = &job->ents[job->list[i]];
-		mebones_res_t *res = &r_mebones_res[i];
+		// R_StudioLerpMovement
+		float f = 1.0f;
 
-		res->cmds[0] = res->cmds[1] = 0;
-		res->visible = !m->draw || !R_MeBonesCulled( job, m );
-
-		if( res->visible && !m->early )
-			R_MeBones( m );
-
-		if( res->visible && m->draw )
+		if( frame->interpolate && e->curstate.animtime != e->latched.prevanimtime )
 		{
-			const mstudioattachment_t *pAtt = (const mstudioattachment_t *)((const byte *)m->hdr + m->hdr->attachmentindex);
-			uint *const cmds = job->p;
+			const float dt = frame->time - e->curstate.animtime;
 
-			for( int k = 0; k < m->hdr->numattachments; k++ )
-			{
-				const float (*b)[4] = (const float (*)[4])m->out[pAtt[k].bone];
-
-				for( int j = 0; j < 3; j++ )
-					res->attachment[k][j] = DotProduct( pAtt[k].org, b[j] ) + b[j][3];
-			}
-
-			R_MeModelCommands( job, m, res );
-			PSP_MeWriteback( cmds, (byte *)job->p - (byte *)cmds );
+			if( dt < 1.0f )
+				f = dt / ( e->curstate.animtime - e->latched.prevanimtime );
 		}
 
-		PSP_MeWriteback( res, sizeof( *res ));
-		*job->progress = i + 1;
+		VectorLerp( e->latched.prevorigin, f, e->curstate.origin, origin );
+
+		if( !VectorCompareEpsilon( e->curstate.angles, e->latched.prevangles, ON_EPSILON ))
+		{
+			matrix3x4 m;
+			vec4_t q, q1, q2;
+
+			R_MeEntityQuaternion( e->curstate.angles, q1 );
+			R_MeEntityQuaternion( e->latched.prevangles, q2 );
+			R_MeQuaternionSlerp( q2, q1, f, q );
+			R_StudioBoneMatrix( m, q, vec3_origin );
+
+			// Matrix3x4_AnglesFromMatrix: the sines and cosines of its angles
+			cp = __builtin_sqrtf( m[0][0] * m[0][0] + m[1][0] * m[1][0] );
+			sp = -m[2][0] * sign;
+
+			if( cp > 0.001f )
+			{
+				const float k = 1.0f / cp;
+
+				cy = m[0][0] * k;
+				sy = m[1][0] * k;
+				sr = m[2][1] * k;
+				cr = m[2][2] * k;
+			}
+			else
+			{
+				const float k = 1.0f / __builtin_sqrtf( m[0][1] * m[0][1] + m[1][1] * m[1][1] );
+
+				sy = -m[0][1] * k;
+				cy = m[1][1] * k;
+			}
+
+			R_MeAnglesMatrix( out, origin, sy, cy, sp, cp, sr, cr );
+			return;
+		}
+
+		VectorCopy( e->curstate.angles, angles );
 	}
+	else
+	{
+		VectorCopy( e->origin, origin );
+		VectorCopy( e->angles, angles );
+	}
+
+	if( player )
+	{
+		angles[PITCH] = 0.0f;
+		if( player->gaitsequence )
+			angles[YAW] = player->yaw;
+	}
+
+	R_MeSinCos( DEG2RAD( angles[YAW] ), &sy, &cy );
+	R_MeSinCos( DEG2RAD( angles[PITCH] ) * sign, &sp, &cp );
+	if( angles[ROLL] )
+		R_MeSinCos( DEG2RAD( angles[ROLL] ), &sr, &cr );
+	R_MeAnglesMatrix( out, origin, sy, cy, sp, cp, sr, cr );
 }
 
-// what R_StudioSetupBones depends on, besides the animation data
-static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e )
+// R_StudioEstimateFrame
+static float R_MeEstimateFrame( const mebones_frame_t *frame, const cl_entity_t *e, const mstudioseqdesc_t *pseqdesc )
+{
+	float dfdt = 0.0f, f;
+
+	if( frame->interpolate )
+	{
+		const float dt = frame->time - e->curstate.animtime;
+
+		if( dt >= 0.0f )
+			dfdt = dt * e->curstate.framerate * pseqdesc->fps;
+	}
+
+	if( pseqdesc->numframes <= 1 ) f = 0.0f;
+	else f = (e->curstate.frame * (pseqdesc->numframes - 1)) * ( 1.0f / 256.0f );
+
+	f += dfdt;
+
+	if( pseqdesc->flags & STUDIO_LOOPING )
+	{
+		if( pseqdesc->numframes > 1 )
+			f -= (int)(f / (pseqdesc->numframes - 1)) *  (pseqdesc->numframes - 1);
+		if( f < 0 ) f += (pseqdesc->numframes - 1);
+	}
+	else
+	{
+		if( f >= pseqdesc->numframes - 1.001f )
+			f = pseqdesc->numframes - 1.001f;
+		if( f < 0.0f )  f = 0.0f;
+	}
+	return f;
+}
+
+// what R_StudioSetupBones depends on, besides the animation data and the rotation
+static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e, const studiohdr_t *hdr, double time, qboolean interpolate )
 {
 	memset( k, 0, sizeof( *k ));
-	k->hdr = m_pStudioHeader;
-	k->time = g_studio.time;
-	k->interpolate = g_studio.interpolate;
+	k->hdr = hdr;
+	k->time = time;
+	k->interpolate = interpolate;
 	k->sequence = e->curstate.sequence;
 	k->prevsequence = e->latched.prevsequence;
 	k->renderfx = e->curstate.renderfx;
@@ -1412,7 +1718,7 @@ static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e )
 	k->prevanimtime = e->latched.prevanimtime;
 	k->sequencetime = e->latched.sequencetime;
 	// only the blend from the previous sequence reads it (the first use of the bones sets it)
-	if( g_studio.interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > g_studio.time ) && ( e->latched.prevsequence < m_pStudioHeader->numseq ))
+	if( interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > time ) && ( e->latched.prevsequence < hdr->numseq ))
 		k->prevframe = e->latched.prevframe;
 	memcpy( k->controller, e->curstate.controller, 4 );
 	memcpy( k->prevcontroller, e->latched.prevcontroller, 4 );
@@ -1420,294 +1726,793 @@ static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e )
 	memcpy( k->prevblending, e->latched.prevblending, 2 );
 	memcpy( k->prevseqblending, e->latched.prevseqblending, 2 );
 	k->mouthopen = e->mouth.mouthopen;
-	Matrix3x4_Copy( k->rotation, g_studio.rotationmatrix );
-}
-
-// R_StudioSetupBones up to the math, for the ME
-static const struct medraw_s *R_StudioMeDrawGet( cl_entity_t *e );
-static qboolean R_StudioPropForMe( const cl_entity_t *e );
-
-static mebones_ent_t *R_StudioMeBonesFind( const cl_entity_t *e )
-{
-	for( int i = 0; i < r_mebones.count; i++ )
-	{
-		if( r_mebones.ents[i].e == e )
-			return &r_mebones.ents[i];
-	}
-
-	return NULL;
-}
-
-// the header of a model whose bones may come from the ME
-static studiohdr_t *R_StudioMeBonesHeader( cl_entity_t *e )
-{
-	model_t *mod = e->model;
-
-	if( !mod || mod->type != mod_studio || e->player || e == tr.viewent )
-		return NULL;
-	if( e->curstate.movetype == MOVETYPE_FOLLOW || e->curstate.renderfx == kRenderFxDeadPlayer || e->curstate.renderfx == kRenderFxDistort
-		|| e->curstate.renderfx == kRenderFxHologram || e->curstate.renderfx == kRenderFxExplode )
-		return NULL;
-
-	studiohdr_t *hdr = (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, mod );
-
-	if( !hdr || hdr->numbones <= 0 || hdr->numbones > MAXSTUDIOBONES || e->curstate.sequence < 0 || e->curstate.sequence >= hdr->numseq )
-		return NULL;
-
-	return hdr;
 }
 
 // a new entry, not counted yet
-static mebones_ent_t *R_StudioMeBonesGather( cl_entity_t *e, studiohdr_t *hdr )
+static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 {
-	if( r_mebones.count >= MEBONES_MAXENTS || r_mebones.used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL )
+	const int slot = r_mebones_me.count + ofs, used = r_mebones_me.used + usedofs;
+	mebones_ent_t *m = &r_mebones_ents[slot];
+
+	if( slot >= MEBONES_MAXENTS * 2 || used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL )
 		return NULL;
 
-	mebones_ent_t *m = &r_mebones.ents[r_mebones.count];
-	model_t *mod = e->model;
-
-	m_pStudioHeader = hdr;
-	R_StudioSetUpTransform( e );
-	R_StudioMeBonesKey( &m->key, e );
-
-	m->e = e;
 	m->hdr = hdr;
-	m->draw = NULL;
-	m->early = false;
-	m->slot = -1;
-	Matrix3x4_Copy( m->rotation, g_studio.rotationmatrix );
-	m->out = &r_mebones_out[r_mebones.used];
+	m->out = &r_mebones_out[used];
+	m->blendprev = false;
+	m->gait = false;
+	m->merge = NULL;
+	m->weapon = NULL;
+	m->done = false;
+	return m;
+}
 
-	mstudioseqdesc_t *pseqdesc = (mstudioseqdesc_t *)((byte *)hdr + hdr->seqindex) + e->curstate.sequence;
-	const float f = R_StudioEstimateFrame( e, pseqdesc, g_studio.time );
-	const float dadt = R_StudioEstimateInterpolant( e );
+// R_StudioSetupBones up to the math
+static mebones_ent_t *R_MeGather( const mebones_frame_t *frame, const cl_entity_t *e, const studiohdr_t *hdr, const meplayer_t *player )
+{
+	const model_t *mod = player ? player->mod : e->model;
+	mebones_ent_t *m = R_MeEntNew( hdr, 0, 0 );
+	const mstudioseqdesc_t *pseqdescs = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	// whole cache lines: 4 matrices are 3
+	int used = ( hdr->numbones + 3 ) & ~3, count = 1;
 
-	R_StudioCalcBoneAdj( dadt, m->adj, e->curstate.controller, e->latched.prevcontroller, e->mouth.mouthopen );
+	if( !m )
+		return NULL;
+
+	R_MeTransform( frame, e, player, m->rotation );
+	R_StudioMeBonesKey( &m->key, e, hdr, frame->time, frame->interpolate );
+
+	const mstudioseqdesc_t *pseqdesc = pseqdescs + e->curstate.sequence;
+	const float f = R_MeEstimateFrame( frame, e, pseqdesc );
+	float dadt = 1.0f;
+
+	// R_StudioEstimateInterpolant
+	if( frame->interpolate && ( e->curstate.animtime >= e->latched.prevanimtime + 0.01f ))
+	{
+		dadt = (float)( frame->time - e->curstate.animtime ) * ( 1.0f / 0.1f );
+		if( dadt > 2.0f ) dadt = 2.0f;
+	}
+
+	R_StudioBoneAdj( hdr, dadt, m->adj, e->curstate.controller, e->latched.prevcontroller, e->mouth.mouthopen );
 
 	m->seq[0].pseqdesc = pseqdesc;
-	m->seq[0].panim = gEngfuncs.R_StudioGetAnim( hdr, mod, pseqdesc );
+	m->seq[0].panim = R_MeAnim( hdr, mod, pseqdesc );
 	m->seq[0].f = f;
 	m->seq[0].s[0] = (e->curstate.blending[0] * dadt + e->latched.prevblending[0] * (1.0f - dadt)) / 255.0f;
 	m->seq[0].s[1] = (e->curstate.blending[1] * dadt + e->latched.prevblending[1] * (1.0f - dadt)) / 255.0f;
+	if( !m->seq[0].panim )
+		return NULL;
 
-	m->blendprev = g_studio.interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > g_studio.time ) && ( e->latched.prevsequence < hdr->numseq );
+	m->blendprev = frame->interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > frame->time ) && ( e->latched.prevsequence < hdr->numseq );
 	if( m->blendprev )
 	{
-		pseqdesc = (mstudioseqdesc_t *)((byte *)hdr + hdr->seqindex) + e->latched.prevsequence;
+		pseqdesc = pseqdescs + e->latched.prevsequence;
 		m->seq[1].pseqdesc = pseqdesc;
-		m->seq[1].panim = gEngfuncs.R_StudioGetAnim( hdr, mod, pseqdesc );
+		m->seq[1].panim = R_MeAnim( hdr, mod, pseqdesc );
 		m->seq[1].f = e->latched.prevframe;
 		m->seq[1].s[0] = (e->latched.prevseqblending[0]) / 255.0f;
 		m->seq[1].s[1] = (e->latched.prevseqblending[1]) / 255.0f;
-		m->sprev = 1.0f - ( g_studio.time - e->latched.sequencetime ) / 0.2f;
+		m->sprev = 1.0f - ( frame->time - e->latched.sequencetime ) / 0.2f;
+		if( !m->seq[1].panim )
+			return NULL;
 	}
 	else m->prevframe = f;
 
-	return m->seq[0].panim && ( !m->blendprev || m->seq[1].panim ) ? m : NULL;
+	if( player && player->gaitsequence )
+	{
+		pseqdesc = pseqdescs + player->gaitsequence;
+		m->gait = true;
+		m->seq[2].pseqdesc = pseqdesc;
+		m->seq[2].panim = R_MeAnim( hdr, mod, pseqdesc );
+		m->seq[2].f = player->gaitframe;
+		if( !m->seq[2].panim )
+			return NULL;
+	}
+
+	// R_StudioMergeBones
+	if( player && player->whdr )
+	{
+		const studiohdr_t *whdr = player->whdr;
+		mebones_ent_t *w = R_MeEntNew( whdr, 1, used );
+
+		if( !w )
+			return NULL;
+
+		pseqdesc = (const mstudioseqdesc_t *)((const byte *)whdr + whdr->seqindex );
+		if( e->curstate.sequence < whdr->numseq )
+			pseqdesc += e->curstate.sequence;
+
+		R_StudioBoneAdj( whdr, dadt, w->adj, e->curstate.controller, e->latched.prevcontroller, e->mouth.mouthopen );
+		Matrix3x4_Copy( w->rotation, m->rotation );
+		w->merge = player->merge;
+		w->seq[0].pseqdesc = pseqdesc;
+		w->seq[0].panim = R_MeAnim( whdr, player->wmod, pseqdesc );
+		w->seq[0].f = R_MeEstimateFrame( frame, e, pseqdesc );
+		if( !w->seq[0].panim )
+			return NULL;
+
+		m->weapon = w;
+		used += ( whdr->numbones + 3 ) & ~3;
+		count++;
+	}
+
+	r_mebones_me.used += used;
+	r_mebones_me.count += count;
+	PSP_MeWriteback( m, sizeof( *m ));
+	return m;
 }
 
-static void R_StudioMeBonesCount( const mebones_ent_t *m )
+static inline uint16_t *R_MeBonesSeen( const cl_entity_t *e )
 {
-	// whole cache lines: 4 matrices are 3
-	r_mebones.used += ( m->hdr->numbones + 3 ) & ~3;
-	r_mebones.count++;
+	return &r_mebones_me.seen[((uint)(uintptr_t)e * 2654435761u ) >> 24];
 }
 
-// when an entity was last not culled, by a hash of its address: the low bits of tr.framecount
-static uint16_t r_mebones_seen[256];
-
-static inline uint16_t *R_StudioMeBonesSeen( const cl_entity_t *e )
+// R_StudioPreCull's sphere
+static void R_MeSphere( const mebones_frame_t *frame, const cl_entity_t *e, const model_t *mod, const studiohdr_t *hdr, mecull_t *c )
 {
-	return &r_mebones_seen[((uint)(uintptr_t)e * 2654435761u ) >> 24];
+	int seq = e->curstate.sequence;
+
+	if( seq < 0 || seq >= hdr->numseq )
+		seq = 0;
+	const mstudioseqdesc_t *pseqdesc = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex ) + seq;
+
+	// the farthest corner of the union box from the origin
+	const qboolean modbox = !VectorIsNull( mod->mins ) && !VectorIsNull( mod->maxs );
+	float r2 = 0.0f;
+
+	for( int i = 0; i < 3; i++ )
+	{
+		float lo = pseqdesc->bbmin[i], hi = pseqdesc->bbmax[i];
+
+		if( modbox )
+		{
+			lo = Q_min( lo, mod->mins[i] );
+			hi = Q_max( hi, mod->maxs[i] );
+		}
+		const float m = Q_max( fabsf( lo ), fabsf( hi ));
+		r2 += m * m;
+	}
+
+	float r = __builtin_sqrtf( r2 );
+	if( e->curstate.scale > 1.0f )
+		r *= e->curstate.scale;
+
+	c->rpx = r;
+
+	if( e->curstate.movetype == MOVETYPE_STEP )
+	{
+		const float t = frame->time;
+		float f = 0.0f;
+
+		if( t < e->curstate.animtime + 1.0f && e->curstate.animtime != e->latched.prevanimtime )
+			f = ( t - e->curstate.animtime ) / ( e->curstate.animtime - e->latched.prevanimtime );
+
+		vec3_t d;
+		VectorSubtract( e->origin, e->latched.prevorigin, d );
+		r += __builtin_sqrtf( DotProduct( d, d )) * ( fabsf( f ) + 1.0f );
+	}
+
+	VectorCopy( e->origin, c->org );
+	c->r = r + 16.0f;
+	c->hdr = hdr;
+	c->body = e->curstate.body;
+	c->skin = e->curstate.skin;
 }
 
-static void R_StudioMeBonesReset( void )
+static void R_MeClassify( const mebones_frame_t *frame, const cl_entity_t *e, mecull_t *c )
 {
-	// the last jobs still read ents and write the pool
+	const model_t *mod = e->model;
+
+	c->type = MECULL_MAIN;
+
+	if( !mod || e->player )
+		return;
+
+	if( mod->type == mod_brush )
+	{
+		if( R_MeBrushClassify( e, &c->brush ))
+			c->type = MECULL_BRUSH;
+		return;
+	}
+
+	if( mod->type != mod_studio || e->curstate.movetype == MOVETYPE_FOLLOW || e->curstate.renderfx == kRenderFxDeadPlayer )
+		return;
+
+	const studiohdr_t *hdr = mod->cache.data;
+	if( !hdr || hdr->numseq <= 0 )
+		return;
+
+	R_MeSphere( frame, e, mod, hdr, c );
+	c->type = MECULL_TEST;
+	c->small = hdr->numbones <= 2;
+
+	if( e->curstate.renderfx == kRenderFxDistort || e->curstate.renderfx == kRenderFxHologram || e->curstate.renderfx == kRenderFxExplode )
+		return;
+	if( hdr->numbones <= 0 || hdr->numbones > MAXSTUDIOBONES || e->curstate.sequence < 0 || e->curstate.sequence >= hdr->numseq )
+		return;
+
+	if( !c->small )
+		c->type = MECULL_BONES;
+
+	if( e->curstate.rendermode == kRenderNormal && e->curstate.renderfx == kRenderFxNone && !e->curstate.colormap
+		&& e->curstate.body >= 0 && e->curstate.body <= 0xffff
+		&& hdr->numattachments <= MEBONES_ATTACHMENTS && !FBitSet( hdr->flags, STUDIO_HAS_BONEWEIGHTS ))
+		c->type = c->small ? MECULL_SMALL : MECULL_DRAW;
+}
+
+// the view independent part of R_SortTransEntities
+static void R_MeSortKey( const cl_entity_t *e, mesort_t *s )
+{
+	const model_t *mod = e->model;
+	int rendermode = e->curstate.rendermode;
+
+	// R_GetEntityRenderMode
+	if( !mod || e->player )
+	{
+		s->rank = MESORT_MAIN;
+		return;
+	}
+
+	if( mod->type == mod_studio && mod->cache.data )
+	{
+		if( R_StudioMostlyAdditive( mod->cache.data ))
+			rendermode = kRenderTransAdd;
+	}
+	else if( R_ModelOpaque( rendermode ) && mod->type == mod_brush && FBitSet( mod->flags, MODEL_TRANSPARENT ))
+		rendermode = kRenderTransAlpha;
+
+	s->rank = R_RankForRenderMode( rendermode );
+	s->far = mod->type == mod_brush && rendermode == kRenderTransAlpha;
+	for( int i = 0; i < 3; i++ )
+		s->org[i] = ( mod->mins[i] + mod->maxs[i] ) * 0.5f + e->origin[i];
+}
+
+static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, uint32_t number )
+{
+	const mebones_frame_t *frame = job->frame;
+	const uint16_t last = frame->framecount;
+
+	for( int i = first; i < first + count; i++ )
+	{
+		const mecull_t *c = &r_mecull[i];
+		const cl_entity_t *e = r_mebones_me.ents[i]; // the main CPU may be sorting the list
+		const meplayer_t *player = NULL;
+
+		if( c->type != MECULL_BONES && c->type != MECULL_DRAW && c->type != MECULL_PLAYER )
+			continue;
+		if( r_mebones_me.slot[i] || *R_MeBonesSeen( e ) != last )
+			continue;
+		if( MEBONES_SYNC[MESYNC_YIELD] >= number )
+			return;
+
+		for( int k = 0; k < frame->numplayers; k++ )
+		{
+			if( frame->players[k].index == i )
+				player = &frame->players[k];
+		}
+
+		mebones_ent_t *m = R_MeGather( frame, e, c->hdr, player );
+		if( !m )
+			continue;
+
+		R_MeBones( m, NULL );
+		r_mebones_me.slot[i] = m - r_mebones_ents + 1;
+	}
+}
+
+// before the view is known
+static void R_MeEarlyJob( void *arg )
+{
+	const mebones_early_t *job = arg;
+	const mebones_frame_t *frame = job->frame;
+	const uint32_t number = job - r_mebones.early + 1;
+	const int numsolid = job->firstsolid + job->numsolid, numtrans = job->firsttrans + job->numtrans;
+
+	if( number == 1 )
+	{
+		r_mebones_me.count = r_mebones_me.used = 0;
+		r_mebones_me.p = r_mebones_cmds;
+		memset( r_mebones_me.slot, 0, sizeof( r_mebones_me.slot ));
+	}
+
+	for( int i = job->firstsolid; i < numsolid; i++ )
+	{
+		r_mebones_me.ents[i] = frame->solid[i];
+		R_MeClassify( frame, frame->solid[i], &r_mecull[i] );
+	}
+
+	for( int i = job->firsttrans; i < numtrans; i++ )
+	{
+		r_mebones_me.ents[MECULL_MAXSOLID + i] = frame->trans[i];
+		R_MeClassify( frame, frame->trans[i], &r_mecull[MECULL_MAXSOLID + i] );
+		R_MeSortKey( frame->trans[i], &r_mesort[i] );
+	}
+
+	for( int i = 0; i < frame->numplayers && number == 1; i++ )
+	{
+		const meplayer_t *p = &frame->players[i];
+		mecull_t *c = &r_mecull[p->index];
+
+		R_MeSphere( frame, frame->solid[p->index], p->mod, p->hdr, c );
+		c->type = MECULL_PLAYER;
+		c->small = false;
+		c->rpx = 1e6f; // never too small
+	}
+
+	PSP_MeWriteback( r_mecull + job->firstsolid, job->numsolid * sizeof( r_mecull[0] ));
+	PSP_MeWriteback( r_mecull + MECULL_MAXSOLID + job->firsttrans, job->numtrans * sizeof( r_mecull[0] ));
+	PSP_MeWriteback( r_mesort + job->firsttrans, job->numtrans * sizeof( r_mesort[0] ));
+	MEBONES_SYNC[MESYNC_TABLE] = number;
+
+	R_MeEarlyBones( job, 0, numsolid, number );
+	R_MeEarlyBones( job, MECULL_MAXSOLID, numtrans, number );
+}
+
+static void R_MeBonesJob( void *arg )
+{
+	const mebones_job_t *job = arg;
+
+	for( int i = 0; i < job->count; i++ )
+	{
+		const mebones_item_t *it = &job->items[i];
+		const int slot = r_mebones_me.slot[it->index];
+		const mecull_t *c = &r_mecull[it->index];
+		mebones_ent_t *m = slot ? &r_mebones_ents[slot - 1] : R_MeGather( job->frame, it->e, c->hdr, it->player );
+		mebones_res_t *res = &r_mebones_res[i];
+
+		res->cmds[0] = res->cmds[1] = res->cmds[2] = res->cmds[3] = 0;
+		res->ent = m;
+		res->visible = true;
+
+		if( !c->small )
+			*R_MeBonesSeen( it->e ) = job->frame->framecount + 1;
+
+		if( m )
+		{
+			res->visible = !it->draw || !R_MeBonesCulled( job, m, it->player ? it->player->mod : it->e->model );
+			res->blendprev = m->blendprev;
+			res->prevframe = m->prevframe;
+			Matrix3x4_Copy( res->rotation, m->rotation );
+
+			if( res->visible && !m->done )
+				R_MeBones( m, NULL );
+
+			if( res->visible && it->draw )
+			{
+				const mstudioattachment_t *pAtt = (const mstudioattachment_t *)((const byte *)m->hdr + m->hdr->attachmentindex );
+				uint *const cmds = r_mebones_me.p;
+
+				for( int k = 0; k < m->hdr->numattachments; k++ )
+				{
+					const float (*b)[4] = (const float (*)[4])m->out[pAtt[k].bone];
+
+					for( int j = 0; j < 3; j++ )
+						res->attachment[k][j] = DotProduct( pAtt[k].org, b[j] ) + b[j][3];
+				}
+
+				R_MeModelCommands( job, m, it->draw, res->cmds );
+				if( it->wdraw && m->weapon && ( res->cmds[0] || res->cmds[1] ))
+				{
+					R_MeModelCommands( job, m->weapon, it->wdraw, res->cmds + 2 );
+
+					// no space: all of it is for the main CPU
+					if( !res->cmds[2] && !res->cmds[3] )
+						res->cmds[0] = res->cmds[1] = 0;
+				}
+				PSP_MeWriteback( cmds, (byte *)r_mebones_me.p - (byte *)cmds );
+			}
+		}
+
+		PSP_MeWriteback( res, sizeof( *res ));
+		MEBONES_SYNC[MESYNC_ITEMS] = i + 1;
+	}
+}
+
+static const struct medraw_s *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap );
+static qboolean R_StudioPropForMe( const cl_entity_t *e );
+static model_t *R_StudioSetupPlayerModel( int index );
+static void R_StudioProcessGait( entity_state_t *pplayer );
+
+static void R_StudioMeReset( void )
+{
+	// the last jobs still read the frame and write the pool
 	PSP_MeWaitFor( r_mebones.early_ticket );
 	PSP_MeWaitFor( r_mebones.ticket );
 	r_mebones.ticket = r_mebones.early_ticket = 0;
-	r_mebones.early = false;
-	r_mebones.local = false;
-	r_mebones.count = r_mebones.used = 0;
+	r_mebones.table = r_mebones.tableread = false;
+	r_mebones.count = 0;
 }
 
-/*
-====================
-R_StudioMeBonesEarly
-
-the draw lists are complete, the view isn't known yet: the bones of the
-animated models that weren't culled in the last frame start on the ME
-====================
-*/
-static void R_StudioMeBonesEarly( void )
+// the draw lists aren't the ones the table is about anymore
+void R_StudioMeSceneCleared( void )
 {
-	const uint16_t last = tr.framecount;
+	r_mebones.table = false;
+}
 
-	R_StudioMeBonesReset();
+// solid models may be drawn by R_StudioDrawMeModels: what R_StudioGEAllowed and R_StudioGEDrawPlan check, or draw besides
+static qboolean R_StudioMeDrawAllowed( void )
+{
+	return r_studio_me_draw.value && r_studio_ge.value && r_studio_geplan.value && r_studio_ge_hwlight.value
+		&& r_studio_ge_elights.value && !glState.isFogEnabled && !r_lightmap->value && !r_fullbright->value && !r_shadows.value
+		&& r_drawentities->value == 1.0f;
+}
 
-	if( !r_studio_me.value || !PSP_MeStart( ))
-		return;
+static const memerge_t *R_StudioMeMergeGet( const studiohdr_t *hdr, const studiohdr_t *phdr )
+{
+	static memerge_t cache[MEMERGE_CACHE];
+	memerge_t *c = &cache[0];
 
-	cl_entity_t *saveent = RI.currententity;
-	model_t *savemodel = RI.currentmodel;
-	studiohdr_t *savehdr = m_pStudioHeader;
-
-	R_StudioSetupTimings();
-
-	for( int l = 0; l < 2; l++ )
+	for( int i = 0; i < MEMERGE_CACHE; i++ )
 	{
-		cl_entity_t **list = l ? tr.draw_list->trans_entities : tr.draw_list->solid_entities;
-		const int count = l ? tr.draw_list->num_trans_entities : tr.draw_list->num_solid_entities;
-
-		for( int i = 0; i < count; i++ )
+		if( cache[i].hdr == hdr && cache[i].phdr == phdr )
 		{
-			cl_entity_t *e = list[i];
+			cache[i].frame = tr.framecount;
+			return &cache[i];
+		}
+		if( cache[i].frame < c->frame )
+			c = &cache[i];
+	}
 
-			if( *R_StudioMeBonesSeen( e ) != last )
-				continue;
+	// the ME may read it
+	if( c->hdr && c->frame == tr.framecount )
+		return NULL;
 
-			studiohdr_t *hdr = R_StudioMeBonesHeader( e );
-			mebones_ent_t *m = hdr && hdr->numbones > 2 ? R_StudioMeBonesGather( e, hdr ) : NULL;
+	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex );
+	const mstudiobone_t *ppbones = (const mstudiobone_t *)((const byte *)phdr + phdr->boneindex );
 
-			if( !m )
-				continue;
+	c->hdr = hdr;
+	c->phdr = phdr;
+	c->frame = tr.framecount;
 
-			m->early = true;
-			R_StudioMeBonesCount( m );
+	for( int i = 0; i < hdr->numbones; i++ )
+	{
+		c->map[i] = -1;
+		for( int j = 0; j < phdr->numbones && c->map[i] < 0; j++ )
+		{
+			if( !Q_stricmp( pbones[i].name, ppbones[j].name ))
+				c->map[i] = j;
 		}
 	}
 
-	RI.currententity = saveent;
-	RI.currentmodel = savemodel;
-	m_pStudioHeader = savehdr;
-
-	if( !r_mebones.count )
-		return;
-
-	mebones_job_t *job = &r_mebones.early_job;
-
-	job->count = r_mebones.count;
-	job->ents = r_mebones.ents;
-	job->progress = (volatile uint32_t *)( 0x40000000 | (uintptr_t)r_mebones_progress[1] );
-	*job->progress = 0;
-
-	r_mebones.early = true;
-	r_mebones.early_ticket = PSP_MeRunKeep( R_MeEarlyBonesJob, job );
-	r_mebones.local = !r_mebones.early_ticket;
+	return c;
 }
 
-// true: R_StudioDrawMeModels draws it
-static qboolean R_StudioMeBonesAdd( cl_entity_t *e, qboolean draw )
+// the model of a player and the textures with the player's colors, NULL if it has no such textures
+static const mstudiotexture_t *R_StudioMeRemap( cl_entity_t *e, model_t *mod, int index )
 {
-	mebones_ent_t *m = r_mebones.early ? R_StudioMeBonesFind( e ) : NULL;
+	const player_info_t *info = gEngfuncs.pfnPlayerInfo( index );
+	const int top = bound( 0, info->topcolor, 360 ), bottom = bound( 0, info->bottomcolor, 360 );
 
-	if( !m )
-	{
-		studiohdr_t *hdr = R_StudioMeBonesHeader( e );
+	if( !gEngfuncs.CL_EntitySetRemapColors( e, mod, top, bottom ))
+		return NULL;
 
-		if( !hdr )
-			return false;
+	return gEngfuncs.CL_GetRemapInfoForEntity( e )->ptexture;
+}
 
-		// props of 1 or 2 bones are kept if they stay still (R_StudioPropCache), their bones are cheap
-		if( hdr->numbones <= 2 && ( !draw || !R_StudioPropForMe( e )))
-			return false;
-
-		m = R_StudioMeBonesGather( e, hdr );
-		if( !m )
-			return false;
-	}
-	else m_pStudioHeader = (studiohdr_t *)m->hdr;
-
-	if( m->hdr->numbones > 2 )
-		*R_StudioMeBonesSeen( e ) = tr.framecount;
-
-	if( draw && e->curstate.rendermode == kRenderNormal && e->curstate.renderfx == kRenderFxNone && !e->curstate.colormap
-		&& m->hdr->numattachments <= MEBONES_ATTACHMENTS && !FBitSet( m->hdr->flags, STUDIO_HAS_BONEWEIGHTS ))
-	{
-		RI.currententity = e;
-		RI.currentmodel = e->model;
-		m->draw = R_StudioMeDrawGet( e );
-	}
-
-	if( !m->early )
-	{
-		if( m->hdr->numbones <= 2 && !m->draw )
-			return false;
-		R_StudioMeBonesCount( m );
-	}
-
-	if( !m->early || m->draw )
-	{
-		m->slot = r_mebones.job.count;
-		r_mebones.job.list[r_mebones.job.count++] = m - r_mebones.ents;
-	}
-
-	return m->draw != NULL;
+static qboolean R_StudioMeModelOk( const studiohdr_t *hdr )
+{
+	return hdr && hdr->numseq > 0 && hdr->numbones > 0 && hdr->numbones <= MAXSTUDIOBONES && !FBitSet( hdr->flags, STUDIO_HAS_BONEWEIGHTS );
 }
 
 /*
 ====================
-R_StudioMeBonesBegin
+R_StudioMePlayer
 
-before the world is drawn: the bones of the other models in the draw lists that
-aren't culled, and the commands of the ones R_StudioDrawMeModels draws
+R_StudioDrawPlayer before the bones, for a player R_StudioDrawMeModels will
+draw; false if it can't
 ====================
 */
-void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, byte *solid_culled, cl_entity_t **trans, int ntrans, const byte *trans_culled )
+static qboolean R_StudioMePlayer( cl_entity_t *e, meplayer_t *p )
 {
-	mebones_job_t *job = &r_mebones.job;
+	const int index = e->index - 1;
 
-	if( !r_mebones.early || r_mebones.ticket )
-		R_StudioMeBonesReset();
+	if( e->curstate.rendermode != kRenderNormal || e->curstate.renderfx != kRenderFxNone || e->curstate.movetype == MOVETYPE_STEP
+		|| e->curstate.movetype == MOVETYPE_FOLLOW || index < 0 || index >= gp_cl->maxclients )
+		return false;
 
-	if( !r_studio_me.value || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || !PSP_MeStart( ))
+	entity_state_t *pplayer = gEngfuncs.pfnGetPlayerState( index );
+	if( pplayer->number - 1 != index )
+		return false;
+
+	RI.currententity = e;
+	model_t *mod = R_StudioSetupPlayerModel( index );
+	if( !mod )
+		return false;
+
+	studiohdr_t *hdr = gEngfuncs.Mod_Extradata( mod_studio, mod );
+	if( !R_StudioMeModelOk( hdr ) || hdr->numattachments > MEBONES_ATTACHMENTS || e->curstate.sequence < 0 || e->curstate.sequence >= hdr->numseq
+		|| pplayer->gaitsequence < 0 || pplayer->gaitsequence >= hdr->numseq )
+		return false;
+
+	p->mod = mod;
+	p->hdr = hdr;
+	p->wmod = NULL;
+	p->whdr = NULL;
+
+	// as R_StudioDrawPlayer, which leaves them in the entity
+	if( cl_himodels->value && mod != e->model )
+		e->curstate.body = 255;
+	if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && mod == e->model )
+		e->curstate.body = 1; // force helmet
+
+	if( e->curstate.body < 0 || e->curstate.body > 0xffff )
+		return false;
+
+	RI.currentmodel = mod;
+	if( !R_StudioMeDrawGet( hdr, e, e->curstate.body, e->curstate.skin, R_StudioMeRemap( e, mod, index )))
+		return false;
+
+	if( pplayer->weaponmodel )
 	{
-		R_StudioMeBonesReset();
-		return;
+		model_t *wmod = CL_ModelHandle( pplayer->weaponmodel );
+		const studiohdr_t *whdr = gEngfuncs.Mod_Extradata( mod_studio, wmod );
+
+		if( !R_StudioMeModelOk( whdr ) || !( p->merge = R_StudioMeMergeGet( whdr, hdr )))
+			return false;
+
+		RI.currentmodel = wmod;
+		if( !R_StudioMeDrawGet( whdr, e, e->curstate.body, e->curstate.skin, NULL ))
+			return false;
+
+		p->wmod = wmod;
+		p->whdr = whdr;
 	}
+
+	player_info_t *info = gEngfuncs.pfnPlayerInfo( index );
+
+	m_pStudioHeader = hdr;
+	p->gaitsequence = pplayer->gaitsequence;
+
+	if( pplayer->gaitsequence )
+	{
+		vec3_t orig_angles = Vec3( e->angles );
+
+		m_pPlayerInfo = info;
+		R_StudioProcessGait( pplayer );
+		m_pPlayerInfo = NULL;
+		p->yaw = e->angles[YAW];
+		p->gaitframe = info->gaitframe;
+		VectorCopy( orig_angles, e->angles );
+	}
+	else
+	{
+		for( int i = 0; i < 4; i++ )
+			e->curstate.controller[i] = e->latched.prevcontroller[i] = 127;
+	}
+
+	info->gaitsequence = pplayer->gaitsequence;
+	info->renderframe = tr.realframecount;
+	return true;
+}
+
+/*
+====================
+R_StudioMeEarly
+
+the draw lists have the packet entities in them, or all of them (complete);
+the view isn't known yet
+====================
+*/
+static qboolean R_StudioMeBegin( void )
+{
+	mebones_frame_t *frame = &r_mebones.frame;
+	const draw_list_t *list = tr.draw_list;
+
+	R_StudioMeReset();
+
+	if( !r_studio_me.value || !WORLDMODEL || !PSP_MeStart( ))
+		return false;
+
+	if( list->num_trans_entities > MECULL_MAXTRANS || list->num_solid_entities > MECULL_MAXSOLID )
+		return false;
 
 	cl_entity_t *saveent = RI.currententity;
 	model_t *savemodel = RI.currentmodel;
 	studiohdr_t *savehdr = m_pStudioHeader;
-
-	// what R_StudioGEAllowed and R_StudioGEDrawPlan check, or draw besides
-	const qboolean draw = r_studio_me_draw.value && r_studio_ge.value && r_studio_geplan.value && r_studio_ge_hwlight.value
-		&& r_studio_ge_elights.value && !glState.isFogEnabled && !r_lightmap->value && !r_fullbright->value && !r_shadows.value
-		&& r_drawentities->value == 1.0f;
+	const int saveflags = RI.rvp.flags;
 	const uint savedtex = glState.currentTexture; // the skin block lookups set it
 
+	SetBits( RI.rvp.flags, RF_DRAW_WORLD );
 	R_StudioSetupTimings();
-	job->count = 0;
 
-	for( int i = 0; i < nsolid; i++ )
-	{
-		if( !solid_culled[i] && R_StudioMeBonesAdd( solid[i], draw ))
-			solid_culled[i] = R_STUDIO_ME;
-	}
+	frame->time = g_studio.time;
+	frame->interpolate = g_studio.interpolate;
+	frame->steplerp = !FBitSet( gp_host->features, ENGINE_COMPUTE_STUDIO_LERP );
+	frame->negpitch = !FBitSet( gp_host->features, ENGINE_COMPENSATE_QUAKE_BUG );
+	frame->solid = (cl_entity_t **)list->solid_entities;
+	frame->trans = (cl_entity_t **)list->trans_entities;
+	frame->framecount = tr.framecount;
+	frame->numplayers = 0;
 
-	for( int i = 0; i < ntrans; i++ )
+	if( r_studio_me_players.value && list->num_players > 0 && R_StudioMeDrawAllowed( ))
 	{
-		if( !trans_culled[i] )
-			R_StudioMeBonesAdd( trans[i], false );
+		tr.realframecount++; // the one they'll be drawn in
+
+		for( int i = 0; i < list->num_players && frame->numplayers < MEBONES_MAXPLAYERS; i++ )
+		{
+			meplayer_t *p = &frame->players[frame->numplayers];
+
+			p->index = list->players[i];
+			if( R_StudioMePlayer( list->solid_entities[p->index], p ))
+				frame->numplayers++;
+		}
+
+		tr.realframecount--;
 	}
 
 	glState.currentTexture = savedtex;
-
+	RI.rvp.flags = saveflags;
 	RI.currententity = saveent;
 	RI.currentmodel = savemodel;
 	m_pStudioHeader = savehdr;
+	return true;
+}
 
-	// a second view in this frame starts over
-	r_mebones.early = false;
+static void R_StudioMeEarly( qboolean complete )
+{
+	mebones_early_t *job = &r_mebones.early[complete ? 1 : 0];
+	const draw_list_t *list = tr.draw_list;
+
+	if( !complete )
+	{
+		r_mebones.begun = R_StudioMeBegin();
+		if( !r_mebones.begun )
+			return;
+
+		job->firstsolid = job->firsttrans = 0;
+		MEBONES_SYNC[MESYNC_TABLE] = MEBONES_SYNC[MESYNC_YIELD] = 0;
+	}
+	else
+	{
+		const mebones_early_t *last = &r_mebones.early[0];
+
+		if( !r_mebones.begun )
+			return;
+
+		r_mebones.begun = false;
+		job->firstsolid = last->numsolid;
+		job->firsttrans = last->numtrans;
+
+		// the lists are others now, or too long
+		if( r_mebones.frame.solid != (cl_entity_t **)list->solid_entities || list->num_solid_entities < job->firstsolid || list->num_trans_entities < job->firsttrans
+			|| list->num_trans_entities > MECULL_MAXTRANS || list->num_solid_entities > MECULL_MAXSOLID )
+			return;
+		R_StudioMeYield( 1 );
+	}
+
+	job->frame = &r_mebones.frame;
+	job->numsolid = list->num_solid_entities - job->firstsolid;
+	job->numtrans = list->num_trans_entities - job->firsttrans;
+	r_mebones.early_ticket = PSP_MeRunKeep( R_MeEarlyJob, job );
+	r_mebones.table = complete && r_mebones.early_ticket != 0;
+}
+
+// the early job with this number shouldn't keep the next one waiting
+void R_StudioMeYield( int number )
+{
+	MEBONES_SYNC[MESYNC_YIELD] = number;
+}
+
+/*
+====================
+R_StudioMeTable
+
+this frame's table, or NULL: the solid entities, then (from MECULL_MAXSOLID on)
+the translucent ones in the order they had before they were sorted, with their
+sort keys
+====================
+*/
+const mecull_t *R_StudioMeTable( int *numsolid, int *numtrans, const mesort_t **sort )
+{
+	const mebones_early_t *early = &r_mebones.early[1];
+	const int solid = early->firstsolid + early->numsolid, trans = early->firsttrans + early->numtrans;
+
+	if( !r_mebones.table || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD )
+		|| tr.draw_list->num_solid_entities < solid || tr.draw_list->num_trans_entities < trans
+		|| r_mebones.frame.solid != (cl_entity_t **)tr.draw_list->solid_entities )
+		return NULL;
+
+	if( !r_mebones.tableread )
+	{
+		for( uint n = 0; MEBONES_SYNC[MESYNC_TABLE] < 2 && !PSP_MeDone( r_mebones.early_ticket ); n++ )
+		{
+			if( n > 1000000 )
+				PSP_MeWaitFor( r_mebones.early_ticket ); // the ME's timeout
+		}
+
+		if( MEBONES_SYNC[MESYNC_TABLE] < 2 )
+		{
+			r_mebones.table = false;
+			return NULL;
+		}
+
+		sceKernelDcacheInvalidateRange( r_mecull, solid * sizeof( r_mecull[0] ));
+		sceKernelDcacheInvalidateRange( r_mecull + MECULL_MAXSOLID, trans * sizeof( r_mecull[0] ));
+		sceKernelDcacheInvalidateRange( r_mesort, trans * sizeof( r_mesort[0] ));
+		r_mebones.tableread = true;
+	}
+
+	*numsolid = solid;
+	*numtrans = trans;
+	if( sort ) *sort = r_mesort;
+	return r_mecull;
+}
+
+// true: R_StudioDrawMeModels draws it
+static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw )
+{
+	mebones_job_t *job = &r_mebones.job;
+	mebones_item_t *it = &job->items[job->count];
+
+	if( job->count >= MEBONES_MAXENTS )
+		return false;
+
+	it->e = e;
+	it->index = c - r_mecull;
+	it->draw = it->wdraw = NULL;
+	it->player = NULL;
+
+	switch( c->type )
+	{
+	case MECULL_PLAYER:
+		for( int i = 0; i < r_mebones.frame.numplayers; i++ )
+		{
+			if( r_mebones.frame.players[i].index == it->index )
+				it->player = &r_mebones.frame.players[i];
+		}
+
+		if( !draw || !it->player )
+			return false;
+
+		RI.currentmodel = (model_t *)it->player->mod;
+		it->draw = R_StudioMeDrawGet( c->hdr, e, c->body, c->skin, R_StudioMeRemap( e, RI.currentmodel, e->index - 1 ));
+		if( !it->draw )
+			return false;
+
+		if( it->player->whdr )
+		{
+			RI.currentmodel = (model_t *)it->player->wmod;
+			it->wdraw = R_StudioMeDrawGet( it->player->whdr, e, c->body, c->skin, NULL );
+			if( !it->wdraw )
+				return false;
+		}
+		break;
+	case MECULL_SMALL:
+		// props of 1 or 2 bones are kept if they stay still (R_StudioPropCache), their bones are cheap
+		if( !draw || !R_StudioPropForMe( e ))
+			return false;
+		// fallthrough
+	case MECULL_DRAW:
+		if( draw )
+			it->draw = R_StudioMeDrawGet( c->hdr, e, c->body, c->skin, NULL );
+		if( !it->draw && c->type == MECULL_SMALL )
+			return false;
+		break;
+	case MECULL_BONES:
+		break;
+	default:
+		return false;
+	}
+
+	job->count++;
+	return it->draw != NULL;
+}
+
+/*
+====================
+R_StudioMePost
+
+the second job: the models R_StudioMeAdd took
+====================
+*/
+static void R_StudioMePost( void )
+{
+	mebones_job_t *job = &r_mebones.job;
 
 	if( !job->count )
 		return;
 
-	job->ents = r_mebones.ents;
-	job->progress = (volatile uint32_t *)( 0x40000000 | (uintptr_t)r_mebones_progress[0] );
-	*job->progress = 0;
-
+	job->frame = &r_mebones.frame;
 	job->numplanes = 0;
 	for( int i = 0; i < FRUSTUM_PLANES && !r_nocull.value; i++ )
 	{
@@ -1723,71 +2528,84 @@ void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, byte *solid_culled, 
 	VectorCopy( RI.rvp.vieworigin, job->eye );
 	VectorCopy( RI.vright, job->vright );
 
+	MEBONES_SYNC[MESYNC_ITEMS] = 0;
 	r_mebones.ticket = PSP_MeRunKeep( R_MeBonesJob, job );
-	if( !r_mebones.ticket )
-		r_mebones.local = true;
+	if( r_mebones.ticket )
+		r_mebones.count = job->count;
 }
 
-// until a job is done with its model i; false if it was given up on
-static qboolean R_StudioMeJobWait( const mebones_job_t *job, uint32_t ticket, int i )
+// until the ME is done with item i, NULL if it was given up on
+static const mebones_res_t *R_StudioMeWait( int i )
 {
-	const volatile uint32_t *progress = job->progress;
-
-	for( uint n = 0; *progress <= (uint32_t)i && !PSP_MeDone( ticket ); n++ )
+	for( uint n = 0; MEBONES_SYNC[MESYNC_ITEMS] <= (uint32_t)i && !PSP_MeDone( r_mebones.ticket ); n++ )
 	{
 		if( n > 1000000 )
-			PSP_MeWaitFor( ticket ); // the ME's timeout
+			PSP_MeWaitFor( r_mebones.ticket ); // the ME's timeout
 	}
 
-	return *progress > (uint32_t)i;
+	if( MEBONES_SYNC[MESYNC_ITEMS] <= (uint32_t)i )
+		return NULL;
+
+	sceKernelDcacheInvalidateRange( &r_mebones_res[i], sizeof( r_mebones_res[0] ));
+	return &r_mebones_res[i];
 }
 
-// until the ME is done with m's entry in the second job's list
-static qboolean R_StudioMeBonesWait( const mebones_ent_t *m )
+static int R_StudioMeFind( const cl_entity_t *e )
 {
-	if( m->slot < 0 || !R_StudioMeJobWait( &r_mebones.job, r_mebones.ticket, m->slot ))
-		return false;
+	for( int i = 0; i < r_mebones.count; i++ )
+	{
+		if( r_mebones.job.items[i].e == e )
+			return i;
+	}
 
-	if( !r_mebones.local )
-		sceKernelDcacheInvalidateRange( &r_mebones_res[m->slot], sizeof( r_mebones_res[0] ));
-	return true;
+	return -1;
 }
 
 // its bones are the ME's
 qboolean R_StudioMeBonesPosted( const cl_entity_t *e )
 {
-	return R_StudioMeBonesFind( e ) != NULL;
+	return R_StudioMeFind( e ) >= 0;
 }
 
 // the bones of e from the ME, if they were computed from what R_StudioSetupBones sees now
 static qboolean R_StudioMeBonesUse( cl_entity_t *e )
 {
-	const mebones_ent_t *m = R_StudioMeBonesFind( e );
+	const int i = R_StudioMeFind( e );
+	const mebones_res_t *res;
 	mebones_key_t key;
 
-	if( !m )
+	if( i < 0 || !( res = R_StudioMeWait( i )))
 		return false;
 
-	R_StudioMeBonesKey( &key, e );
+	// not computed if it's off screen, but it's a follower's parent
+	const mebones_ent_t *m = res->ent;
+	if( !m || !res->visible )
+		return false;
+
+	sceKernelDcacheInvalidateRange( m, sizeof( *m ));
+	R_StudioMeBonesKey( &key, e, m_pStudioHeader, g_studio.time, g_studio.interpolate );
 	if( memcmp( &key, &m->key, sizeof( key )))
 	{
 		r_mebones.misses++;
 		return false;
 	}
 
-	if( m->early )
+	for( int r = 0; r < 3; r++ )
 	{
-		if( !R_StudioMeJobWait( &r_mebones.early_job, r_mebones.early_ticket, m - r_mebones.ents ))
-			return false;
+		for( int c = 0; c < 4; c++ )
+		{
+			if( fabsf( res->rotation[r][c] - g_studio.rotationmatrix[r][c] ) > ( c < 3 ? 0.001f : 0.02f ))
+			{
+				r_mebones.misses++;
+				return false;
+			}
+		}
 	}
-	else if( !R_StudioMeBonesWait( m ) || !r_mebones_res[m->slot].visible )
-		return false; // not computed: off screen, but it's a follower's parent
 
 	const int nb = m_pStudioHeader->numbones;
 	const size_t size = nb * sizeof( matrix3x4 );
 
-	if( !r_mebones.local )
-		sceKernelDcacheInvalidateRange( m->out, (( nb + 3 ) & ~3 ) * sizeof( matrix3x4 ));
+	sceKernelDcacheInvalidateRange( m->out, (( nb + 3 ) & ~3 ) * sizeof( matrix3x4 ));
 	memcpy( g_studio.bonestransform, m->out, size );
 	memcpy( g_studio.lighttransform, m->out, size );
 
@@ -4777,17 +5595,17 @@ static void R_StudioGEPlanClose( void )
 	extGuUpdateStall();
 }
 
-static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
+static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref, int atlas )
 {
 	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
-	const gemerge_t *merge = r_studio_atlas.value ? R_StudioGEGetMerge( gm, skin, ptexture, pskinref ) : NULL;
+	const gemerge_t *merge = atlas ? R_StudioGEGetMerge( gm, skin, ptexture, pskinref ) : NULL;
 	geplan_t *pl = calloc( 1, sizeof( *pl ) + sizeof( geplanitem_t ) * ( ATLAS_MAX_PAGES + gm->nummesh ));
 
 	if( !pl )
 		return NULL;
 
 	pl->skin = skin;
-	pl->atlas = r_studio_atlas.value;
+	pl->atlas = atlas;
 	pl->usable = !gm->cpumeshes;
 	pl->next = gm->plans;
 	gm->plans = pl;
@@ -4829,21 +5647,21 @@ static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotext
 	return pl;
 }
 
-static geplan_t *R_StudioGEGetPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
+static geplan_t *R_StudioGEGetPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref, int atlas )
 {
 	for( geplan_t *pl = gm->plans; pl; pl = pl->next )
 	{
-		if( pl->skin == skin && pl->atlas == (int)r_studio_atlas.value )
+		if( pl->skin == skin && pl->atlas == atlas )
 			return pl;
 	}
 
-	return R_StudioGEBuildPlan( gm, skin, ptexture, pskinref );
+	return R_StudioGEBuildPlan( gm, skin, ptexture, pskinref, atlas );
 }
 
 // true when the submodel was drawn from its plan
 static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
 {
-	const geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref );
+	const geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref, r_studio_atlas.value );
 
 	if( !pl || !pl->usable )
 		return false;
@@ -4964,7 +5782,7 @@ static void R_StudioSubmitMesh( short *ptricmds, vec3_t *pstudionorms, float s, 
 ===============
 draw lists for the Media Engine
 
-The models R_StudioMeBonesBegin takes that are drawn from plans only: the ME
+The models R_StudioMeAdd takes that are drawn from plans only: the ME
 culls them, computes bones and attachments and writes the GE commands of all
 their body parts, R_StudioDrawMeModels does the rest, events and lighting,
 without the client DLL's renderer. A medraw_t has the plan items of a model, body
@@ -4977,6 +5795,7 @@ and skin.
 typedef struct medraw_s
 {
 	const studiohdr_t	*hdr;
+	const mstudiotexture_t	*remap;	// a player's textures, or NULL
 	int		body, skin, atlas;
 	uint		gen;		// ge_rec_gen it was built in
 	uint		frame;		// guRender.vert_frame the skin blocks were checked in
@@ -4991,7 +5810,7 @@ typedef struct medraw_s
 
 static medraw_t	r_medraw[MEDRAW_CACHE];
 
-static void R_StudioMeDrawBuild( medraw_t *d, cl_entity_t *e )
+static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstudiotexture_t *remap )
 {
 	const studiohdr_t *hdr = m_pStudioHeader;
 	const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)hdr + hdr->textureindex);
@@ -4999,8 +5818,9 @@ static void R_StudioMeDrawBuild( medraw_t *d, cl_entity_t *e )
 	int skin = 0;
 
 	d->hdr = hdr;
-	d->body = e->curstate.body;
-	d->skin = e->curstate.skin;
+	d->remap = remap;
+	d->body = body;
+	d->skin = skinnum;
 	d->atlas = r_studio_atlas.value;
 	d->usable = false;
 	d->frame = guRender.vert_frame - 1;
@@ -5025,7 +5845,8 @@ static void R_StudioMeDrawBuild( medraw_t *d, cl_entity_t *e )
 		if( !gm )
 			return;
 
-		geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref );
+		// the pages of the atlas don't have a player's colors
+		geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref, remap ? 0 : (int)r_studio_atlas.value );
 		if( !pl || !pl->usable || d->numitems + pl->numitems > MEDRAW_MAXITEMS )
 			return;
 
@@ -5052,19 +5873,38 @@ static void R_StudioMeDrawBuild( medraw_t *d, cl_entity_t *e )
 	d->usable = d->numitems > 0;
 }
 
-// NULL: not for the ME. RI.currententity and m_pStudioHeader are e's
-static const medraw_t *R_StudioMeDrawGet( cl_entity_t *e )
+// NULL: not for the ME. body and skin are e's, it sets RI.currententity and m_pStudioHeader
+static const medraw_t *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap )
 {
-	const uint h = ((uint)m_pStudioHeader >> 6 ) + e->curstate.body * 7 + e->curstate.skin * 13;
-	medraw_t *d = &r_medraw[h % MEDRAW_CACHE];
+	const uint h = ((uint)hdr >> 6 ) + body * 7 + skin * 13 + ((uint)remap >> 5 );
+	medraw_t *d = NULL;
 
-	if( d->hdr != m_pStudioHeader || d->body != e->curstate.body || d->skin != e->curstate.skin
-		|| d->atlas != (int)r_studio_atlas.value || d->gen != ge_rec_gen )
+	for( int i = 0; i < 2; i++ )
 	{
-		// the ME reads it
+		medraw_t *s = &r_medraw[( h + i ) % MEDRAW_CACHE];
+
+		if( s->hdr == hdr && s->body == body && s->skin == skin && s->remap == remap && s->atlas == (int)r_studio_atlas.value && s->gen == ge_rec_gen )
+		{
+			d = s;
+			break;
+		}
+
+		// the ME reads the ones used in this frame
+		if( !d && ( !s->hdr || s->frame != guRender.vert_frame ))
+			d = s;
+	}
+
+	if( !d )
+		return NULL;
+
+	RI.currententity = e;
+	m_pStudioHeader = (studiohdr_t *)hdr;
+
+	if( d->hdr != hdr || d->body != body || d->skin != skin || d->remap != remap || d->atlas != (int)r_studio_atlas.value || d->gen != ge_rec_gen )
+	{
 		if( d->hdr && d->frame == guRender.vert_frame )
 			return NULL;
-		R_StudioMeDrawBuild( d, e );
+		R_StudioMeDrawBuild( d, body, skin, remap );
 	}
 
 	if( !d->usable )
@@ -5073,12 +5913,15 @@ static const medraw_t *R_StudioMeDrawGet( cl_entity_t *e )
 	// the persistent copies of the skin blocks
 	if( d->frame != guRender.vert_frame )
 	{
+		m_fDoRemap = false;
+
 		for( int i = 0; i < d->numitems; i++ )
 		{
 			const geplanitem_t *it = d->items[i];
-			const int texnum = it->bindtex ? it->bindtex : it->ptex->index;
+			const mstudiotexture_t *ptex = remap && !it->bindtex ? remap + it->skinindex : it->ptex;
+			const int texnum = it->bindtex ? it->bindtex : ptex->index;
 
-			R_StudioGESkinBlock( it->ptex, it->skinindex, it->bindtex );
+			R_StudioGESkinBlock( ptex, it->skinindex, remap ? texnum : it->bindtex );
 			if( !ge_skins || texnum <= 0 || texnum >= MAX_TEXTURES || !ge_skins[texnum].block || ge_skins[texnum].frame != guRender.vert_frame )
 				return NULL;
 			d->blocks[i] = ge_skins[texnum].block;
@@ -5146,12 +5989,11 @@ static uint *R_MeChromeMatrix( const mebones_job_t *job, const mebones_ent_t *m,
 
 /*
 the draws of a model, as R_StudioGEDrawPlan and R_StudioGEBones write them, at
-job->p if they fit
+r_mebones_me.p if they fit
 */
-static void R_MeModelCommands( mebones_job_t *job, const mebones_ent_t *m, mebones_res_t *res )
+static void R_MeModelCommands( const mebones_job_t *job, const mebones_ent_t *m, const medraw_t *d, uint32_t *cmds )
 {
-	const medraw_t *d = m->draw;
-	uint *p = job->p;
+	uint *p = r_mebones_me.p;
 	int slot_bone[GE_MAXBONES];
 
 	if( p + d->words > r_mebones_cmds + MEBONES_CMDS )
@@ -5168,7 +6010,7 @@ static void R_MeModelCommands( mebones_job_t *job, const mebones_ent_t *m, mebon
 		{
 			if( i > 0 )
 				*p++ = GE_CMD( 0x0B, 0 ); // RET
-			res->cmds[i >= d->firstflat] = (uint)p;
+			cmds[i >= d->firstflat] = (uint)p;
 		}
 
 		p = R_StudioGECall( p, d->blocks[i] );
@@ -5206,7 +6048,7 @@ static void R_MeModelCommands( mebones_job_t *job, const mebones_ent_t *m, mebon
 	}
 
 	*p++ = GE_CMD( 0x0B, 0 ); // RET
-	job->p = p;
+	r_mebones_me.p = p;
 }
 
 /*
@@ -5725,6 +6567,29 @@ static model_t *R_StudioSetupPlayerModel( int index )
 
 /*
 ================
+R_StudioMostlyAdditive
+
+more additive than opaque textures; also runs on the Media Engine
+================
+*/
+qboolean R_StudioMostlyAdditive( const studiohdr_t *phdr )
+{
+	const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)phdr + phdr->textureindex);
+	int opaque = 0, trans = 0;
+
+	for( int i = 0; i < phdr->numtextures; i++, ptexture++ )
+	{
+		// ignore chrome & additive it's just a specular-like effect
+		if( FBitSet( ptexture->flags, STUDIO_NF_ADDITIVE ) && !FBitSet( ptexture->flags, STUDIO_NF_CHROME ))
+			trans++;
+		else opaque++;
+	}
+
+	return trans > opaque;
+}
+
+/*
+================
 R_GetEntityRenderMode
 
 check for texture flags
@@ -5756,19 +6621,8 @@ int R_GetEntityRenderMode( cl_entity_t *ent )
 		}
 		return ent->curstate.rendermode;
 	}
-	mstudiotexture_t *ptexture = (mstudiotexture_t *)((byte *)phdr + phdr->textureindex);
-
-	int opaque = 0, trans = 0;
-	for( int i = 0; i < phdr->numtextures; i++, ptexture++ )
-	{
-		// ignore chrome & additive it's just a specular-like effect
-		if( FBitSet( ptexture->flags, STUDIO_NF_ADDITIVE ) && !FBitSet( ptexture->flags, STUDIO_NF_CHROME ))
-			trans++;
-		else opaque++;
-	}
-
 	// if model is more additive than opaque
-	if( trans > opaque )
+	if( R_StudioMostlyAdditive( phdr ))
 		return kRenderTransAdd;
 	return ent->curstate.rendermode;
 }
@@ -7299,31 +8153,116 @@ static qboolean R_StudioPreCull( cl_entity_t *e )
 
 /*
 =================
-R_StudioPreCullList
+R_StudioMePrepare
 
-R_StudioPreCull for a whole draw list before it is drawn: tested one by one
-between model draws its code and the per frame values were evicted from the
-cache by each model's rendering, ~17 us a test against ~3 us in a row (fight1:
-~48 tests a frame, ~28 of them culled). Entities stay in the list, so a
-follower still finds its culled parent for its bones
+R_StudioPreCull for the draw lists before they're drawn: from the Media
+Engine's table (an entity, its model and its sequence are ~6 cache misses),
+the ones it doesn't know one by one. Then the second job: the bones and the
+draws of what's left. Entities stay in the list, so a follower still finds
+its culled parent for its bones.
 =================
 */
-void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled )
+static void R_StudioMePrepareList( cl_entity_t **list, int count, byte *culled, const mecull_t *cull, int numcull, const uint16_t *order, qboolean draw )
 {
+	float planes[FRUSTUM_PLANES][4];
+	int numplanes = 0;
+
+	for( int i = 0; i < FRUSTUM_PLANES; i++ )
+	{
+		if( !FBitSet( RI.frustum.clipFlags, BIT( i )))
+			continue;
+		VectorCopy( RI.frustum.planes[i].normal, planes[numplanes] );
+		planes[numplanes++][3] = -RI.frustum.planes[i].dist;
+	}
+
+	for( int i = 0; i < count; i++ )
+	{
+		const int index = order ? order[i] : i;
+
+		if( index >= numcull )
+		{
+			cl_entity_t *e = list[i];
+
+			culled[i] = e->model && e->model->type == mod_studio && !e->player
+				&& e->curstate.movetype != MOVETYPE_FOLLOW && R_StudioPreCull( e );
+			continue;
+		}
+
+		const mecull_t *c = &cull[index];
+
+		culled[i] = false;
+		if( c->type == MECULL_MAIN || c->type == MECULL_BRUSH )
+			continue;
+
+		if( g_precull.enabled )
+		{
+			const float min = c->small ? g_precull.minpixels_small : g_precull.minpixels;
+
+			if( min > 0.0f )
+			{
+				vec3_t d;
+				VectorSubtract( c->org, RI.rvp.vieworigin, d );
+
+				const float px = c->rpx * g_precull.px_scale;
+
+				if( px * px < min * min * DotProduct( d, d ))
+				{
+					culled[i] = true;
+					continue;
+				}
+			}
+
+			for( int k = 0; k < numplanes; k++ )
+			{
+				if( DotProduct( planes[k], c->org ) + planes[k][3] + c->r < 0.0f )
+				{
+					culled[i] = true;
+					break;
+				}
+			}
+
+			if( culled[i] )
+				continue;
+		}
+
+		if( R_StudioMeAdd( list[i], c, draw ))
+			culled[i] = R_STUDIO_ME;
+	}
+}
+
+void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *trans_order )
+{
+	int numsolid = 0, numtrans = 0;
+	const mecull_t *cull;
+
 	g_precull.enabled = r_studio_precull.value && !r_nocull.value;
 	g_precull.minpixels = r_studio_minpixels.value > 0.0f && RI.rvp.fov_x > 0.0f ? r_studio_minpixels.value : 0.0f;
 	g_precull.minpixels_small = r_studio_minpixels_small.value > 0.0f && RI.rvp.fov_x > 0.0f ? r_studio_minpixels_small.value : 0.0f;
 	g_precull.px_scale = RI.rvp.fov_x > 0.0f ? RI.rvp.viewport[2] * 0.5f / tanf( RI.rvp.fov_x * ( M_PI_F / 360.0f )) : 0.0f;
 	g_precull.time = gp_cl->time;
 
-	for( int i = 0; i < count; i++ )
-	{
-		cl_entity_t *e = list[i];
+	if( r_mebones.ticket )
+		R_StudioMeReset(); // a second view
 
-		culled[i] = e->model && e->model->type == mod_studio && !e->player
-			&& e->curstate.movetype != MOVETYPE_FOLLOW && R_StudioPreCull( e );
-	}
+	cull = R_StudioMeTable( &numsolid, &numtrans, NULL );
+	r_mebones.job.count = r_mebones.count = 0;
 
+	cl_entity_t *saveent = RI.currententity;
+	model_t *savemodel = RI.currentmodel;
+	studiohdr_t *savehdr = m_pStudioHeader;
+	const uint savedtex = glState.currentTexture; // the skin block lookups set it
+
+	R_StudioSetupTimings();
+	R_StudioMePrepareList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled, cull, numsolid, NULL, R_StudioMeDrawAllowed( ));
+	R_StudioMePrepareList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled, cull ? cull + MECULL_MAXSOLID : NULL, numtrans, trans_order, false );
+
+	glState.currentTexture = savedtex;
+	RI.currententity = saveent;
+	RI.currentmodel = savemodel;
+	m_pStudioHeader = savehdr;
+
+	if( cull )
+		R_StudioMePost();
 	g_precull.active = true;
 }
 
@@ -7420,17 +8359,18 @@ void R_StudioDrawMeModels( void )
 
 	for( int i = 0; i < r_mebones.count; i++ )
 	{
-		const mebones_ent_t *m = &r_mebones.ents[i];
-		const mebones_res_t *res = &r_mebones_res[Q_max( m->slot, 0 )];
-		const medraw_t *d = m->draw;
-		cl_entity_t *e = (cl_entity_t *)m->e;
+		const mebones_item_t *it = &r_mebones.job.items[i];
+		const medraw_t *d = it->draw;
+		cl_entity_t *e = it->e;
+		const mebones_res_t *res;
 		alight_t lighting;
 		vec3_t dir;
 
 		if( !d )
 			continue;
 
-		if( !R_StudioMeBonesWait( m ) || r_mebones.local || ( res->visible && !res->cmds[0] && !res->cmds[1] )
+		res = R_StudioMeWait( i );
+		if( !res || !res->ent || ( res->visible && !res->cmds[0] && !res->cmds[1] )
 			|| extGuListUsed() > guRender.context_list_size - 128 * 1024 )
 		{
 			rest[numrest++] = i;
@@ -7441,18 +8381,18 @@ void R_StudioDrawMeModels( void )
 			continue;
 
 		RI.currententity = e;
-		RI.currentmodel = e->model;
-		R_StudioSetHeader( (studiohdr_t *)m->hdr );
-		Matrix3x4_Copy( g_studio.rotationmatrix, m->rotation );
+		RI.currentmodel = it->player ? (model_t *)it->player->mod : e->model;
+		R_StudioSetHeader( (studiohdr_t *)d->hdr );
+		Matrix3x4_Copy( g_studio.rotationmatrix, res->rotation );
 
 		r_stats.c_studio_models_drawn++;
 		g_studio.framecount++; // render data cache cookie
 
-		if( !m->blendprev )
-			e->latched.prevframe = m->prevframe;
+		if( !res->blendprev )
+			e->latched.prevframe = res->prevframe;
 
 		// R_StudioCalcAttachments
-		memcpy( e->attachment, res->attachment, sizeof( vec3_t ) * m->hdr->numattachments );
+		memcpy( e->attachment, res->attachment, sizeof( vec3_t ) * d->hdr->numattachments );
 		R_StudioClientEvents();
 
 		// copy attachments into global entity array
@@ -7495,15 +8435,23 @@ void R_StudioDrawMeModels( void )
 
 		sceGuLight( 0, GU_DIRECTIONAL, GU_DIFFUSE, &lightdir );
 
-		for( int flat = 0; flat < 2; flat++ )
+		// the weapon's after the player's
+		for( int k = 0; k < 4; k++ )
 		{
-			if( !res->cmds[flat] )
+			if( !res->cmds[k] )
 				continue;
-			R_StudioGEHwLight( flat );
-			extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)res->cmds[flat] ));
+
+			R_StudioGEHwLight( k & 1 );
+			extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)res->cmds[k] ));
 		}
+
 		ge_last_skinblock = d->blocks[d->numitems - 1];
 		r_stats.c_studio_polys += d->polys;
+		if( it->wdraw )
+		{
+			ge_last_skinblock = it->wdraw->blocks[it->wdraw->numitems - 1];
+			r_stats.c_studio_polys += it->wdraw->polys;
+		}
 	}
 
 	ge_slots_valid = 0;
@@ -7521,7 +8469,7 @@ void R_StudioDrawMeModels( void )
 
 	for( int i = 0; i < numrest; i++ )
 	{
-		cl_entity_t *e = (cl_entity_t *)r_mebones.ents[rest[i]].e;
+		cl_entity_t *e = r_mebones.job.items[rest[i]].e;
 
 		RI.currententity = e;
 		RI.currentmodel = e->model;

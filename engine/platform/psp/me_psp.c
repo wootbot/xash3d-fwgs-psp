@@ -69,7 +69,7 @@ typedef struct
 } psp_kcall_args_t;
 int kuKernelCall( void *func_addr, psp_kcall_args_t *args );
 
-void (*psp_entities_hook)( void );	// the renderer's symbols are local to it: it sets this one
+void (*psp_entities_hook)( qboolean complete );	// the renderer's symbols are local to it: it sets this one
 
 static me_ctl_t *me_ctl;		// uncached view
 static void *me_ctl_mem, *me_stack;

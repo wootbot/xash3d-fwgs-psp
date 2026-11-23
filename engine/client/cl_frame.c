@@ -1328,6 +1328,12 @@ void CL_EmitEntities( void )
 	// link all the entities that actually have update
 	CL_LinkPacketEntities ( &cl.frames[cl.parsecountmod] );
 
+#if XASH_PSP
+	// their bones start on the Media Engine
+	if( cl.video_prepped && psp_entities_hook )
+		psp_entities_hook( false );
+#endif
+
 	// link custom user temp entities
 	clgame.dllFuncs.pfnCreateEntities();
 

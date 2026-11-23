@@ -26,7 +26,7 @@ float		gldepthmin, gldepthmax;
 
 ref_instance_t	RI;
 
-static int R_RankForRenderMode( int rendermode )
+int R_RankForRenderMode( int rendermode )
 {
 	switch( rendermode )
 	{
@@ -91,7 +91,7 @@ typedef struct
 {
 	cl_entity_t *ent;
 	float dist;
-	int rank;
+	int rank, order;
 } trans_sort_t;
 
 static int R_TransSortCompare( const void *a, const void *b )
@@ -109,23 +109,47 @@ static int R_TransSortCompare( const void *a, const void *b )
 	return 0;
 }
 
+static uint16_t trans_order[MAX_VISIBLE_PACKET]; // where they were before, 0xffff: not in the table
+
 static void R_SortTransEntities( void )
 {
 	static trans_sort_t sort[MAX_VISIBLE_PACKET];
 	const int count = tr.draw_list->num_trans_entities;
+	int numsolid, numkeys = 0;
+	const mesort_t *keys = NULL;
+
+#if XASH_PSP
+	R_StudioMeTable( &numsolid, &numkeys, &keys );
+	for( int i = 0; i < count; i++ )
+		trans_order[i] = i < numkeys ? i : 0xffff;
+#endif
+
+	if( gl_nosort.value )
+		return;
 
 	for( int i = 0; i < count; i++ )
 	{
 		cl_entity_t *ent = tr.draw_list->trans_entities[i];
-		int rendermode = R_GetEntityRenderMode( ent );
+		vec3_t vecLen, org;
 
 		sort[i].ent = ent;
+		sort[i].order = trans_order[i];
+
+#if XASH_PSP
+		if( i < numkeys && keys[i].rank != MESORT_MAIN )
+		{
+			sort[i].rank = keys[i].rank;
+			VectorSubtract( RI.rvp.vieworigin, keys[i].org, vecLen );
+			sort[i].dist = keys[i].far ? 1000000000 : DotProduct( vecLen, vecLen );
+			continue;
+		}
+#endif
+		int rendermode = R_GetEntityRenderMode( ent );
+
 		sort[i].rank = R_RankForRenderMode( rendermode );
 
 		if( ent->model->type != mod_brush || rendermode != kRenderTransAlpha )
 		{
-			vec3_t vecLen, org;
-
 			VectorAverage( ent->model->mins, ent->model->maxs, org );
 			VectorAdd( ent->origin, org, org );
 			VectorSubtract( RI.rvp.vieworigin, org, vecLen );
@@ -137,7 +161,10 @@ static void R_SortTransEntities( void )
 	qsort( sort, count, sizeof( sort[0] ), R_TransSortCompare );
 
 	for( int i = 0; i < count; i++ )
+	{
 		tr.draw_list->trans_entities[i] = sort[i].ent;
+		trans_order[i] = sort[i].order;
+	}
 }
 
 /*
@@ -233,6 +260,10 @@ void R_ClearScene( void )
 	tr.draw_list->num_solid_entities = 0;
 	tr.draw_list->num_trans_entities = 0;
 	tr.draw_list->num_beam_entities = 0;
+#if XASH_PSP
+	tr.draw_list->num_players = 0;
+	R_StudioMeSceneCleared();
+#endif
 
 	// clear the scene befor start new frame
 	if( gEngfuncs.drawFuncs->R_ClearScene != NULL )
@@ -284,6 +315,11 @@ qboolean R_AddEntity( struct cl_entity_s *clent, int type )
 		// opaque
 		if( tr.draw_list->num_solid_entities >= MAX_VISIBLE_PACKET )
 			return false;
+
+#if XASH_PSP
+		if( type == ET_PLAYER && tr.draw_list->num_players < MAX_CLIENTS )
+			tr.draw_list->players[tr.draw_list->num_players++] = tr.draw_list->num_solid_entities;
+#endif
 
 		tr.draw_list->solid_entities[tr.draw_list->num_solid_entities] = clent;
 		tr.draw_list->num_solid_entities++;
@@ -514,12 +550,6 @@ static void R_SetupFrame( void )
 
 	// NOTE: this request is the fps-killer on some NVidia drivers
 	glState.isFogEnabled = sceGuGetStatus( GU_FOG );
-
-	if( !gl_nosort.value )
-	{
-		// sort translucents entities by rendermode and distance
-		R_SortTransEntities();
-	}
 
 	// current viewleaf
 	if( FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
@@ -846,6 +876,7 @@ static void R_DrawStaticBrushGroup( cl_entity_t **list, int count, int start, by
 static byte solid_culled[MAX_VISIBLE_PACKET], trans_culled[MAX_VISIBLE_PACKET];
 static byte solid_grouped[MAX_VISIBLE_PACKET], trans_grouped[MAX_VISIBLE_PACKET];
 static qboolean viewmodel_drawn; // before the world, see R_RenderScene
+static qboolean viewmodel_events; // to run in R_RenderScene, once the world is under way
 
 /*
 =============
@@ -860,17 +891,15 @@ static void R_PrepareEntities( void )
 	if( FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
 		return;
 
-	R_StudioPreCullList( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled );
-	R_StudioPreCullList( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
-	R_StudioMeBonesBegin( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, solid_culled,
-		tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, trans_culled );
+	memset( solid_grouped, 0, sizeof( solid_grouped ));
+	memset( trans_grouped, 0, sizeof( trans_grouped ));
+	R_StudioMePrepare( solid_culled, trans_culled, trans_order );
+	R_MeBrushesBegin( solid_grouped, trans_grouped, trans_order );
+	R_StudioMeSceneCleared(); // a second view in this frame starts over
 
 	// the world walk adds static entities
 	memset( solid_culled + tr.draw_list->num_solid_entities, 0, sizeof( solid_culled ) - tr.draw_list->num_solid_entities );
 	memset( trans_culled + tr.draw_list->num_trans_entities, 0, sizeof( trans_culled ) - tr.draw_list->num_trans_entities );
-	memset( solid_grouped, 0, sizeof( solid_grouped ));
-	memset( trans_grouped, 0, sizeof( trans_grouped ));
-	R_MeBrushesBegin( solid_grouped, trans_grouped );
 }
 
 /*
@@ -1129,6 +1158,12 @@ void R_RenderScene( void )
 	if( r_drawworld.value )
 		R_MeWorldBegin();
 #endif
+	if( viewmodel_events )
+	{
+		R_RunViewmodelEvents();
+		tr.realframecount++; // right called after viewmodel events
+	}
+	R_SortTransEntities();
 	R_PrepareEntities();
 #if XASH_PSP
 	viewmodel_drawn = false;
@@ -1243,11 +1278,11 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
 	}
 
 	tr.fCustomRendering = false;
-	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
-		R_RunViewmodelEvents();
-
-	tr.realframecount++; // right called after viewmodel events
+	viewmodel_events = !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW );
+	if( !viewmodel_events )
+		tr.realframecount++;
 	R_RenderScene();
+	viewmodel_events = false;
 
 	return;
 }

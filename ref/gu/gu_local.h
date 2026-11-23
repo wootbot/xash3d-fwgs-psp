@@ -272,6 +272,11 @@ typedef struct
 	uint		num_solid_entities;
 	uint		num_trans_entities;
 	uint		num_beam_entities;
+#if XASH_PSP
+	// of the solid ones, for the Media Engine
+	uint16_t		players[MAX_CLIENTS];
+	uint		num_players;
+#endif
 } draw_list_t;
 
 typedef struct
@@ -607,7 +612,7 @@ void R_MeWorldRegister( void );
 void R_MeWorldBegin( void );
 qboolean R_MeWorldBusy( void );
 #define R_GROUPED_ME	2	// in the flags of the draw lists: drawn by R_MeBrushesDraw
-void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped );
+void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped, const uint16_t *trans_order );
 qboolean R_MeBrushesDraw( void );
 qboolean R_StudioMeBonesPosted( const cl_entity_t *e );
 // engine/platform/psp/me_psp.c: the renderer is linked into the engine
@@ -616,13 +621,71 @@ uint32_t PSP_MeRunKeep( void (*func)( void *arg ), void *arg );
 void PSP_MeWaitFor( uint32_t ticket );
 qboolean PSP_MeDone( uint32_t ticket );
 void PSP_MeWriteback( const void *start, size_t size );
-void R_StudioPreCullList( cl_entity_t **list, int count, byte *culled );
 void R_StudioPreCullEnd( void );
 qboolean R_ViewModelSolid( void );
 #define R_STUDIO_ME	2	// in the culled flags: drawn by R_StudioDrawMeModels
 void R_StudioDrawMeModels( void );
-extern void (*psp_entities_hook)( void );
-void R_StudioMeBonesBegin( cl_entity_t **solid, int nsolid, byte *solid_culled, cl_entity_t **trans, int ntrans, const byte *trans_culled );
+extern void (*psp_entities_hook)( qboolean complete );
+
+// a brush model for the Media Engine
+typedef struct
+{
+	short		mins[3], maxs[3];	// rounded outwards
+	uint16_t		firstsurf, numsurfs;
+	byte		result, cullsurfs, watersides, pad;
+	float		waterz;		// water planes up to here aren't drawn
+} meworld_brush_t;
+
+// what the Media Engine found out about an entity of the draw lists, before the view was known
+enum
+{
+	MECULL_MAIN = 0,	// nothing
+	MECULL_TEST,	// a studio model that may be culled
+	MECULL_BONES,	// its bones may be the ME's too
+	MECULL_DRAW,	// and its draws
+	MECULL_SMALL,	// the same, 1 or 2 bones
+	MECULL_PLAYER,
+	MECULL_BRUSH,	// a static brush model
+};
+
+typedef struct
+{
+	union
+	{
+		struct
+		{
+			vec3_t		org;
+			float		r;	// everything of it is this close to org
+			float		rpx;	// r for its size on the screen
+			const studiohdr_t	*hdr;
+		};
+		meworld_brush_t	brush;
+	};
+
+	uint16_t		body, skin;
+	byte		type, small, pad[2];
+} mecull_t;
+
+#define MECULL_MAXSOLID	384
+#define MECULL_MAXTRANS	384
+#define MECULL_MAX		( MECULL_MAXSOLID + MECULL_MAXTRANS )
+#define MESORT_MAIN		255
+
+typedef struct
+{
+	vec3_t		org;
+	byte		rank;	// MESORT_MAIN: not known
+	byte		far;	// drawn first
+	byte		pad[2];
+} mesort_t;
+
+const mecull_t *R_StudioMeTable( int *numsolid, int *numtrans, const mesort_t **sort );
+void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *trans_order );
+void R_StudioMeYield( int number );
+void R_StudioMeSceneCleared( void );
+qboolean R_StudioMostlyAdditive( const studiohdr_t *hdr );
+int R_RankForRenderMode( int rendermode );
+qboolean R_MeBrushClassify( const cl_entity_t *e, meworld_brush_t *m );
 void GU_ClipLoadFrustum( const mplane_t *plane ); // Experimental
 int GU_ClipIsRequired( gu_vert_t *uv, int uvc );
 void GU_Clip( gu_vert_t *uv, int uvc, gu_vert_t **cv, int *cvc );
