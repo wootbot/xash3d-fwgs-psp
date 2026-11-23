@@ -960,3 +960,16 @@ music), launched from the XMB.
   traces are for flying ones only (landed ones drop their collide flags). Studio GE output
   after the GE lighting, per frame: bone uploads ~0.25 ms (~3.5 us a batch), light setup
   ~0.15, skin blocks ~0.15, the rest of the plan loop ~0.4.
+- 2026-11-22 (night, 2): **Caps** (fight1 clean A/B): decals from shots and blood capped at
+  100 (`r_decals_max`, the map's own permanent decals on top; `0ed4523d`, 64.25 -> 65.2);
+  only the 16 loudest sounds mixed, the others move on silently (`s_mixchannels`,
+  `c66cb45c`, all 65.3, 24 65.8, 16 66.0, 12 66.2). Clean split at 66 fps (15.15 ms): the
+  studio models the precull can drop are 4.1 ms (all culled: 90.4 fps), other entities 1.65,
+  the rest 9.4: with no studio models at all the frame would still be 11 ms. Toggles:
+  HUD ~0.1 ms, particles ~0.4, beams/tracers ~0.3, view model ~0.6 (drawn last, the studio
+  code cold: drawing it right after the solid entities gave nothing). Tried and dropped:
+  props that move (flying shells) drawn from commands recorded relative to the entity with
+  its transform in the view matrix, chrome kept as recorded (+0.15 fps, not worth changing
+  how every prop keeps its bones and light); temp entity collision traces (landed ones
+  don't trace anyway). hgrunt has 2 blend sequences only for crouched shooting; player.mdl
+  has 52, with ~70% of the bones identical in both blends (an exact saving for players).
