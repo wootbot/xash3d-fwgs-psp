@@ -877,3 +877,21 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   - Directory listings, 20-60 ms: any open for writing dropped all of them, only its directory's now.
   - fight1: 108 fps, 4 of 1800 frames under 60. Stress scene: memory is the limit (largest block
     104 KB after a few demos in the same session).
+- 2026-11-24: **Stress scene: memory, the ME in the next frame, still props** (`edfeb807`, `6c8de8fa`, `a24ea7fa`, `90adba40`).
+  - Every model kept its pose for up to 5 frames when the ME had too much to do: an alien slave next to the
+    player moved 4 times a second. Only models under 40 pixels keep it now, for 0.05-0.1 s at most.
+  - Memory: the server library and its tables are loaded for local games only; `mod_known`, `s_knownSfx`
+    in chunks; the client's own resource list had 8192 entries (1.1 MB, it's the logo); consistency list,
+    light styles, rate limit tables. Largest block in the scene 60 KB -> 7 MB (all player models loaded),
+    three joins in a session work, singleplayer still has 12.5 MB left in c1a0. A demo after another one
+    ran out of memory before.
+  - The main CPU waited ~9 ms a frame for the ME, which was idle for 40% of the time: its model job read
+    the entities until its end. It copies what it needs first now (R_MeItemGather), the bones and commands
+    run during the next frame's packets. Attachments are stored then (R_StudioMeSettle), after
+    CL_LinkPacketEntities resets them: beams start at the hands instead of the origin. stress1 52 -> 32-36 ms.
+  - 150 of the 190 models are dropped rifles with one bone: their bones and light are kept (meprop_t).
+  - Detail: the scale of the distances was pinned at 4 by the rifles' words, so players up to 120 pixels
+    in radius were drawn with 145 triangles (user: weird when close). Scale at most 1.35, 65%/40% of the
+    triangles instead of 45%/30%. stress1 29-32 ms with that, fight1 unchanged (8.3-8.4 ms), live ~30 fps
+    (was ~18).
+  - The first run of a demo is slower (loading, the levels of detail are being made): compare the others.
