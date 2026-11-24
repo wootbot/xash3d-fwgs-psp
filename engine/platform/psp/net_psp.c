@@ -241,15 +241,23 @@ the network stack's threads receive packets and answer ARP, but they have
 a lower priority than the main thread, which rarely blocks: without this the
 PSP can send but hardly ever receives anything. They run while the main
 thread sleeps, ~0.6 ms a frame in a firefight: a short sleep is enough, a
-1 ms one left the CPU idle for the rest of it.
+1 ms one left the CPU idle for the rest of it. In long frames it's 4% of the
+time: 200 us 25 times a second isn't enough for them, what the server sent
+came up to a second late.
 ==================
 */
 void PSP_NetFrame( void )
 {
+	static uint32_t last;
+	const uint32_t now = sceKernelGetSystemTimeLow();
+	const uint32_t elapsed = now - last;
+
+	last = now;
+
 	if( psp_net.joining )
 		sceKernelDelayThread( 8 * 1000 ); // the key exchange takes time
 	else if( psp_net.stack )
-		sceKernelDelayThread( 200 );
+		sceKernelDelayThread( bound( 200, elapsed / 25, 2000 ));
 }
 
 qboolean PSP_NetIsConnected( void )

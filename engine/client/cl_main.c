@@ -942,7 +942,13 @@ static void CL_WritePacket( void )
 		int from, i, key;
 		int packet_loss = bound( 0, (int)cls.packet_loss, 100 );
 
+#if XASH_PSP
+		// so many on average: 30 a second were 20 at 40 fps
+		const double cmdinterval = 1.0f / cl_cmdrate.value;
+		cls.nextcmdtime = bound( host.realtime - cmdinterval, cls.nextcmdtime, host.realtime ) + cmdinterval;
+#else
 		cls.nextcmdtime = host.realtime + ( 1.0f / cl_cmdrate.value );
+#endif
 
 		if( cls.lastoutgoingcommand < 0 )
 			cls.lastoutgoingcommand = cls.netchan.outgoing_sequence;
@@ -1535,6 +1541,11 @@ static void CL_Connect_f( void )
 	NET_Config( true, !cl_nat.value ); // allow remote
 
 	Con_Printf( "server %s\n", server );
+#if XASH_PSP
+	// the old port's configs have 3500: in a fight that's an update or two a second
+	if( rate.value < 10000.0f )
+		Cvar_DirectSet( &rate, "25000" );
+#endif
 	CL_Disconnect();
 
 	// TESTTEST: a see console during connection
