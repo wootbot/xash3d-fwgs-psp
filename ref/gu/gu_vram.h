@@ -26,6 +26,7 @@ void* valloc( size_t size );
 void vfree( void* ptr );
 size_t vmemavail( void );
 size_t vlargestblock( void );
+int vnextblock( int block, void **ptr, size_t *size, int *isfree );	// 0 is the first one, returns the next or -1 after the last
 int vchkptr( void *ptr );
 
 

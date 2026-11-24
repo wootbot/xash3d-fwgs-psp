@@ -1874,6 +1874,7 @@ typedef struct
 	} vis[MEWORLD_MAXVIS];
 	uint16_t		texhead[WS_TEXTURE + 1], textail[WS_TEXTURE + 1], textures[WS_TEXTURE + 1];
 	uint16_t		lmhead[MAX_LIGHTMAPS];
+	uint32_t		texused[( MAX_TEXTURES + 31 ) >> 5];
 	uint32_t		cmds[2][MEWORLD_CMDS] __attribute__(( aligned( 64 )));	// the GE may still be reading the other ones
 } meworld_out_t;
 
@@ -2173,6 +2174,7 @@ static qboolean R_MeBind( meworld_job_t *job, int texnum )
 		return false;
 
 	job->p = GL_BindCommands( t, job->p );
+	SetBits( job->out->texused[texnum >> 5], BIT( texnum & 31 ));
 	return true;
 }
 
@@ -2305,6 +2307,7 @@ static void R_MeWorldJob( void *arg )
 			job->visframe[i] = job->visfill;
 	}
 
+	memset( job->out->texused, 0, sizeof( job->out->texused ));
 	job->full = false;
 	job->p = job->cmds;
 	job->who = 0;
@@ -2371,6 +2374,16 @@ void R_MeWorldBegin( void )
 	meworld_job_t *job = &r_meworld.job;
 
 	R_MeWorldWait();
+
+	// what it drew in the last frame
+	if( r_meworld.alloc && ( guRender.vert_frame & 7 ) == 0 )
+	{
+		for( int i = 0; i < ARRAYSIZE( MEWORLD_OUT->texused ); i++ )
+		{
+			for( uint bits = MEWORLD_OUT->texused[i]; bits; bits &= bits - 1 )
+				GL_TouchTexture( i * 32 + __builtin_ctz( bits ));
+		}
+	}
 
 	if( !r_world_me.value || !wn_nodes || !ws_surfs || !FBitSet( RI.rvp.flags, RF_DRAW_WORLD )
 		|| FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW|RF_DRAW_OVERVIEW ) || !PSP_MeStart( ))

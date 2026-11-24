@@ -293,6 +293,21 @@ size_t vlargestblock( void )
 	return __largest_block * __BLOCK_SIZE;
 }
 
+int vnextblock( int block, void **ptr, size_t *size, int *isfree )
+{
+	if( !__mem_start || block < 0 || block >= __mem_num_blocks ) return -1;
+
+	if( __mem_blocks[0] == 0 ) __mem_blocks[0] = __BLOCK0;
+
+	const int csize = __BLOCK_GET_SIZE( __mem_blocks[block] );
+	if( csize <= 0 ) return -1;
+
+	*ptr = ( void* )( __mem_start + block * __BLOCK_SIZE );
+	*size = csize * __BLOCK_SIZE;
+	*isfree = __BLOCK_GET_FREEBLOCK( __mem_blocks[block] ) == 3;
+	return block + csize;
+}
+
 int vchkptr( void *ptr )
 {
 	return ((( unsigned int )ptr >= __mem_start ) && (( unsigned int )ptr < __mem_start + __mem_size ));

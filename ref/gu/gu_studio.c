@@ -6099,6 +6099,7 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 	geskin_t *s = &ge_skins[texnum];
 	geskin_t key;
 
+	GL_TouchTexture( texnum );
 	if( s->block && s->frame == guRender.vert_frame )
 	{
 		glState.currentTexture = texnum; // what the block binds

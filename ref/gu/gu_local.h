@@ -114,6 +114,7 @@ typedef struct gltexture_s
 	byte		*dstPalette;	// CLUT for 4/8-bit textures
 	byte		clutFormat;	// GU_PSM_5650, 5551 or 4444, depending on the alpha the palette needs
 	word		stride;		// row length in pixels when it's a part of an atlas page, see GL_AliasTexture
+	word		page;		// and the page
 	word		rows;		// atlas pages: rows stored at the base level (0: all), GL_TextureRows
 	int		format;		// uploaded format (pixformat_t)
 	texFlags_t	flags;
@@ -436,6 +437,9 @@ int GL_CreateAtlasPage( const char *name, int width, int height, int rows, const
 #define PC_HWF( X ) ( X )
 #define ImageIND( type ) ( type == PF_INDEXED_24 || type == PF_INDEXED_32 )
 void GL_PixelConverter( byte *dst, const byte *src, int size, int inFormat, int outFormat );
+extern uint gl_texframe[MAX_TEXTURES];	// guRender.vert_frame it was last used in, about
+#define GL_TouchTexture( texnum ) ( gl_texframe[( texnum )] = guRender.vert_frame )
+void GL_PlaceTextures( void );
 qboolean GU_UpdateTextureRect( int texnum, int xoff, int yoff, int width, int height, const void *buffer );
 int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags );
 int GL_CreateTextureArray( const char *name, int width, int height, int depth, const void *buffer, texFlags_t flags );

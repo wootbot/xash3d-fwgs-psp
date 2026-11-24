@@ -1158,6 +1158,7 @@ void R_RenderScene( void )
 
 	R_CheckGLFog();
 #if XASH_PSP
+	GL_PlaceTextures();
 	if( r_drawworld.value )
 		R_MeWorldBegin();
 #endif
@@ -1307,6 +1308,8 @@ void R_EndFrame( void )
 	// finish rendering: the GE draws it while the next frame's game code runs, and shows
 	// it when it's done (GU_Present). With vsync R_NextFrame does
 	guRender.list_used = extGuListUsed();
+	if( guRender.list_used > guRender.context_list_size )
+		gEngfuncs.Con_Printf( S_ERROR "GE list overflow: %u of %u KB\n", (uint)guRender.list_used >> 10, (uint)guRender.context_list_size >> 10 );
 	guRender.present[guRender.vert_frame & 1] = guRender.draw_buffer;
 	sceGuFinishId( gl_vsync->value ? 2 : guRender.vert_frame & 1 );
 	guRender.frame_pending = true;

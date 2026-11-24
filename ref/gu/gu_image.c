@@ -44,6 +44,7 @@ static gl_texture_t	gl_textures[MAX_TEXTURES];
 static gl_texture_t*	gl_texturesHashTable[TEXTURES_HASH_SIZE];
 static uint		gl_numTextures;
 static byte*		gl_palette_332 = NULL;
+uint			gl_texframe[MAX_TEXTURES];
 
 /*
 	CLUTs are 16-bit, the format is picked per texture by the alpha the palette needs
@@ -204,6 +205,7 @@ void GL_Bind( int tmu, unsigned int texnum )
 
 	extGuCmdEnd( GL_BindCommands( texture, extGuCmdBegin( )));
 	glState.currentTexture = texnum;
+	GL_TouchTexture( texnum );
 }
 
 /*
@@ -350,20 +352,25 @@ static qboolean GL_IsSceneTexture( const gl_texture_t *tex )
 	return Q_stristr( tex->name, ".spr" ) != NULL;
 }
 
+static qboolean GL_IsMenuImage( const gl_texture_t *tex )
+{
+	return FBitSet( tex->flags, TF_IMAGE ) == TF_IMAGE && !FBitSet( tex->flags, TF_ALLOW_NEAREST )
+		&& !IsLightMap( tex ) && Q_strnicmp( tex->name, "#HUD/", 5 ) && !GL_IsSceneTexture( tex );
+}
+
 /*
 ================
 GL_AllocGEMemory / GL_AllocTextureData
 
 texture data and palettes, VRAM first: texture fetches from main RAM compete
-with the CPU for the bus (only ~3% of the frame in a firefight, measured).
-Menu images go to RAM, they aren't drawn in game and would take VRAM from the
-world and the models.
+with the CPUs for the bus. Menu images go to RAM, they aren't drawn in game and
+would take VRAM from the world and the models. GL_PlaceTextures moves the ones
+that are drawn into VRAM later.
 ================
 */
 static byte *GL_AllocGEMemory( const gl_texture_t *tex, size_t size, qboolean *inVRAM )
 {
-	qboolean menuImage = FBitSet( tex->flags, TF_IMAGE ) == TF_IMAGE && !FBitSet( tex->flags, TF_ALLOW_NEAREST )
-		&& !IsLightMap( tex ) && Q_strnicmp( tex->name, "#HUD/", 5 ) && !GL_IsSceneTexture( tex );
+	const qboolean menuImage = GL_IsMenuImage( tex );
 	byte *data;
 
 	*inVRAM = false;
@@ -393,6 +400,7 @@ static byte *GL_AllocTextureData( gl_texture_t *tex, size_t size )
 	qboolean inVRAM;
 	byte *data = GL_AllocGEMemory( tex, size, &inVRAM );
 
+	GL_TouchTexture( tex - gl_textures );
 	if( inVRAM )
 		SetBits( tex->flags, TF_IMG_INVRAM );
 	else ClearBits( tex->flags, TF_IMG_INVRAM );
@@ -1224,6 +1232,268 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 }
 
 /*
+=============================================================
+
+TEXTURES INTO VRAM
+
+They are loaded in any order and most of them aren't seen for long: the VRAM is
+full of textures nobody looks at while the GE reads the ones in sight from RAM,
+over the bus both CPUs use too (fight1: 92 fps, 98 if all of them fit). So the
+ones drawn lately move into VRAM, a texture a frame, and the ones not drawn for
+long out of it. No waiting for the GE: the old place is freed when it can't be
+reading it anymore.
+
+=============================================================
+*/
+#define TEXTURE_HOT		16	// frames since it was drawn
+#define TEXTURE_COLD	300
+#define TEXTURE_SCAN	32	// textures a frame
+#define TEXTURE_MOVED	32
+#define TEXTURE_RUN	16	// blocks to make room in
+
+static struct
+{
+	byte	*data;
+	uint	frame;
+} gl_moved[TEXTURE_MOVED];	// to free, a ring
+static uint	gl_numMoved, gl_numMovedFree;
+
+static void GL_FreeMoved( void )
+{
+	while( gl_numMovedFree != gl_numMoved && gl_moved[gl_numMovedFree % TEXTURE_MOVED].frame + 2 <= guRender.vert_frame )
+		free( gl_moved[gl_numMovedFree++ % TEXTURE_MOVED].data );
+}
+
+static void GL_FreeLater( byte *data )
+{
+	gl_moved[gl_numMoved % TEXTURE_MOVED].data = data;
+	gl_moved[gl_numMoved++ % TEXTURE_MOVED].frame = guRender.vert_frame;
+}
+
+// the parts of an atlas page are pointers into it
+static void GL_SetTextureData( int texnum, byte *data, byte *palette )
+{
+	gl_texture_t *tex = &gl_textures[texnum];
+
+	for( int i = 1; i < gl_numTextures; i++ )
+	{
+		gl_texture_t *part = &gl_textures[i];
+
+		if( part->stride && part->page == texnum )
+		{
+			part->dstTexture = data + ( part->dstTexture - tex->dstTexture );
+			part->dstPalette = palette;
+		}
+	}
+
+	tex->dstTexture = data;
+	tex->dstPalette = palette;
+	if( vchkptr( data ))
+		SetBits( tex->flags, TF_IMG_INVRAM );
+	else ClearBits( tex->flags, TF_IMG_INVRAM );
+	glState.currentTexture = -1;
+}
+
+#define VRAM_BLOCK		512	// valloc's
+#define VRAM_BLOCKS	( 4 * 1024 * 1024 / VRAM_BLOCK )
+#define VRAM_PALETTE	BIT( 15 )
+
+// which cold texture's data or palette a VRAM address is
+static void GL_MapColdTextures( uint16_t *map )
+{
+	memset( map, 0, VRAM_BLOCKS * sizeof( *map ));
+
+	for( int i = 1; i < gl_numTextures; i++ )
+	{
+		const gl_texture_t *tex = &gl_textures[i];
+
+		if( gl_texframe[i] + TEXTURE_COLD > guRender.vert_frame || !tex->dstTexture || tex->stride || !tex->size || IsLightMap( tex ))
+			continue;
+
+		if( FBitSet( tex->flags, TF_IMG_INVRAM ))
+			map[((uint)tex->dstTexture / VRAM_BLOCK ) % VRAM_BLOCKS] = i;
+		if( tex->dstPalette && tex->dstPalette != gl_palette_332 && vchkptr( tex->dstPalette ))
+			map[((uint)tex->dstPalette / VRAM_BLOCK ) % VRAM_BLOCKS] = i | VRAM_PALETTE;
+	}
+}
+
+/*
+makes room in VRAM: takes out the textures of a run of cold ones and free
+blocks, the one with the least to take out. False if there's none
+*/
+static qboolean GL_EvictTextures( size_t size )
+{
+	uint16_t *map = GL_TempAlloc( VRAM_BLOCKS * sizeof( *map ));
+	struct { int tex; size_t size; } run[TEXTURE_RUN];	// the last blocks
+	int first = 0, num = 0, best[TEXTURE_RUN], numbest = 0;
+	size_t total = 0, cost = 0, bestcost = size * 2;
+
+	if( !map )
+		return false;
+	GL_MapColdTextures( map );
+
+	for( int block = 0; block >= 0; )
+	{
+		void *ptr;
+		size_t bytes;
+		int isfree, tex = 0;
+
+		if(( block = vnextblock( block, &ptr, &bytes, &isfree )) < 0 )
+			break;
+
+		if( !isfree && !( tex = map[((uint)ptr / VRAM_BLOCK ) % VRAM_BLOCKS] ))
+		{
+			num = 0;
+			total = cost = 0;
+			continue;
+		}
+
+		if( num == TEXTURE_RUN )
+		{
+			total -= run[first].size;
+			cost -= run[first].tex ? run[first].size : 0;
+			first = ( first + 1 ) % TEXTURE_RUN;
+			num--;
+		}
+
+		const int last = ( first + num++ ) % TEXTURE_RUN;
+
+		run[last].tex = tex;
+		run[last].size = bytes;
+		total += bytes;
+		cost += tex ? bytes : 0;
+
+		// as few as it takes
+		while( num > 1 && total - run[first].size >= size )
+		{
+			total -= run[first].size;
+			cost -= run[first].tex ? run[first].size : 0;
+			first = ( first + 1 ) % TEXTURE_RUN;
+			num--;
+		}
+
+		if( total >= size && cost < bestcost )
+		{
+			bestcost = cost;
+			numbest = 0;
+			for( int i = 0; i < num; i++ )
+			{
+				if( run[( first + i ) % TEXTURE_RUN].tex )
+					best[numbest++] = run[( first + i ) % TEXTURE_RUN].tex;
+			}
+		}
+	}
+
+	GL_TempFree( map );
+	if( !numbest )
+		return false;
+
+	byte *data[TEXTURE_RUN];
+
+	for( int i = 0; i < numbest; i++ )
+	{
+		if(( data[i] = memalign( 16, FBitSet( best[i], VRAM_PALETTE ) ? PALETTE_SIZE : gl_textures[best[i]].size )))
+			continue;
+
+		while( --i >= 0 )
+			free( data[i] );
+		return false;
+	}
+
+	// the GE isn't reading them
+	for( int i = 0; i < numbest; i++ )
+	{
+		const qboolean palette = FBitSet( best[i], VRAM_PALETTE );
+		const int texnum = best[i] & ~VRAM_PALETTE;
+		gl_texture_t *tex = &gl_textures[texnum];
+		const size_t bytes = palette ? PALETTE_SIZE : tex->size;
+		byte *old = palette ? tex->dstPalette : tex->dstTexture;
+
+		memcpy( data[i], old, bytes );
+		sceKernelDcacheWritebackRange( data[i], bytes );
+		GL_SetTextureData( texnum, palette ? tex->dstTexture : data[i], palette ? data[i] : tex->dstPalette );
+		vfree( old );
+	}
+
+	return true;
+}
+
+/*
+===============
+GL_PlaceTextures
+
+once a frame
+===============
+*/
+void GL_PlaceTextures( void )
+{
+	static uint retry[MAX_TEXTURES];	// frame to try again
+	static int cursor;
+
+	GL_FreeMoved();
+
+	if( !gu_texture_vram.value || gl_numMoved - gl_numMovedFree > TEXTURE_MOVED - 2 )
+		return;
+
+	for( int n = 0; n < TEXTURE_SCAN; n++ )
+	{
+		if( ++cursor >= gl_numTextures )
+			cursor = 1;
+		if( gl_texframe[cursor] + TEXTURE_HOT < guRender.vert_frame )
+			continue;
+
+		gl_texture_t *tex = &gl_textures[cursor];
+
+		if( !tex->dstTexture || tex->stride || !tex->size || IsLightMap( tex ) || GL_IsMenuImage( tex ))
+			continue;
+
+		byte *palette = tex->dstPalette;
+		byte *data = tex->dstTexture;
+
+		if( !FBitSet( tex->flags, TF_IMG_INVRAM ))
+		{
+			if( vlargestblock() < tex->size )
+			{
+				// looking for some takes a while: not often if there are none
+				if( retry[cursor] > guRender.vert_frame )
+					continue;
+				retry[cursor] = guRender.vert_frame + TEXTURE_COLD;
+				if( !GL_EvictTextures( tex->size ))
+					return;
+			}
+
+			byte *vram = vlargestblock() >= tex->size ? valloc( tex->size ) : NULL;
+			if( vram )
+			{
+				memcpy( vram, data, tex->size );
+				sceKernelDcacheWritebackRange( vram, tex->size );
+				GL_FreeLater( data );
+				data = vram;
+			}
+		}
+
+		if( palette && palette != gl_palette_332 && !vchkptr( palette ) && vlargestblock() >= PALETTE_SIZE )
+		{
+			byte *vram = valloc( PALETTE_SIZE );
+
+			if( vram )
+			{
+				memcpy( vram, palette, PALETTE_SIZE );
+				sceKernelDcacheWritebackRange( vram, PALETTE_SIZE );
+				GL_FreeLater( palette );
+				palette = vram;
+			}
+		}
+
+		if( data != tex->dstTexture || palette != tex->dstPalette )
+		{
+			GL_SetTextureData( cursor, data, palette );
+			return;
+		}
+	}
+}
+
+/*
 ===============
 GL_AliasTexture
 
@@ -1265,6 +1535,7 @@ qboolean GL_AliasTexture( int texnum, int atlas, int x, int y )
 	tex->dstPalette = page->dstPalette;
 	tex->clutFormat = page->clutFormat;
 	tex->stride = page->width;
+	tex->page = atlas;
 	tex->numMips = 1;
 	tex->size = 0;
 	ClearBits( tex->flags, TF_IMG_SWIZZLED|TF_IMG_INVRAM );
