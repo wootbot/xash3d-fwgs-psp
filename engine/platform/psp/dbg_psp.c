@@ -15,7 +15,8 @@ GNU General Public License for more details.
 
 /*
 PSPLink's USB link dies when the Wi-Fi stack is up for a while, and anything
-waiting on host0: then hangs. With "-dbgcon" the game joins Wi-Fi at startup
+waiting on host0: then hangs. With "-dbgcon" the game joins Wi-Fi in the background
+(and again whenever the connection is lost, or silent: see wifi.log)
 and talks to scripts/psp/dbgcon.py on the PC instead:
 
 - the PC sends to UDP port 27999: packets starting with 0xff are keepalives,
@@ -30,6 +31,7 @@ and talks to scripts/psp/dbgcon.py on the PC instead:
 #include "common.h"
 #include "platform/platform.h"
 #include "platform/psp/net_psp.h"
+#include "client.h"
 #include <pspkernel.h>
 #include <psploadexec_kernel.h>
 
@@ -41,6 +43,7 @@ int sctrlKernelLoadExecVSHMs2( const char *file, struct SceKernelLoadExecVSHPara
 #define DBGCON_PORT     27999
 #define DBGCON_BUF      16384
 #define DBGCON_PACKET   1200
+#define DBGCON_SILENCE  60.0 // the PC sends something every 2 s
 
 static struct
 {
@@ -48,7 +51,8 @@ static struct
 	int sock;
 	struct sockaddr_in pc;
 	volatile qboolean have_pc;
-	double next_join;
+	double next_open;
+	double last_heard, silence;	// the PC's last packet, joins again after this long without one
 
 	// output collected between frames, sent by the main thread
 	char buf[DBGCON_BUF];
@@ -157,6 +161,17 @@ static void PSP_DbgConOpen( void )
 	Con_Printf( "dbgcon: listening on UDP port %d\n", DBGCON_PORT );
 }
 
+static void PSP_DbgConClose( void )
+{
+	const int sock = dbg.sock;
+
+	if( sock < 0 )
+		return;
+
+	dbg.sock = -1; // the watchdog thread may be sending
+	closesocket( sock );
+}
+
 /*
 ==================
 PSP_DbgConFrame
@@ -174,20 +189,28 @@ void PSP_DbgConFrame( void )
 	if( !dbg.enabled )
 		return;
 
+	// the access point often refuses joins, keep trying
+	if( !PSP_NetConnectFrame( ))
+	{
+		PSP_DbgConClose();
+		return;
+	}
+
+	const double now = Platform_DoubleTime();
+
 	if( dbg.sock < 0 )
 	{
-		// the access point often refuses joins, keep trying
-		if( host.realtime < dbg.next_join )
+		if( now < dbg.next_open )
 			return;
 
-		dbg.next_join = host.realtime + 20.0;
-
-		if( !PSP_NetIsConnected( ) && !PSP_NetConnect( ))
-			return;
-
+		dbg.next_open = now + 5.0;
 		PSP_DbgConOpen();
 		if( dbg.sock < 0 )
 			return;
+
+		dbg.last_heard = now;
+		if( dbg.silence <= 0.0 )
+			dbg.silence = DBGCON_SILENCE;
 	}
 
 	while( 1 )
@@ -196,6 +219,9 @@ void PSP_DbgConFrame( void )
 		n = recvfrom( dbg.sock, packet, sizeof( packet ) - 2, 0, (struct sockaddr *)&from, &fromlen );
 		if( n <= 0 )
 			break;
+
+		dbg.last_heard = now;
+		dbg.silence = DBGCON_SILENCE;
 
 		if( !dbg.have_pc || dbg.pc.sin_addr.s_addr != from.sin_addr.s_addr || dbg.pc.sin_port != from.sin_port )
 		{
@@ -210,6 +236,20 @@ void PSP_DbgConFrame( void )
 		packet[n] = '\n';
 		packet[n + 1] = 0;
 		Cbuf_AddText( packet );
+	}
+
+	// keep the output until the PC is back
+	if( now - dbg.last_heard > 10.0 )
+		dbg.have_pc = false;
+
+	// joined, but nothing gets here: try it again, less and less often if
+	// there's nobody on the PC. Not while it may be used for a game
+	if( now - dbg.last_heard > dbg.silence && cls.state == ca_disconnected && !SV_Active( ))
+	{
+		dbg.silence = Q_min( dbg.silence * 2.0, 600.0 );
+		PSP_DbgConClose();
+		PSP_NetRejoin( "nothing from the PC" );
+		return;
 	}
 
 	PSP_DbgConFlush();

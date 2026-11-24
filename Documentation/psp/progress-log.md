@@ -799,3 +799,11 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   half transparent grunts look the same up close, additive ones from afar; a live firefight ran without
   ME errors (its pictures weren't compared). A pushed restart left the Wi-Fi join hanging twice
   more (menu running fine both times); cause not known.
+- 2026-11-23 (5): **Wi-Fi with -dbgcon**: the PSP stayed offline after pushed restarts with the menu
+  running fine. The join was already retried forever (and blocked the main thread for up to a
+  minute), but once joined the link was never looked at again. Now the join is a state machine polled
+  every frame (first frame after 10 s instead of 23-42 s), the link is checked every second, and a
+  link with nothing from the PC for 60 s (doubling, only while not in a game) is left and joined
+  again; output is kept while the PC is silent. Tested: pushed restart (5 attempts, 27 s), listener
+  off for 100 s (left after 60 s, back after 9 attempts and 44 s), then a server connect. Whether the
+  outages were dead links isn't known, `wifi.log` on the stick should tell next time.

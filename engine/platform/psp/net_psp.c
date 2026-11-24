@@ -22,6 +22,8 @@ GNU General Public License for more details.
 #include <pspnet_resolver.h>
 #include <psputility_netmodules.h>
 #include <psputility_netparam.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // the network stack and its modules cost memory, so nothing is loaded until
 // the engine wants real sockets (connect, listen server, server browser)
@@ -45,7 +47,48 @@ static struct
 	char     ip[16];
 	int      handler;  // apctl handler id
 	volatile int last_error; // from the apctl handler (runs on the apctl thread)
+
+	// PSP_NetConnectFrame
+	qboolean joining;
+	int      join_profile, join_state, join_attempts;
+	double   join_start, join_next, join_first;
+	double   link_check;
 } psp_net;
+
+/*
+==================
+PSP_NetLog
+
+what happens to the connection with -dbgcon, also into wifi.log in the game
+directory: while the PSP is offline nothing gets to the PC. Kept over restarts
+==================
+*/
+static void PSP_NetLog( const char *fmt, ... )
+{
+	char buf[256];
+	va_list args;
+	int len;
+
+	len = Q_snprintf( buf, sizeof( buf ), "%7.1f s: ", Platform_DoubleTime( ));
+	va_start( args, fmt );
+	Q_vsnprintf( buf + len, sizeof( buf ) - len, fmt, args );
+	va_end( args );
+
+	Con_Printf( "Wi-Fi: %s", buf );
+
+	int fd = open( "wifi.log", O_WRONLY | O_CREAT | O_APPEND, 0777 );
+	if( fd < 0 )
+		return;
+
+	if( lseek( fd, 0, SEEK_END ) > 64 * 1024 )
+	{
+		close( fd );
+		if(( fd = open( "wifi.log", O_WRONLY | O_CREAT | O_TRUNC, 0777 )) < 0 )
+			return;
+	}
+	write( fd, buf, Q_strlen( buf ));
+	close( fd );
+}
 
 static void PSP_NetApctlHandler( int old_state, int new_state, int event, int error, void *arg )
 {
@@ -203,7 +246,9 @@ thread sleeps, ~0.6 ms a frame in a firefight: a short sleep is enough, a
 */
 void PSP_NetFrame( void )
 {
-	if( psp_net.stack )
+	if( psp_net.joining )
+		sceKernelDelayThread( 8 * 1000 ); // the key exchange takes time
+	else if( psp_net.stack )
 		sceKernelDelayThread( 200 );
 }
 
@@ -287,6 +332,143 @@ static void PSP_NetWaitDisconnected( void )
 	}
 }
 
+static void PSP_NetGotIP( void )
+{
+	union SceNetApctlInfo info;
+
+	if( sceNetApctlGetInfo( PSP_NET_APCTL_INFO_IP, &info ) >= 0 )
+		Q_strncpy( psp_net.ip, info.ip, sizeof( psp_net.ip ));
+	else Q_strncpy( psp_net.ip, "0.0.0.0", sizeof( psp_net.ip ));
+
+	psp_net.connected = true;
+	psp_net.joining = false;
+
+	if( sceNetApctlGetInfo( PSP_NET_APCTL_INFO_SSID, &info ) >= 0 )
+		Con_Printf( "Wi-Fi: connected to \"%.32s\", IP address %s\n", info.ssid, psp_net.ip );
+	else Con_Printf( "Wi-Fi: connected, IP address %s\n", psp_net.ip );
+}
+
+/*
+==================
+PSP_NetRejoin
+
+leave the access point, PSP_NetConnectFrame joins it again
+==================
+*/
+void PSP_NetRejoin( const char *why )
+{
+	PSP_NetLog( "%s, joining again\n", why );
+	sceNetApctlDisconnect();
+	psp_net.connected = psp_net.joining = false;
+	psp_net.join_attempts = 0;
+	psp_net.join_next = Platform_DoubleTime() + 2.0;
+}
+
+static void PSP_NetJoinFailed( const char *why, int error )
+{
+	// the access point refuses most joins right after a restart, a few of them is normal
+	if( psp_net.join_attempts <= 3 || psp_net.join_attempts % 10 == 0 )
+		PSP_NetLog( "join %d: %s (0x%08x)\n", psp_net.join_attempts, why, error );
+
+	sceNetApctlDisconnect();
+	psp_net.joining = false;
+	psp_net.join_next = Platform_DoubleTime() + 2.0;
+}
+
+/*
+==================
+PSP_NetConnectFrame
+
+for -dbgcon: join the access point without blocking, as often as it takes, and
+again if the connection is lost. True while there's an IP address
+==================
+*/
+qboolean PSP_NetConnectFrame( void )
+{
+	const double now = Platform_DoubleTime();
+	int ret, state;
+
+	if( psp_net.connected )
+	{
+		if( now < psp_net.link_check )
+			return true;
+
+		psp_net.link_check = now + 1.0;
+
+		if( sceNetApctlGetState( &state ) >= 0 && state == PSP_NET_APCTL_STATE_GOT_IP )
+			return true;
+
+		PSP_NetRejoin( "connection lost" );
+		return false;
+	}
+
+	if( !psp_net.joining )
+	{
+		if( now < psp_net.join_next )
+			return false;
+
+		if( !PSP_NetLoadStack( ))
+		{
+			PSP_NetLog( "can't load the network stack\n" );
+			psp_net.join_next = now + 20.0;
+			return false;
+		}
+
+		if( sceNetApctlGetState( &state ) >= 0 && state != PSP_NET_APCTL_STATE_DISCONNECTED )
+		{
+			// the last attempt isn't over yet
+			sceNetApctlDisconnect();
+			psp_net.join_next = now + 1.0;
+			return false;
+		}
+
+		if( psp_net.join_profile <= 0 && ( psp_net.join_profile = PSP_NetPickProfile( )) < 0 )
+		{
+			PSP_NetLog( "no connection profiles\n" );
+			psp_net.join_next = now + 60.0;
+			return false;
+		}
+
+		if( !psp_net.join_attempts++ )
+			psp_net.join_first = now;
+
+		psp_net.last_error = 0;
+		if(( ret = sceNetApctlConnect( psp_net.join_profile )) < 0 )
+		{
+			PSP_NetJoinFailed( "can't connect", ret );
+			return false;
+		}
+
+		psp_net.joining = true;
+		psp_net.join_start = now;
+		psp_net.join_state = PSP_NET_APCTL_STATE_DISCONNECTED;
+		return false;
+	}
+
+	if(( ret = sceNetApctlGetState( &state )) < 0 )
+	{
+		PSP_NetJoinFailed( "no connection state", ret );
+	}
+	else if( state == PSP_NET_APCTL_STATE_GOT_IP )
+	{
+		PSP_NetGotIP();
+		PSP_NetLog( "joined after %d attempts, %.0f s\n", psp_net.join_attempts, now - psp_net.join_first );
+		psp_net.join_attempts = 0;
+		return true;
+	}
+	else if( state == PSP_NET_APCTL_STATE_DISCONNECTED && psp_net.join_state != PSP_NET_APCTL_STATE_DISCONNECTED )
+	{
+		PSP_NetJoinFailed( "refused", psp_net.last_error );
+	}
+	else if( now - psp_net.join_start > APCTL_TIMEOUT )
+	{
+		PSP_NetJoinFailed( "timed out", state );
+	}
+	else psp_net.join_state = state;
+
+	return false;
+}
+
 /*
 ==================
 PSP_NetConnect
@@ -297,7 +479,6 @@ the selected profile, blocks until there's an IP address
 */
 qboolean PSP_NetConnect( void )
 {
-	union SceNetApctlInfo info;
 	int state, profile;
 
 	if( psp_net.connected )
@@ -305,6 +486,14 @@ qboolean PSP_NetConnect( void )
 
 	if( !PSP_NetLoadStack( ))
 		return false;
+
+	if( psp_net.joining )
+	{
+		// take over from the background
+		psp_net.joining = false;
+		if( sceNetApctlGetState( &state ) >= 0 && state != PSP_NET_APCTL_STATE_GOT_IP )
+			PSP_NetWaitDisconnected();
+	}
 
 	// already connected (e.g. from a previous attempt that timed out late)?
 	if( sceNetApctlGetState( &state ) >= 0 && state == PSP_NET_APCTL_STATE_GOT_IP )
@@ -337,16 +526,7 @@ qboolean PSP_NetConnect( void )
 	return false;
 
 got_ip:
-	if( sceNetApctlGetInfo( PSP_NET_APCTL_INFO_IP, &info ) >= 0 )
-		Q_strncpy( psp_net.ip, info.ip, sizeof( psp_net.ip ));
-	else Q_strncpy( psp_net.ip, "0.0.0.0", sizeof( psp_net.ip ));
-
-	psp_net.connected = true;
-
-	if( sceNetApctlGetInfo( PSP_NET_APCTL_INFO_SSID, &info ) >= 0 )
-		Con_Printf( "Wi-Fi: connected to \"%.32s\", IP address %s\n", info.ssid, psp_net.ip );
-	else Con_Printf( "Wi-Fi: connected, IP address %s\n", psp_net.ip );
-
+	PSP_NetGotIP();
 	return true;
 }
 
@@ -397,7 +577,7 @@ void PSP_NetShutdown( void )
 		Con_Reportf( "Wi-Fi: shut down\n" );
 	}
 
-	psp_net.connected = false;
+	psp_net.connected = psp_net.joining = false;
 }
 
 static void PSP_NetStatus_f( void )
