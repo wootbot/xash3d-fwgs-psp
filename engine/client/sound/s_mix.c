@@ -723,6 +723,14 @@ static int VOX_MixChannelToBuffer( portable_samplepair_t *pbuf, channel_t *chan,
 		{
 			VOX_FreeWord( chan );
 			chan->word_index++;
+
+			if( chan->word_index < CVOXWORDMAX && chan->words[chan->word_index].sfx && S_SoundPending( chan->words[chan->word_index].sfx ))
+			{
+				// the sentence goes on when it's there
+				chan->sfx = chan->words[chan->word_index].sfx;
+				break;
+			}
+
 			VOX_LoadWord( chan );
 
 			if( !FBitSet( chan->flags, FL_CHAN_SENTENCE_FINISHED ))
@@ -810,12 +818,37 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 			}
 		}
 
+		if( !ch->sfx->cache && S_SoundPending( ch->sfx ))
+			continue;
+
 		wavdata_t *sc = S_LoadSound( ch->sfx );
 
 		if( !sc )
 		{
 			S_FreeChannel( ch );
 			continue;
+		}
+
+		// it was waited for
+		if( ch->words && !ch->data )
+		{
+			VOX_LoadWord( ch );
+			if( FBitSet( ch->flags, FL_CHAN_SENTENCE_FINISHED ))
+			{
+				S_FreeChannel( ch );
+				continue;
+			}
+		}
+
+		if( FBitSet( ch->flags, FL_CHAN_PENDING ))
+		{
+			ClearBits( ch->flags, FL_CHAN_PENDING );
+			if( host.realtime > ch->inauduble_free_time && !( FBitSet( sc->flags, SOUND_LOOPED ) && FBitSet( ch->flags, FL_CHAN_USE_LOOP )))
+			{
+				S_FreeChannel( ch ); // too late
+				continue;
+			}
+			ch->inauduble_free_time = 0.0f;
 		}
 
 		// if the sound is unaudible, skip it

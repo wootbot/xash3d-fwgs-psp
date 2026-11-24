@@ -287,8 +287,12 @@ static int SND_GetChannelTimeLeft( const channel_t *ch )
 {
 	int remaining;
 
-	if( FBitSet( ch->flags, FL_CHAN_FINISHED ) || !ch->sfx || !ch->sfx->cache )
+	if( FBitSet( ch->flags, FL_CHAN_FINISHED ) || !ch->sfx )
 		return 0;
+
+	// about a second, until it's loaded
+	if( !ch->sfx->cache )
+		return S_SoundPending( ch->sfx ) ? SOUND_DMA_SPEED : 0;
 
 	if( ch->words ) // sentences are special, count all remaining words
 	{
@@ -308,6 +312,12 @@ static int SND_GetChannelTimeLeft( const channel_t *ch )
 			// don't continue with broken sentences
 			if( !ch->words[i].sfx )
 				break;
+
+			if( S_RequestSound( ch->words[i].sfx ))
+			{
+				remaining += SOUND_DMA_SPEED / 2;
+				continue;
+			}
 
 			if( !( sc = S_LoadSound( ch->words[i].sfx )))
 				break;
@@ -700,14 +710,22 @@ void S_StartSound( const vec3_t pos, int ent, int chan, sound_t handle, float fv
 	else
 	{
 		// regular or streamed sound fx
-		pSource = S_LoadSound( sfx );
+		pSource = S_RequestSound( sfx ) ? NULL : S_LoadSound( sfx );
 		target_chan->name[0] = '\0';
 	}
 
-	if( !pSource )
+	const qboolean pending = !pSource && S_SoundPending( sfx );
+
+	if( !pSource && !pending )
 	{
 		S_FreeChannel( target_chan );
 		return;
+	}
+
+	if( pending )
+	{
+		SetBits( target_chan->flags, FL_CHAN_PENDING );
+		target_chan->inauduble_free_time = host.realtime + S_PENDING_TIME;
 	}
 
 	SND_Spatialize( target_chan );
@@ -715,7 +733,7 @@ void S_StartSound( const vec3_t pos, int ent, int chan, sound_t handle, float fv
 	// If a client can't hear a sound when they FIRST receive the StartSound message,
 	// the client will never be able to hear that sound. This is so that out of
 	// range sounds don't fill the playback buffer. For streaming sounds, we bypass this optimization.
-	if( !target_chan->leftvol && !target_chan->rightvol )
+	if( !target_chan->leftvol && !target_chan->rightvol && !pending )
 	{
 		// looping sounds don't use this optimization because they should stick around until they're killed.
 		if( !sfx->cache || !FBitSet( sfx->cache->flags, SOUND_LOOPED ))
@@ -926,12 +944,12 @@ void S_AmbientSound( const vec3_t pos, int ent, sound_t handle, float fvol, floa
 	else
 	{
 		// load regular or stream sound
-		pSource = S_LoadSound( sfx );
+		pSource = S_RequestSound( sfx ) ? NULL : S_LoadSound( sfx );
 		ch->sfx = sfx;
 		ch->name[0] = '\0';
 	}
 
-	if( !pSource )
+	if( !pSource && !S_SoundPending( sfx ))
 	{
 		S_FreeChannel( ch );
 		return;
@@ -1006,7 +1024,7 @@ int S_GetCurrentStaticSounds( soundlist_t *pout, int size )
 		VectorCopy( ch->origin, pout->origin );
 		pout->volume = (float)ch->master_vol / 255.0f;
 		pout->attenuation = ch->dist_mult * SND_CLIP_DISTANCE;
-		pout->looping = ( FBitSet( ch->flags, FL_CHAN_USE_LOOP ) && FBitSet( ch->sfx->cache->flags, SOUND_LOOPED ));
+		pout->looping = ( FBitSet( ch->flags, FL_CHAN_USE_LOOP ) && ch->sfx->cache && FBitSet( ch->sfx->cache->flags, SOUND_LOOPED ));
 		pout->pitch = ch->basePitch;
 		pout->channel = ch->entchannel;
 		pout->wordIndex = ch->word_index;
@@ -1042,7 +1060,7 @@ int S_GetCurrentDynamicSounds( soundlist_t *pout, int size )
 		if( !ch->sfx || !ch->sfx->name[0] || !Q_stricmp( ch->sfx->name, "*default" ))
 			continue;	// don't serialize default sounds
 
-		looped = ( FBitSet( ch->flags, FL_CHAN_USE_LOOP ) && FBitSet( ch->sfx->cache->flags, SOUND_LOOPED ));
+		looped = ( FBitSet( ch->flags, FL_CHAN_USE_LOOP ) && ch->sfx->cache && FBitSet( ch->sfx->cache->flags, SOUND_LOOPED ));
 
 		if( ch->entchannel == CHAN_STATIC && looped && !Host_IsQuakeCompatible())
 			continue;	// never serialize static looped sounds. It will be restoring in game code
@@ -1656,6 +1674,7 @@ void SND_UpdateSound( void )
 
 #if XASH_PSP
 	snd_listener_set = false;
+	S_LoadThink();
 #endif
 	if( clgame.soundFuncs.pfnS_UpdateSound )
 		clgame.soundFuncs.pfnS_UpdateSound();
@@ -2031,6 +2050,9 @@ qboolean S_Init( void )
 	Cvar_RegisterVariable( &s_mixahead );
 #if XASH_PSP
 	{ extern convar_t s_mixchannels, s_mixme; Cvar_RegisterVariable( &s_mixchannels ); Cvar_RegisterVariable( &s_mixme ); }
+#endif
+#if XASH_PSP
+	Cvar_RegisterVariable( &s_async );
 #endif
 	Cvar_RegisterVariable( &s_show );
 	Cvar_RegisterVariable( &s_lerping );

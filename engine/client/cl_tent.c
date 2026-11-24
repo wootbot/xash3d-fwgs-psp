@@ -3609,6 +3609,33 @@ int GAME_EXPORT CL_DecalIndexFromName( const char *name )
 	return 0; // invalid decal
 }
 
+#if XASH_PSP
+/*
+===============
+CL_PrecacheDecals
+
+the ones every fight needs: loading one when it's first drawn takes ~70 ms
+(opening decals.wad most of it)
+===============
+*/
+void CL_PrecacheDecals( void )
+{
+	static const char *const names[] = { "{shot", "{bigshot", "{scorch", "{smscorch", "{blood", "{yblood", "{bproof", "{break", "{spit", "{mommablob", "{gargstomp" };
+
+	for( int i = 1; i < MAX_DECALS && host.draw_decals[i][0]; i++ )
+	{
+		for( int k = 0; k < ARRAYSIZE( names ); k++ )
+		{
+			if( !Q_strnicmp( host.draw_decals[i], names[k], Q_strlen( names[k] )))
+			{
+				CL_DecalIndex( i );
+				break;
+			}
+		}
+	}
+}
+#endif
+
 /*
 ===============
 CL_DecalIndex

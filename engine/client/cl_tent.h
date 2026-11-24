@@ -86,6 +86,9 @@ void CL_DecalShoot( int textureIndex, int entityIndex, int modelIndex, float *po
 void CL_DecalRemoveAll( int textureIndex );
 int CL_DecalIndexFromName( const char *name );
 int CL_DecalIndex( int id );
+#if XASH_PSP
+void CL_PrecacheDecals( void );
+#endif
 
 // RefAPI
 struct particle_s *CL_AllocParticleFast( void );

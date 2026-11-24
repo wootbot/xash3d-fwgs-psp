@@ -94,6 +94,18 @@ static wavdata_t *S_CreateDefaultSound( void )
 	return sc;
 }
 
+static wavdata_t *S_ProcessSound( wavdata_t *sc )
+{
+	if( sc->rate < SOUND_11k ) // some bad sounds
+		Sound_Process( &sc, SOUND_11k, sc->width, sc->channels, SOUND_RESAMPLE );
+	else if( sc->rate > SOUND_11k && sc->rate < SOUND_22k ) // some bad sounds
+		Sound_Process( &sc, SOUND_22k, sc->width, sc->channels, SOUND_RESAMPLE );
+	else if( sc->rate > SOUND_22k && sc->rate != SOUND_44k ) // some bad sounds
+		Sound_Process( &sc, SOUND_44k, sc->width, sc->channels, SOUND_RESAMPLE );
+
+	return sc;
+}
+
 /*
 =================
 S_LoadSound
@@ -137,17 +149,175 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 
 	if( !sc ) sc = S_CreateDefaultSound();
 
-	if( sc->rate < SOUND_11k ) // some bad sounds
-		Sound_Process( &sc, SOUND_11k, sc->width, sc->channels, SOUND_RESAMPLE );
-	else if( sc->rate > SOUND_11k && sc->rate < SOUND_22k ) // some bad sounds
-		Sound_Process( &sc, SOUND_22k, sc->width, sc->channels, SOUND_RESAMPLE );
-	else if( sc->rate > SOUND_22k && sc->rate != SOUND_44k ) // some bad sounds
-		Sound_Process( &sc, SOUND_44k, sc->width, sc->channels, SOUND_RESAMPLE );
-
-	sfx->cache = sc;
+	sfx->cache = S_ProcessSound( sc );
 
 	return sfx->cache;
 }
+
+#if XASH_PSP
+/*
+=============================================================================
+
+Sounds load when they're first played (S_EndRegistration), and most of the
+~40 ms that takes is the memory stick looking for the file. So in a game they're
+requested: a thread reads the file, their channels wait for it.
+
+=============================================================================
+*/
+#define S_LOAD_QUEUE	64	// a power of 2
+
+// cache lines of its own: the stick's driver drops them from the cache while the main thread
+// runs, what it wrote next to the buffer would be lost
+#define S_LOAD_ALIGNED( p )	((byte *)(((uintptr_t)( p ) + 63 ) & ~63 ))
+
+CVAR_DEFINE_AUTO( s_async, "1", FCVAR_ARCHIVE, "load sounds in the background" );
+
+static struct
+{
+	struct
+	{
+		sfx_t	*sfx;
+		char	name[MAX_QPATH];	// it may be another sound's by then
+	} queue[S_LOAD_QUEUE];
+	uint	head, tail;
+	byte	*buffer;
+	string	path;	// of the one being read, as FS_LoadSound wants it
+} s_loadq;
+
+qboolean S_SoundPending( const sfx_t *sfx )
+{
+	for( uint i = s_loadq.head; i != s_loadq.tail; i++ )
+	{
+		if( s_loadq.queue[i % S_LOAD_QUEUE].sfx == sfx )
+			return true;
+	}
+
+	return false;
+}
+
+// true: it's on its way. False: it's there, or S_LoadSound it
+qboolean S_RequestSound( sfx_t *sfx )
+{
+	if( !sfx || sfx->cache )
+		return false;
+
+	if( S_SoundPending( sfx ))
+		return true;
+
+	if( !s_async.value || cls.state != ca_active || s_registering
+		|| s_loadq.tail - s_loadq.head >= S_LOAD_QUEUE || COM_StringEmpty( sfx->name ) || sfx->name[0] == '!' || !Q_stricmp( sfx->name, "*default" ))
+		return false;
+
+	s_loadq.queue[s_loadq.tail % S_LOAD_QUEUE].sfx = sfx;
+	Q_strncpy( s_loadq.queue[s_loadq.tail % S_LOAD_QUEUE].name, sfx->name, sizeof( s_loadq.queue[0].name ));
+	s_loadq.tail++;
+	return true;
+}
+
+// the sounds they're for go, or the files
+static void S_LoadCancel( void )
+{
+	PSP_AioReset();
+	if( s_loadq.buffer )
+		Mem_Free( s_loadq.buffer );
+	s_loadq.buffer = NULL;
+	s_loadq.head = s_loadq.tail = 0;
+}
+
+// a file of the sound on the stick
+static qboolean S_LoadPath( const char *name, string diskpath )
+{
+	static const char *const exts[] = { "wav", "mp3" };
+	const char *ext = COM_FileExtension( name );
+
+	if( name[0] == '*' )
+		name++;
+
+	for( int i = 0; i < ARRAYSIZE( exts ); i++ )
+	{
+		const qboolean has = !Q_stricmp( ext, exts[i] );
+
+		// another extension is part of the name
+		if( !has && ( !Q_stricmp( ext, "wav" ) || !Q_stricmp( ext, "mp3" )))
+			continue;
+
+		if( Q_snprintf( s_loadq.path, sizeof( s_loadq.path ), has ? "%s%s" : "%s%s.%s", DEFAULT_SOUNDPATH, name, exts[i] ) < 0 )
+			return false;
+
+		if( g_fsapi.GetFullDiskPath( diskpath, sizeof( string ), s_loadq.path, false ))
+			return true;
+	}
+
+	return false;
+}
+
+// once a frame
+void S_LoadThink( void )
+{
+	string diskpath;
+
+	if( s_loadq.head == s_loadq.tail )
+		return;
+
+	sfx_t *sfx = s_loadq.queue[s_loadq.head % S_LOAD_QUEUE].sfx;
+	const qboolean wanted = !sfx->cache && !Q_strcmp( sfx->name, s_loadq.queue[s_loadq.head % S_LOAD_QUEUE].name );
+
+	switch( PSP_AioState( ))
+	{
+	case PSP_AIO_IDLE:
+		if( !wanted )
+		{
+			s_loadq.head++;
+			return;
+		}
+
+		// in an archive, or not there
+		if( !S_LoadPath( sfx->name, diskpath ) || !PSP_AioOpen( diskpath ))
+		{
+			s_loadq.head++;
+			S_LoadSound( sfx );
+		}
+		return;
+	case PSP_AIO_OPEN:
+		Mem_SetSoftFail( true );
+		if( wanted && PSP_AioSize() > 0 )
+			s_loadq.buffer = Mem_Malloc( sndpool, PSP_AioSize() + 128 );
+		Mem_SetSoftFail( false );
+
+		if( s_loadq.buffer )
+		{
+			PSP_AioRead( S_LOAD_ALIGNED( s_loadq.buffer ));
+			return;
+		}
+		break; // no memory, no sound this time
+	case PSP_AIO_DONE:
+		if( wanted )
+		{
+			string name;
+			wavdata_t *sc;
+
+			Q_snprintf( name, sizeof( name ), "#%s", s_loadq.path );
+			Mem_SetSoftFail( true );
+			sc = FS_LoadSound( name, S_LOAD_ALIGNED( s_loadq.buffer ), PSP_AioSize( ));
+			if( !Mem_SetSoftFail( false ) || sc )
+				sfx->cache = S_ProcessSound( sc ? sc : S_CreateDefaultSound( ));
+		}
+		break;
+	case PSP_AIO_FAILED:
+		if( wanted )
+			sfx->cache = S_ProcessSound( S_CreateDefaultSound( ));
+		break;
+	default:
+		return;
+	}
+
+	PSP_AioReset();
+	if( s_loadq.buffer )
+		Mem_Free( s_loadq.buffer );
+	s_loadq.buffer = NULL;
+	s_loadq.head++;
+}
+#endif
 
 /*
 ==================
@@ -290,6 +460,10 @@ void S_EndRegistration( void )
 	if( !s_registering || !snd.initialized )
 		return;
 
+#if XASH_PSP
+	S_LoadCancel();
+#endif
+
 	// free any sounds not from this registration sequence
 	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
 	{
@@ -301,6 +475,16 @@ void S_EndRegistration( void )
 	}
 
 #if XASH_PSP
+	// list their directories now (dir.c): the first lookup in one takes ~40 ms
+	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
+	{
+		string path;
+
+		if( sfx->name[0] && sfx->name[0] != '!' && Q_snprintf( path, sizeof( path ), DEFAULT_SOUNDPATH "%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name ) > 0 )
+			g_fsapi.FileExists( path, false );
+	}
+	g_fsapi.FileExists( DEFAULT_SOUNDPATH "fvox/bell.wav", false );
+
 	vox_kept_bytes = 0; // the sentence words kept by VOX_FreeWord went with the old map's sounds
 #endif
 
@@ -345,7 +529,7 @@ sound_t S_RegisterSound( const char *name )
 	if( !sfx ) return -1;
 
 	sfx->servercount = cl.servercount;
-	if( !s_registering ) S_LoadSound( sfx );
+	if( !s_registering && !S_RequestSound( sfx )) S_LoadSound( sfx );
 
 	return sfx - s_knownSfx;
 }
@@ -396,6 +580,10 @@ void S_FreeSounds( void )
 
 	// stop all sounds
 	S_StopAllSounds( true );
+
+#if XASH_PSP
+	S_LoadCancel();
+#endif
 
 	// free all sounds
 	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )

@@ -69,6 +69,16 @@ extern convar_t s_warn_late_precache;
 extern convar_t snd_mute_losefocus;
 
 wavdata_t *S_LoadSound( sfx_t *sfx );
+#if XASH_PSP
+qboolean S_SoundPending( const sfx_t *sfx );
+qboolean S_RequestSound( sfx_t *sfx );
+void S_LoadThink( void );
+extern convar_t s_async;
+#else
+#define S_SoundPending( sfx )	false
+#define S_RequestSound( sfx )	false
+#endif
+#define S_PENDING_TIME	1.0f	// a sound that comes later than this isn't played
 float S_GetMasterVolume( void );
 float S_GetMusicVolume( void );
 

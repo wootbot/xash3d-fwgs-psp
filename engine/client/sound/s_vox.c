@@ -533,6 +533,19 @@ void VOX_LoadSound( channel_t *ch, const char *pszin )
 
 	ch->sfx = ch->words[0].sfx;
 	ch->word_index = 0;
+
+#if XASH_PSP
+	// all of them, in order: the others are there when it's their turn
+	for( int i = 0; i < j; i++ )
+		S_RequestSound( ch->words[i].sfx );
+
+	if( ch->sfx && S_SoundPending( ch->sfx ))
+	{
+		ch->data = NULL;
+		return; // the mixer calls VOX_LoadWord
+	}
+#endif
+
 	VOX_LoadWord( ch );
 }
 

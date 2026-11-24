@@ -41,6 +41,7 @@ For more information, please refer to <http://unlicense.org/>
 #define FL_CHAN_USE_LOOP          BIT( 0 ) // don't loop default and local sounds
 #define FL_CHAN_STATIC_SOUND      BIT( 1 ) // use origin instead of fetching entnum's origin
 #define FL_CHAN_LOCAL_SOUND       BIT( 2 ) // it's a local menu sound (not looped, not paused)
+#define FL_CHAN_PENDING           BIT( 3 ) // waits for its sound to be loaded
 #define FL_CHAN_SENTENCE_FINISHED BIT( 4 ) // if set, finished playing sentence
 #define FL_CHAN_FINISHED          BIT( 5 ) // if set, finished playing single word
 
