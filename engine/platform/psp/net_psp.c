@@ -257,7 +257,7 @@ void PSP_NetFrame( void )
 	if( psp_net.joining )
 		sceKernelDelayThread( 8 * 1000 ); // the key exchange takes time
 	else if( psp_net.stack )
-		sceKernelDelayThread( bound( 200, elapsed / 25, 2000 ));
+		sceKernelDelayThread( elapsed < 12000 ? 200 : Q_min( elapsed / 25, 2000 ));
 }
 
 qboolean PSP_NetIsConnected( void )

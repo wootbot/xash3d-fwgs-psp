@@ -345,6 +345,12 @@ static void CL_ProcessEntityUpdate( cl_entity_t *ent )
 	VectorCopy( ent->origin, ent->attachment[3] );
 }
 
+#if XASH_PSP
+typedef float cl_lerp_t; // no doubles in the FPU, and animtime is one
+#else
+typedef double cl_lerp_t;
+#endif
+
 /*
 ==================
 CL_FindInterpolationUpdates
@@ -352,7 +358,7 @@ CL_FindInterpolationUpdates
 find two timestamps
 ==================
 */
-static qboolean CL_FindInterpolationUpdates( cl_entity_t *ent, double targettime, position_history_t **ph0, position_history_t **ph1 )
+static qboolean CL_FindInterpolationUpdates( cl_entity_t *ent, cl_lerp_t targettime, position_history_t **ph0, position_history_t **ph1 )
 {
 	qboolean	extrapolate = true;
 	uint		imod = ent->current_position;
@@ -361,7 +367,7 @@ static qboolean CL_FindInterpolationUpdates( cl_entity_t *ent, double targettime
 
 	for( uint i = 1; i < HISTORY_MAX - 1; i++ )
 	{
-		double at = ent->ph[( imod - i ) & HISTORY_MASK].animtime;
+		cl_lerp_t at = ent->ph[( imod - i ) & HISTORY_MASK].animtime;
 
 		if( at == 0.0f )
 			break;
@@ -389,21 +395,21 @@ CL_PureOrigin
 non-local players interpolation
 ==================
 */
-static void CL_PureOrigin( cl_entity_t *ent, double t, vec3_t outorigin, vec3_t outangles )
+static void CL_PureOrigin( cl_entity_t *ent, cl_lerp_t t, vec3_t outorigin, vec3_t outangles )
 {
 	position_history_t	*ph0, *ph1;
 
 	// NOTE: ph0 is next, ph1 is a prev
 	CL_FindInterpolationUpdates( ent, t, &ph0, &ph1 );
 
-	double t0 = ph0->animtime;
-	double t1 = ph1->animtime;
+	cl_lerp_t t0 = ph0->animtime;
+	cl_lerp_t t1 = ph1->animtime;
 
 	if( t0 != 0.0 )
 	{
 		vec4_t	q, q1, q2;
 		vec3_t	delta;
-		double	frac;
+		cl_lerp_t	frac;
 
 		VectorSubtract( ph0->origin, ph1->origin, delta );
 
@@ -411,10 +417,17 @@ static void CL_PureOrigin( cl_entity_t *ent, double t, vec3_t outorigin, vec3_t 
 			frac = ( t - t1 ) / ( t0 - t1 );
 		else frac = 1.0;
 
-		frac = bound( 0.0, frac, 1.2 );
+		frac = bound( 0.0f, frac, 1.2f );
 
 		VectorMA( ph1->origin, frac, delta, outorigin );
 
+#if XASH_PSP
+		if( VectorCompare( ph0->angles, ph1->angles ))
+		{
+			VectorCopy( ph0->angles, outangles );
+			return;
+		}
+#endif
 		AngleQuaternion( ph0->angles, q1, false );
 		AngleQuaternion( ph1->angles, q2, false );
 		QuaternionSlerp( q2, q1, frac, q );
@@ -467,11 +480,11 @@ static int CL_InterpolateModel( cl_entity_t *e )
 	if( cl.local.moving && cl.local.onground == e->index )
 		return 1;
 
-	double t = cl.time - cl_interp.value;
+	cl_lerp_t t = cl.time - cl_interp.value;
 	CL_FindInterpolationUpdates( e, t, &ph0, &ph1 );
 
-	double t1 = ph1->animtime;
-	double t2 = ph0->animtime;
+	cl_lerp_t t1 = ph1->animtime;
+	cl_lerp_t t2 = ph0->animtime;
 
 	if( t - t1 < 0.0f )
 		return 0;

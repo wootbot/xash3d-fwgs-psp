@@ -265,8 +265,37 @@ then with clipping against them.
 This sets up the first phase.
 =============
 */
+#if XASH_PSP
+// what CL_SetUpPlayerPrediction and CL_SetSolidPlayers made this frame: every shot of every
+// player calls them, 2 ms with 32 players
+static struct
+{
+	qboolean	valid, include_local, solid_valid;
+	int	parsecount, framecount, validsequence;
+	double	time;
+	int	numsolid;
+	byte	solid_player[MAX_CLIENTS];
+	physent_t	solid[MAX_CLIENTS];
+} cl_playerphys;
+#endif
+
 void GAME_EXPORT CL_SetUpPlayerPrediction( int dopred, int bIncludeLocalClient )
 {
+#if XASH_PSP
+	const qboolean include_local = bIncludeLocalClient || !FBitSet( cl.frames[cl.parsecountmod].playerstate[cl.playernum].effects, EF_NODRAW );
+
+	if( cl_playerphys.valid && cl_playerphys.include_local == include_local && cl_playerphys.parsecount == cl.parsecount
+		&& cl_playerphys.framecount == host.framecount && cl_playerphys.time == cl.time && cl_playerphys.validsequence == cl.validsequence )
+		return;
+
+	cl_playerphys.valid = true;
+	cl_playerphys.solid_valid = false;
+	cl_playerphys.include_local = include_local;
+	cl_playerphys.parsecount = cl.parsecount;
+	cl_playerphys.framecount = host.framecount;
+	cl_playerphys.time = cl.time;
+	cl_playerphys.validsequence = cl.validsequence;
+#endif
 	for( int i = 0; i < MAX_CLIENTS; i++ )
 	{
 		entity_state_t *state = &cl.frames[cl.parsecountmod].playerstate[i];
@@ -609,6 +638,40 @@ void GAME_EXPORT CL_SetSolidPlayers( int playernum )
 	if( !cl_solid_players.value )
 		return;
 
+#if XASH_PSP
+	if( playernum != -1 && cl_playerphys.valid && cl_playerphys.parsecount == cl.parsecount && cl_playerphys.framecount == host.framecount )
+	{
+		if( !cl_playerphys.solid_valid )
+		{
+			cl_playerphys.numsolid = 0;
+			for( int i = 0; i < MAX_CLIENTS; i++ )
+			{
+				const predicted_player_t *player = &cls.predicted_players[i];
+				physent_t *pe = &cl_playerphys.solid[cl_playerphys.numsolid];
+
+				if( !player->active || player->solid == SOLID_NOT )
+					continue;
+
+				CL_CopyEntityToPhysEnt( pe, &cl.frames[cl.parsecountmod].playerstate[i], false );
+				VectorCopy( player->origin, pe->origin );
+				VectorCopy( player->angles, pe->angles );
+				VectorCopy( host.player_mins[player->usehull], pe->mins );
+				VectorCopy( host.player_maxs[player->usehull], pe->maxs );
+				pe->movetype = player->movetype;
+				pe->solid = player->solid;
+				cl_playerphys.solid_player[cl_playerphys.numsolid++] = i;
+			}
+			cl_playerphys.solid_valid = true;
+		}
+
+		for( int i = 0; i < cl_playerphys.numsolid && clgame.pmove->numphysent < MAX_PHYSENTS; i++ )
+		{
+			if( cl_playerphys.solid_player[i] != playernum )
+				clgame.pmove->physents[clgame.pmove->numphysent++] = cl_playerphys.solid[i];
+		}
+		return;
+	}
+#endif
 	for( int i = 0; i < MAX_CLIENTS; i++ )
 	{
 		entity_state_t *state = &cl.frames[cl.parsecountmod].playerstate[i];
