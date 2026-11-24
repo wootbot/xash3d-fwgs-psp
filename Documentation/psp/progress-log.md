@@ -902,3 +902,10 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   0.7 s, ping 500-1000 ms. The sleep is 4% of a long frame now: gaps 0.2 s, ping 80-180 ms, the lowest net
   pool 75-90 KB instead of 0. 12-14 updates a second are what's left: the server's own limit is ~19 KB/s
   (the same with rate 100000). `net_showpackets 1` shows it, tools/dbg/netburst.sh sums it up.
+- 2026-11-24: **Stress scene with the bots firing.** The bots had only fired their first 50 rounds (the
+  plugin's ammo never reached them): all numbers above are without gunfire. The plugin plays the MP5 event
+  and the muzzle flash itself now, 10 a second and bot: 12 fps. A third of the frame were
+  EV_SetUpPlayerPrediction (the positions of all players, 1.3 ms) and EV_SetSolidPlayers of every shot: kept
+  for the frame, 23 fps.
+  - A stretched alien slave beam (user report): the server sends a beam in view without the entity at its end
+    (R_BeamGetEntity: no beam if that wasn't in one of the last 3 updates).
