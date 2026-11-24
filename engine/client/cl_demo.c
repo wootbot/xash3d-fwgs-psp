@@ -239,6 +239,50 @@ static void CL_DemoAborted( void )
 	Cvar_DirectSet( &v_dark, "0" );
 }
 
+#if XASH_PSP
+// a write to the memory stick takes most of a millisecond however small it is,
+// and a frame has dozens of them: they are collected
+static byte	demo_writebuf[16384];
+static int	demo_writelen;
+
+static void CL_DemoFlush( void )
+{
+	if( cls.demofile && demo_writelen > 0 )
+		FS_Write( cls.demofile, demo_writebuf, demo_writelen );
+	demo_writelen = 0;
+}
+
+static void CL_DemoWrite( file_t *file, const void *data, size_t size )
+{
+	if( file != cls.demofile || !cls.demorecording )
+	{
+		FS_Write( file, data, size );
+		return;
+	}
+
+	if( demo_writelen + size > sizeof( demo_writebuf ))
+		CL_DemoFlush();
+
+	if( size > sizeof( demo_writebuf ))
+	{
+		FS_Write( file, data, size );
+		return;
+	}
+
+	memcpy( demo_writebuf + demo_writelen, data, size );
+	demo_writelen += size;
+}
+
+static int CL_DemoTell( void )
+{
+	return FS_Tell( cls.demofile ) + demo_writelen;
+}
+#else
+#define CL_DemoFlush()
+#define CL_DemoWrite	FS_Write
+#define CL_DemoTell()	FS_Tell( cls.demofile )
+#endif
+
 /*
 ====================
 CL_WriteDemoCmdHeader
@@ -252,11 +296,11 @@ static void CL_WriteDemoCmdHeader( byte cmd, file_t *file )
 	if( !file ) return;
 
 	// command
-	FS_Write( file, &cmd, sizeof( byte ));
+	CL_DemoWrite( file, &cmd, sizeof( byte ));
 
 	// time offset
 	float dt = (float)(CL_GetDemoRecordClock() - demo.starttime);
-	FS_Write( file, &dt, sizeof( float ));
+	CL_DemoWrite( file, &dt, sizeof( float ));
 }
 
 /*
@@ -296,8 +340,8 @@ void CL_WriteDemoUserCmd( int cmdnumber )
 
 	CL_WriteDemoCmdHeader( dem_usercmd, cls.demofile );
 
-	FS_Write( cls.demofile, &cls.netchan.outgoing_sequence, sizeof( int ));
-	FS_Write( cls.demofile, &cmdnumber, sizeof( int ));
+	CL_DemoWrite( cls.demofile, &cls.netchan.outgoing_sequence, sizeof( int ));
+	CL_DemoWrite( cls.demofile, &cmdnumber, sizeof( int ));
 
 	// write usercmd_t
 	MSG_Init( &buf, "UserCmd", data, sizeof( data ));
@@ -305,8 +349,8 @@ void CL_WriteDemoUserCmd( int cmdnumber )
 
 	bytes = MSG_GetNumBytesWritten( &buf );
 
-	FS_Write( cls.demofile, &bytes, sizeof( word ));
-	FS_Write( cls.demofile, data, bytes );
+	CL_DemoWrite( cls.demofile, &bytes, sizeof( word ));
+	CL_DemoWrite( cls.demofile, data, bytes );
 }
 
 /*
@@ -321,13 +365,13 @@ static void CL_WriteDemoSequence( file_t *file )
 {
 	Assert( file != NULL );
 
-	FS_Write( file, &cls.netchan.incoming_sequence, sizeof( int ));
-	FS_Write( file, &cls.netchan.incoming_acknowledged, sizeof( int ));
-	FS_Write( file, &cls.netchan.incoming_reliable_acknowledged, sizeof( int ));
-	FS_Write( file, &cls.netchan.incoming_reliable_sequence, sizeof( int ));
-	FS_Write( file, &cls.netchan.outgoing_sequence, sizeof( int ));
-	FS_Write( file, &cls.netchan.reliable_sequence, sizeof( int ));
-	FS_Write( file, &cls.netchan.last_reliable_sequence, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.incoming_sequence, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.incoming_acknowledged, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.incoming_reliable_acknowledged, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.incoming_reliable_sequence, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.outgoing_sequence, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.reliable_sequence, sizeof( int ));
+	CL_DemoWrite( file, &cls.netchan.last_reliable_sequence, sizeof( int ));
 }
 
 /*
@@ -357,10 +401,10 @@ void CL_WriteDemoMessage( qboolean startup, int start, sizebuf_t *msg )
 	CL_WriteDemoSequence( file );
 
 	// write the length out.
-	FS_Write( file, &swlen, sizeof( int ));
+	CL_DemoWrite( file, &swlen, sizeof( int ));
 
 	// output the buffer. Skip the network packet stuff.
-	FS_Write( file, MSG_GetData( msg ) + start, swlen );
+	CL_DemoWrite( file, MSG_GetData( msg ) + start, swlen );
 }
 
 /*
@@ -381,10 +425,10 @@ void GAME_EXPORT CL_WriteDemoUserMessage( int size, byte *buffer )
 	CL_WriteDemoCmdHeader( dem_userdata, cls.demofile );
 
 	// write the length out.
-	FS_Write( cls.demofile, &size, sizeof( int ));
+	CL_DemoWrite( cls.demofile, &size, sizeof( int ));
 
 	// output the buffer.
-	FS_Write( cls.demofile, buffer, size );
+	CL_DemoWrite( cls.demofile, buffer, size );
 }
 
 /*
@@ -492,6 +536,8 @@ static void CL_StopRecord( void )
 	float stoptime = CL_GetDemoRecordClock();
 	if( clgame.hInstance ) clgame.dllFuncs.pfnReset();
 
+	CL_DemoFlush();
+
 	int curpos = FS_Tell( cls.demofile );
 	demo.entry->length = curpos - demo.entry->offset;
 	demo.entry->playback_time = stoptime - demo.realstarttime;
@@ -537,7 +583,7 @@ void CL_DrawDemoRecording( void )
 	if(!( host_developer.value && cls.demorecording ))
 		return;
 
-	int pos = FS_Tell( cls.demofile );
+	int pos = CL_DemoTell();
 	Q_snprintf( string, sizeof( string ), "^1RECORDING:^7 %s: %s time: %02d:%02d", cls.demoname,
 		Q_memprint( pos ), (int)(cls.demotime / 60.0f ), (int)fmod( cls.demotime, 60.0f ));
 
@@ -952,6 +998,12 @@ qboolean CL_DemoReadMessage( byte *buffer, size_t *length )
 	if( cls.demoplayback == DEMO_QUAKE1 )
 		return CL_DemoReadMessageQuake( buffer, length );
 
+#if XASH_PSP
+	// frames between two updates from the server count too
+	if( cls.timedemo && cls.state == ca_active )
+		CL_TimeDemoFrame();
+#endif
+
 	do
 	{
 		qboolean	bSkipMessage = false;
@@ -1027,10 +1079,6 @@ qboolean CL_DemoReadMessage( byte *buffer, size_t *length )
 	}
 
 	tdlastdemoframe = host.framecount;
-#if XASH_PSP
-	if( cls.timedemo && cls.state == ca_active )
-		CL_TimeDemoFrame();
-#endif
 
 	if( !cls.demofile )
 		return false;
@@ -1159,6 +1207,12 @@ static struct
 
 static void CL_TimeDemoFrame( void )
 {
+	static int frame;
+
+	if( frame == host.framecount )
+		return;
+	frame = host.framecount;
+
 	if( td_stats.last > 0.0 && td_stats.count < TD_MAXFRAMES )
 		td_stats.dt[td_stats.count++] = host.realtime - td_stats.last;
 	td_stats.last = host.realtime;
@@ -1204,8 +1258,8 @@ static void CL_TimeDemoReport( void )
 	for( int i = 0; i < low; i++ )
 		lowtime += td_stats.dt[i];
 
-	Con_Printf( "timedemo in game: %i frames %5.3f seconds %5.1f fps, 1%% low %5.1f fps, min %5.1f fps, %i frames under 60 fps, %i under 100\n",
-		n, total, n / total, low / lowtime, 1.0f / td_stats.dt[0], over16, over10 );
+	Con_Printf( "timedemo in game: %i frames %5.3f seconds %5.1f fps, median %5.1f ms, 1%% low %5.1f fps, min %5.1f fps, %i frames under 60 fps, %i under 100\n",
+		n, total, n / total, td_stats.dt[n / 2] * 1000.0f, low / lowtime, 1.0f / td_stats.dt[0], over16, over10 );
 }
 #endif
 
