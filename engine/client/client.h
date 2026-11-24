@@ -252,19 +252,29 @@ typedef struct
 	entity_state_t	instanced_baseline[MAX_CUSTOM_BASELINES];
 	int		instanced_baseline_count;
 
+#if !XASH_PSP // nothing reads it
 	char		sound_precache[MAX_SOUNDS][MAX_QPATH];
+#endif
 	char		event_precache[MAX_EVENTS][MAX_QPATH];
 	char		files_precache[MAX_CUSTOM][MAX_QPATH];
 	lightstyle_t	lightstyles[MAX_LIGHTSTYLES];
 	int		numfiles;
 
+#if XASH_PSP
+	consistency_t	*consistency_list;		// as many as there are
+#else
 	consistency_t	consistency_list[MAX_MODELS];
+#endif
 	int		num_consistency;
 
 	qboolean		need_force_consistency_response;
 	resource_t	resourcesonhand;
 	resource_t	resourcesneeded;
+#if XASH_PSP
+	resource_t	resourcelist[16];		// the client's own: the logo
+#else
 	resource_t	resourcelist[MAX_RESOURCES];
+#endif
 	int		num_resources;
 	int		num_sent_resources;
 	byte		sent_resources_hash[16];

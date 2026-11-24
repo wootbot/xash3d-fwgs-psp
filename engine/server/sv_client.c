@@ -938,7 +938,7 @@ SV_CheckRateLimit
 */
 static qboolean SV_CheckRateLimit( netadr_t from MAYBE_UNUSED, sv_ratelimit_t kind MAYBE_UNUSED, qboolean take MAYBE_UNUSED )
 {
-#if !XASH_LOW_MEMORY // these targets don't host public servers, always allow
+#if !XASH_LOW_MEMORY && !XASH_PSP // these targets don't host public servers, always allow
 	enum { CACHE_SIZE = 8192 };
 	// a table per kind, so flooding with one kind of request can't deplete the others
 	static struct { uint32_t last; float tokens; } cache[SV_RATELIMIT_COUNT][CACHE_SIZE];
@@ -1397,11 +1397,12 @@ a deathmatch.
 */
 static void SV_PutClientInServer( sv_client_t *cl )
 {
-	static byte    	msg_buf[MAX_INIT_MSG + 0x200];	// MAX_INIT_MSG + some space
+	const size_t	msg_size = MAX_INIT_MSG + 0x200;	// MAX_INIT_MSG + some space
+	byte		*msg_buf = Mem_Malloc( host.mempool, msg_size );
 	edict_t		*ent = cl->edict;
 	sizebuf_t		msg;
 
-	MSG_Init( &msg, "Spawn", msg_buf, sizeof( msg_buf ));
+	MSG_Init( &msg, "Spawn", msg_buf, msg_size );
 
 	if( sv.loadgame )
 	{
@@ -1518,6 +1519,8 @@ static void SV_PutClientInServer( sv_client_t *cl )
 			Netchan_FragSend( &cl->netchan );
 		}
 	}
+
+	Mem_Free( msg_buf );
 }
 
 /*

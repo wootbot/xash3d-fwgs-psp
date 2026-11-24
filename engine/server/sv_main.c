@@ -1021,7 +1021,9 @@ void SV_Init( void )
 
 	SV_InitFilter();
 	SV_ClearGameState ();	// delete all temporary *.hl files
+#if !XASH_PSP // only when a local game starts: ~2.5 MB, nothing needs it for playing on a server
 	SV_InitGame( GI->gamemode != GAME_SINGLEPLAYER_ONLY );
+#endif
 }
 
 /*

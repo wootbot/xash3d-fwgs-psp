@@ -202,7 +202,7 @@ static resource_t *CL_AddResource( resourcetype_t type, const char *name, int si
 {
 	resource_t	*r = &cl.resourcelist[cl.num_resources];
 
-	if( cl.num_resources >= MAX_RESOURCES )
+	if( cl.num_resources >= ARRAYSIZE( cl.resourcelist ))
 		Host_Error( "Too many resources on client\n" );
 	cl.num_resources++;
 
@@ -1637,6 +1637,10 @@ void CL_ClearState( void )
 #endif
 	NetAPI_CancelAllRequests();
 
+#if XASH_PSP
+	if( cl.consistency_list )
+		Mem_Free( cl.consistency_list );
+#endif
 	// wipe the entire cl structure
 	memset( &cl, 0, sizeof( cl ));
 	MSG_Clear( &cls.netchan.message );
@@ -3525,17 +3529,21 @@ qboolean CL_PrecacheResources( void )
 		switch( pRes->type )
 		{
 		case t_sound:
-			if( pRes->nIndex >= 0 && pRes->nIndex < ARRAYSIZE( cl.sound_precache ) && pRes->nIndex < ARRAYSIZE( cl.sound_index ))
+			if( pRes->nIndex >= 0 && pRes->nIndex < MAX_SOUNDS && pRes->nIndex < ARRAYSIZE( cl.sound_index ))
 			{
 				if( FBitSet( pRes->ucFlags, RES_WASMISSING ))
 				{
 					Con_Printf( S_ERROR "Could not load sound " DEFAULT_SOUNDPATH "%s\n", pRes->szFileName );
+#if !XASH_PSP
 					cl.sound_precache[pRes->nIndex][0] = 0;
+#endif
 					cl.sound_index[pRes->nIndex] = 0;
 				}
 				else
 				{
+#if !XASH_PSP
 					Q_strncpy( cl.sound_precache[pRes->nIndex], pRes->szFileName, sizeof( cl.sound_precache[0] ));
+#endif
 					cl.sound_index[pRes->nIndex] = S_RegisterSound( pRes->szFileName );
 
 					if( !cl.sound_index[pRes->nIndex] )

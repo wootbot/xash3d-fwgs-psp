@@ -25,12 +25,34 @@ GNU General Public License for more details.
 #define MAX_SFX_HASH (MAX_SFX/4)
 
 static int      s_numSfx = 0;
-static sfx_t    s_knownSfx[MAX_SFX];
+
+// in chunks, they stay where they are. Most maps have a few hundred
+#define SFX_CHUNK_BITS 7
+#define SFX_CHUNK_SIZE ( 1 << SFX_CHUNK_BITS )
+static sfx_t    s_firstSfx[SFX_CHUNK_SIZE];
+static sfx_t    *s_sfxChunks[MAX_SFX >> SFX_CHUNK_BITS] = { s_firstSfx };
+
 static sfx_t    *s_sfxHashList[MAX_SFX_HASH];
 static qboolean s_registering = false;
 
 #define SENTENCE_INDEX -99999 // unique sentence index
 static string   s_sentenceImmediateName;	// keep dummy sentence name
+
+static inline sfx_t *S_KnownSfx( int i )
+{
+	return &s_sfxChunks[i >> SFX_CHUNK_BITS][i & ( SFX_CHUNK_SIZE - 1 )];
+}
+
+static int S_SfxIndex( const sfx_t *sfx )
+{
+	for( int i = 0; i < ARRAYSIZE( s_sfxChunks ) && s_sfxChunks[i]; i++ )
+	{
+		if( sfx >= s_sfxChunks[i] && sfx < s_sfxChunks[i] + SFX_CHUNK_SIZE )
+			return ( i << SFX_CHUNK_BITS ) + ( sfx - s_sfxChunks[i] );
+	}
+
+	return -1;
+}
 
 /*
 =================
@@ -43,8 +65,9 @@ void S_SoundList_f( void )
 	int	i, totalSfx = 0;
 	int	totalSize = 0;
 
-	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
+	for( i = 0; i < s_numSfx; i++ )
 	{
+		sfx = S_KnownSfx( i );
 		if( !sfx->name[0] )
 			continue;
 
@@ -358,17 +381,19 @@ sfx_t *S_FindName( const char *pname, qboolean *pfInCache )
 	}
 
 	// find a free sfx slot spot
-	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++)
-		if( !sfx->name[0] ) break; // free spot
+	for( i = 0; i < s_numSfx; i++ )
+		if( !S_KnownSfx( i )->name[0] ) break; // free spot
 
 	if( i == s_numSfx )
 	{
 		if( s_numSfx == MAX_SFX )
 			return NULL;
+		if( !s_sfxChunks[i >> SFX_CHUNK_BITS] )
+			s_sfxChunks[i >> SFX_CHUNK_BITS] = Mem_Calloc( host.mempool, sizeof( sfx_t ) * SFX_CHUNK_SIZE );
 		s_numSfx++;
 	}
 
-	sfx = &s_knownSfx[i];
+	sfx = S_KnownSfx( i );
 	memset( sfx, 0, sizeof( *sfx ));
 	if( pfInCache ) *pfInCache = false;
 	Q_strncpy( sfx->name, name, sizeof( sfx->name ));
@@ -410,7 +435,7 @@ void S_FreeSound( sfx_t *sfx )
 
 	if( clgame.soundFuncs.pfnS_FreeSound )
 	{
-		clgame.soundFuncs.pfnS_FreeSound( sfx, sfx - s_knownSfx );
+		clgame.soundFuncs.pfnS_FreeSound( sfx, S_SfxIndex( sfx ));
 		return;
 	}
 
@@ -465,8 +490,9 @@ void S_EndRegistration( void )
 #endif
 
 	// free any sounds not from this registration sequence
-	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
+	for( i = 0; i < s_numSfx; i++ )
 	{
+		sfx = S_KnownSfx( i );
 		if( !sfx->name[0] || !Q_stricmp( sfx->name, "*default" ))
 			continue; // don't release default sound
 
@@ -476,8 +502,9 @@ void S_EndRegistration( void )
 
 #if XASH_PSP
 	// list their directories now (dir.c): the first lookup in one takes ~40 ms
-	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
+	for( i = 0; i < s_numSfx; i++ )
 	{
+		sfx = S_KnownSfx( i );
 		string path;
 
 		if( sfx->name[0] && sfx->name[0] != '!' && Q_snprintf( path, sizeof( path ), DEFAULT_SOUNDPATH "%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name ) > 0 )
@@ -492,8 +519,9 @@ void S_EndRegistration( void )
 	// load everything in
 	// (not on the PSP: big co-op maps precache hundreds of sounds, many never play,
 	// they're loaded on first use instead)
-	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
+	for( i = 0; i < s_numSfx; i++ )
 	{
+		sfx = S_KnownSfx( i );
 		if( !sfx->name[0] )
 			continue;
 		S_LoadSound( sfx );
@@ -531,7 +559,7 @@ sound_t S_RegisterSound( const char *name )
 	sfx->servercount = cl.servercount;
 	if( !s_registering && !S_RequestSound( sfx )) S_LoadSound( sfx );
 
-	return sfx - s_knownSfx;
+	return S_SfxIndex( sfx );
 }
 
 sfx_t *S_GetSfxByHandle( sound_t handle )
@@ -546,7 +574,7 @@ sfx_t *S_GetSfxByHandle( sound_t handle )
 	if( handle < 0 || handle >= s_numSfx )
 		return NULL;
 
-	return &s_knownSfx[handle];
+	return S_KnownSfx( handle );
 }
 
 /*
@@ -557,11 +585,11 @@ S_InitSounds
 void S_InitSounds( void )
 {
 	// create unused 0-entry
-	Q_strncpy( s_knownSfx->name, "*default", sizeof( s_knownSfx->name ));
-	s_knownSfx->hashValue = COM_HashKey( s_knownSfx->name, MAX_SFX_HASH );
-	s_knownSfx->hashNext = s_sfxHashList[s_knownSfx->hashValue];
-	s_sfxHashList[s_knownSfx->hashValue] = s_knownSfx;
-	s_knownSfx->cache = S_CreateDefaultSound();
+	Q_strncpy( s_firstSfx->name, "*default", sizeof( s_firstSfx->name ));
+	s_firstSfx->hashValue = COM_HashKey( s_firstSfx->name, MAX_SFX_HASH );
+	s_firstSfx->hashNext = s_sfxHashList[s_firstSfx->hashValue];
+	s_sfxHashList[s_firstSfx->hashValue] = s_firstSfx;
+	s_firstSfx->cache = S_CreateDefaultSound();
 	s_numSfx = 1;
 }
 
@@ -572,9 +600,6 @@ S_FreeSounds
 */
 void S_FreeSounds( void )
 {
-	sfx_t	*sfx;
-	int	i;
-
 	if( !snd.initialized )
 		return;
 
@@ -586,11 +611,12 @@ void S_FreeSounds( void )
 #endif
 
 	// free all sounds
-	for( i = 0, sfx = s_knownSfx; i < s_numSfx; i++, sfx++ )
-		S_FreeSound( sfx );
+	for( int i = 0; i < s_numSfx; i++ )
+		S_FreeSound( S_KnownSfx( i ));
 
 
-	memset( s_knownSfx, 0, sizeof( s_knownSfx ));
+	for( int i = 0; i < ARRAYSIZE( s_sfxChunks ) && s_sfxChunks[i]; i++ )
+		memset( s_sfxChunks[i], 0, sizeof( sfx_t ) * SFX_CHUNK_SIZE );
 	memset( s_sfxHashList, 0, sizeof( s_sfxHashList ));
 
 	s_numSfx = 0;

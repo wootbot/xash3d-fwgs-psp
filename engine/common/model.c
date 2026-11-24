@@ -25,7 +25,11 @@ GNU General Public License for more details.
 #include "server.h"
 
 static model_info_t	mod_crcinfo[MAX_MODELS];
-static model_t	mod_known[MAX_MODELS];
+// in chunks, they stay where they are. Most games have a few hundred
+#define MOD_CHUNK_BITS	6
+#define MOD_CHUNK_SIZE	( 1 << MOD_CHUNK_BITS )
+static model_t	mod_first[MOD_CHUNK_SIZE];
+static model_t	*mod_chunks[MAX_MODELS >> MOD_CHUNK_BITS] = { mod_first };
 static int	mod_numknown = 0;
 poolhandle_t      com_studiocache;		// cache for submodels
 CVAR_DEFINE( mod_studiocache, "r_studiocache", "1", FCVAR_ARCHIVE, "enables studio cache for speedup tracing hitboxes" );
@@ -40,6 +44,23 @@ CVAR_DEFINE_AUTO( r_allow_wad3_luma, "0", FCVAR_LATCH|FCVAR_ARCHIVE, "allow usag
 
 ===============================================================================
 */
+static inline model_t *Mod_Known( int i )
+{
+	return &mod_chunks[i >> MOD_CHUNK_BITS][i & ( MOD_CHUNK_SIZE - 1 )];
+}
+
+static model_info_t *Mod_CRCInfo( const model_t *mod )
+{
+	for( int i = 0; i < ARRAYSIZE( mod_chunks ) && mod_chunks[i]; i++ )
+	{
+		if( mod >= mod_chunks[i] && mod < mod_chunks[i] + MOD_CHUNK_SIZE )
+			return &mod_crcinfo[( i << MOD_CHUNK_BITS ) + ( mod - mod_chunks[i] )];
+	}
+
+	Host_Error( "%s: unknown model %s\n", __func__, mod->name );
+	return mod_crcinfo;
+}
+
 /*
 ================
 Mod_Modellist_f
@@ -48,13 +69,13 @@ Mod_Modellist_f
 static void Mod_Modellist_f( void )
 {
 	int	i, nummodels;
-	model_t	*mod;
 
 	Con_Printf( "\n" );
 	Con_Printf( "-----------------------------------\n" );
 
-	for( i = nummodels = 0, mod = mod_known; i < mod_numknown; i++, mod++ )
+	for( i = nummodels = 0; i < mod_numknown; i++ )
 	{
+		const model_t *mod = Mod_Known( i );
 		const char *color_str;
 
 		if( mod->needload == NL_UNREFERENCED )
@@ -206,7 +227,7 @@ void Mod_FreeAll( void )
 	Mod_ReleaseHullPolygons();
 #endif
 	for( int i = 0; i < mod_numknown; i++ )
-		Mod_FreeModel( &mod_known[i] );
+		Mod_FreeModel( Mod_Known( i ));
 	mod_numknown = 0;
 }
 
@@ -218,7 +239,7 @@ Mod_ClearUserData
 void Mod_ClearUserData( void )
 {
 	for( int i = 0; i < mod_numknown; i++ )
-		Mod_FreeUserData( &mod_known[i] );
+		Mod_FreeUserData( Mod_Known( i ));
 }
 
 /*
@@ -249,14 +270,15 @@ never return NULL
 model_t *Mod_FindName( const char *filename, qboolean trackCRC )
 {
 	char	modname[MAX_QPATH];
-	model_t	*mod;
+	model_t	*mod = NULL;
 	int	i;
 
 	Q_strncpy( modname, filename, sizeof( modname ));
 
 	// search the currently loaded models
-	for( i = 0, mod = mod_known; i < mod_numknown; i++, mod++ )
+	for( i = 0; i < mod_numknown; i++ )
 	{
+		mod = Mod_Known( i );
 		if( !Q_stricmp( mod->name, modname ))
 		{
 			if( mod->mempool || mod->name[0] == '*' )
@@ -269,8 +291,9 @@ model_t *Mod_FindName( const char *filename, qboolean trackCRC )
 	}
 
 	// find a free model slot spot
-	for( i = 0, mod = mod_known; i < mod_numknown; i++, mod++ )
+	for( i = 0; i < mod_numknown; i++ )
 	{
+		mod = Mod_Known( i );
 		if( mod->needload == NL_UNREFERENCED )
 			break; // this is a valid spot
 	}
@@ -279,6 +302,9 @@ model_t *Mod_FindName( const char *filename, qboolean trackCRC )
 	{
 		if( mod_numknown == MAX_MODELS )
 			Host_Error( "MAX_MODELS limit exceeded (%d)\n", MAX_MODELS );
+		if( !mod_chunks[i >> MOD_CHUNK_BITS] )
+			mod_chunks[i >> MOD_CHUNK_BITS] = Mem_Calloc( host.mempool, sizeof( model_t ) * MOD_CHUNK_SIZE );
+		mod = Mod_Known( i );
 		mod_numknown++;
 	}
 
@@ -450,7 +476,7 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		return NULL;
 	}
 
-	model_info_t *p = &mod_crcinfo[mod - mod_known];
+	model_info_t *p = Mod_CRCInfo( mod );
 	mod->needload = NL_PRESENT;
 
 	if( FBitSet( p->flags, FCRC_SHOULD_CHECKSUM ))
@@ -508,22 +534,24 @@ static void Mod_PurgeStudioCache( void )
 	Mod_ReleaseHullPolygons();
 #endif
 	// release previois map
-	Mod_FreeModel( mod_known );	// world is stuck on slot #0 always
+	Mod_FreeModel( mod_first );	// world is stuck on slot #0 always
 
 	// we should release all the world submodels
 	// and clear studio sequences
 	for( int i = 1; i < mod_numknown; i++ )
 	{
-		if( mod_known[i].needload == NL_UNREFERENCED )
+		model_t *mod = Mod_Known( i );
+
+		if( mod->needload == NL_UNREFERENCED )
 			continue;
 
-		if( mod_known[i].type == mod_studio )
-			mod_known[i].submodels = NULL;
+		if( mod->type == mod_studio )
+			mod->submodels = NULL;
 
-		if( mod_known[i].name[0] == '*' )
-			Mod_FreeModel( &mod_known[i] );
+		if( mod->name[0] == '*' )
+			Mod_FreeModel( mod );
 		else
-			mod_known[i].needload = NL_FREE_UNUSED;
+			mod->needload = NL_FREE_UNUSED;
 	}
 
 	Mem_EmptyPool( com_studiocache );
@@ -540,8 +568,8 @@ Loads in the map and all submodels
 model_t *Mod_LoadWorld( const char *name, qboolean preload )
 {
 	// already loaded?
-	if( !Q_stricmp( mod_known->name, name ))
-		return mod_known;
+	if( !Q_stricmp( mod_first->name, name ))
+		return mod_first;
 
 	// free sequence files on studiomodels
 	Mod_PurgeStudioCache();
@@ -552,7 +580,7 @@ model_t *Mod_LoadWorld( const char *name, qboolean preload )
 	if( preload ) Mod_LoadModel( pworld, true );
 	world.loading = false;
 
-	ASSERT( pworld == mod_known );
+	ASSERT( pworld == mod_first );
 
 	return pworld;
 }
@@ -566,12 +594,11 @@ Purge all unused models
 */
 void Mod_FreeUnused( void )
 {
-	model_t	*mod;
-	int	i;
-
 	// never tries to release worldmodel
-	for( i = 1, mod = &mod_known[1]; i < mod_numknown; i++, mod++ )
+	for( int i = 1; i < mod_numknown; i++ )
 	{
+		model_t *mod = Mod_Known( i );
+
 		if( mod->needload == NL_FREE_UNUSED )
 			Mod_FreeModel( mod );
 	}
@@ -678,7 +705,7 @@ Mod_ValidateCRC
 qboolean Mod_ValidateCRC( const char *name, uint32_t crc )
 {
 	model_t *mod = Mod_FindName( name, true );
-	model_info_t *p = &mod_crcinfo[mod - mod_known];
+	model_info_t *p = Mod_CRCInfo( mod );
 
 	if( !FBitSet( p->flags, FCRC_CHECKSUM_DONE ))
 		return true;
@@ -696,7 +723,7 @@ Mod_NeedCRC
 void Mod_NeedCRC( const char *name, qboolean needCRC )
 {
 	model_t *mod = Mod_FindName( name, true );
-	model_info_t *p = &mod_crcinfo[mod - mod_known];
+	model_info_t *p = Mod_CRCInfo( mod );
 
 	if( needCRC ) SetBits( p->flags, FCRC_SHOULD_CHECKSUM );
 	else ClearBits( p->flags, FCRC_SHOULD_CHECKSUM );

@@ -1805,6 +1805,10 @@ static void CL_ParseConsistencyInfo( sizebuf_t *msg, connprotocol_t proto )
 		if( cl.num_consistency >= MAX_MODELS )
 			Host_Error( "%s: MAX_MODELS limit exceeded (%d)\n", __func__, MAX_MODELS );
 
+#if XASH_PSP
+		if( cl.num_consistency % 64 == 0 )
+			cl.consistency_list = Mem_Realloc( cls.mempool, cl.consistency_list, sizeof( *cl.consistency_list ) * ( cl.num_consistency + 64 ));
+#endif
 		consistency_t *pc = &cl.consistency_list[cl.num_consistency];
 		cl.num_consistency++;
 

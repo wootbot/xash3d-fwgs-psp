@@ -5210,16 +5210,15 @@ qboolean SV_LoadProgs( const char *name )
 	static NEW_DLL_FUNCTIONS_FN	GiveNewDllFuncs;
 	static enginefuncs_t	gpEngfuncs;
 	static globalvars_t		gpGlobals;
-	static playermove_t		gpMove;
 	qboolean init_entity_api = false;
 
 	if( svgame.hInstance )
 		return true;
 
 	// fill it in
-	svgame.pmove = &gpMove;
 	svgame.globals = &gpGlobals;
 	svgame.mempool = Mem_AllocPool( "Server Edicts Zone" );
+	svgame.pmove = Mem_Calloc( svgame.mempool, sizeof( *svgame.pmove ));
 
 	svgame.hInstance = COM_LoadLibrary( name, true, false );
 	if( !svgame.hInstance )

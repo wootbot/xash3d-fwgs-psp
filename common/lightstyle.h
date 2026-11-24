@@ -16,10 +16,16 @@ GNU General Public License for more details.
 #ifndef LIGHTSTYLE_H
 #define LIGHTSTYLE_H
 
+#include "build.h"
+
 typedef struct
 {
 	char		pattern[256];
+#if XASH_PSP
+	signed char	map[256];
+#else
 	float		map[256];
+#endif
 	int		length;
 	float		value;
 	qboolean		interp;		// allow to interpolate this lightstyle
