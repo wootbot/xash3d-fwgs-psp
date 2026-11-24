@@ -45,11 +45,13 @@ static float	rgNoise[NOISE_DIVISIONS+1];	// global noise array
 // Fractal noise generator, power of 2 wavelength
 static void FracNoise( float *noise, int divs )
 {
+	static uint seed = 12345;
 	int div2 = divs >> 1;
 	if( divs < 2 ) return;
 
 	// noise is normalized to +/- scale
-	noise[div2] = ( noise[0] + noise[divs] ) * 0.5f + divs * gEngfuncs.COM_RandomFloat( -0.125f, 0.125f );
+	seed = seed * 1664525 + 1013904223;
+	noise[div2] = ( noise[0] + noise[divs] ) * 0.5f + divs * ((int)seed * ( 0.125f / 2147483648.0f ));
 
 	if( div2 > 1 )
 	{
@@ -65,7 +67,7 @@ static void SineNoise( float *noise, int divs )
 
 	for( int i = 0; i < divs; i++ )
 	{
-		noise[i] = sin( freq );
+		noise[i] = sinf( freq );
 		freq += step;
 	}
 }
@@ -178,15 +180,15 @@ static void R_DrawSegs( vec3_t source, vec3_t delta, float width, float scale, f
 		if( segments < 2 ) segments = 2;
 	}
 
-	if( segments > NOISE_DIVISIONS )
-		segments = NOISE_DIVISIONS;
+	if( segments > NOISE_DIVISIONS / 2 )
+		segments = NOISE_DIVISIONS / 2; // 480 pixels
 
 	div = 1.0f / (segments - 1);
 	length *= 0.01f;
 	float vStep = length * div;	// Texture length texels per space pixel
 
 	// Scroll speed 3.5 -- initial texture position, scrolls 3.5/sec (1.0 is entire texture)
-	float vLast = fmod( freq * speed, 1 );
+	float vLast = fmodf( freq * speed, 1.0f );
 
 	if( flags & FBEAM_SINENOISE )
 	{
@@ -353,7 +355,7 @@ static void R_DrawTorus( vec3_t source, vec3_t delta, float width, float scale, 
 	float vStep = length * div; // Texture length texels per space pixel
 
 	// Scroll speed 3.5 -- initial texture position, scrolls 3.5/sec (1.0 is entire texture)
-	float vLast = fmod( freq * speed, 1 );
+	float vLast = fmodf( freq * speed, 1.0f );
 	scale = scale * length;
 
 	// Iterator to resample noise waveform (it needs to be generated in powers of 2)
@@ -443,7 +445,7 @@ static void R_DrawDisk( vec3_t source, vec3_t delta, float width, float scale, f
 	float vStep = length * div;		// Texture length texels per space pixel
 
 	// scroll speed 3.5 -- initial texture position, scrolls 3.5/sec (1.0 is entire texture)
-	float vLast = fmod( freq * speed, 1 );
+	float vLast = fmodf( freq * speed, 1.0f );
 	scale = scale * length;
 
 	// clamp the beam width
@@ -495,7 +497,7 @@ static void R_DrawCylinder( vec3_t source, vec3_t delta, float width, float scal
 	float vStep = length * div;		// texture length texels per space pixel
 
 	// Scroll speed 3.5 -- initial texture position, scrolls 3.5/sec (1.0 is entire texture)
-	float vLast = fmod( freq * speed, 1 );
+	float vLast = fmodf( freq * speed, 1.0f );
 	scale = scale * length;
 
 	for ( int i = 0; i < segments; i++ )
@@ -906,20 +908,6 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 	// update frequency
 	pbeam->freq += frametime;
 
-	// generate fractal noise
-	if( frametime != 0.0f )
-	{
-		rgNoise[0] = 0;
-		rgNoise[NOISE_DIVISIONS] = 0;
-	}
-
-	if( pbeam->amplitude != 0 && frametime != 0.0f )
-	{
-		if( FBitSet( pbeam->flags, FBEAM_SINENOISE ))
-			SineNoise( rgNoise, NOISE_DIVISIONS );
-		else FracNoise( rgNoise, NOISE_DIVISIONS );
-	}
-
 	// update end points
 	if( FBitSet( pbeam->flags, FBEAM_STARTENTITY|FBEAM_ENDENTITY ))
 	{
@@ -953,6 +941,20 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 	if( !FBitSet( pbeam->flags, FBEAM_ISACTIVE ) || VectorLength( pbeam->delta ) < 0.1f )
 	{
 		return;
+	}
+
+	// generate fractal noise, of the ones that are drawn
+	if( frametime != 0.0f )
+	{
+		rgNoise[0] = 0;
+		rgNoise[NOISE_DIVISIONS] = 0;
+	}
+
+	if( pbeam->amplitude != 0 && frametime != 0.0f )
+	{
+		if( FBitSet( pbeam->flags, FBEAM_SINENOISE ))
+			SineNoise( rgNoise, NOISE_DIVISIONS );
+		else FracNoise( rgNoise, NOISE_DIVISIONS );
 	}
 
 	if( pbeam->flags & ( FBEAM_FADEIN|FBEAM_FADEOUT ))

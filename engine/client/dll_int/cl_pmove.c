@@ -274,6 +274,7 @@ static struct
 	int	parsecount, framecount, validsequence;
 	double	time;
 	int	numsolid;
+	int	base, skip;	// where they are in pmove->physents (0: nowhere), without which one
 	byte	solid_player[MAX_CLIENTS];
 	physent_t	solid[MAX_CLIENTS];
 } cl_playerphys;
@@ -662,13 +663,48 @@ void GAME_EXPORT CL_SetSolidPlayers( int playernum )
 				cl_playerphys.solid_player[cl_playerphys.numsolid++] = i;
 			}
 			cl_playerphys.solid_valid = true;
+			cl_playerphys.base = 0;
 		}
 
-		for( int i = 0; i < cl_playerphys.numsolid && clgame.pmove->numphysent < MAX_PHYSENTS; i++ )
+		const int base = clgame.pmove->numphysent;
+		const int last = cl_playerphys.numsolid - 1;
+		physent_t *const pe = &clgame.pmove->physents[base];
+		int skip = -1;
+
+		if( base + cl_playerphys.numsolid > MAX_PHYSENTS )
 		{
-			if( cl_playerphys.solid_player[i] != playernum )
-				clgame.pmove->physents[clgame.pmove->numphysent++] = cl_playerphys.solid[i];
+			cl_playerphys.base = 0;
+			for( int i = 0; i <= last && clgame.pmove->numphysent < MAX_PHYSENTS; i++ )
+			{
+				if( cl_playerphys.solid_player[i] != playernum )
+					clgame.pmove->physents[clgame.pmove->numphysent++] = cl_playerphys.solid[i];
+			}
+			return;
 		}
+
+		for( int i = 0; i <= last && skip < 0; i++ )
+		{
+			if( cl_playerphys.solid_player[i] == playernum )
+				skip = i;
+		}
+
+		// all of them are there, the last one also in the place of the one that's left out
+		if( cl_playerphys.base != base )
+		{
+			memcpy( pe, cl_playerphys.solid, sizeof( *pe ) * cl_playerphys.numsolid );
+			cl_playerphys.base = base;
+			cl_playerphys.skip = -1;
+		}
+
+		if( cl_playerphys.skip != skip )
+		{
+			if( cl_playerphys.skip >= 0 )
+				pe[cl_playerphys.skip] = cl_playerphys.solid[cl_playerphys.skip];
+			if( skip >= 0 )
+				pe[skip] = cl_playerphys.solid[last];
+			cl_playerphys.skip = skip;
+		}
+		clgame.pmove->numphysent = base + cl_playerphys.numsolid - ( skip >= 0 );
 		return;
 	}
 #endif
@@ -699,6 +735,9 @@ void GAME_EXPORT CL_SetSolidPlayers( int playernum )
 		if( clgame.pmove->numphysent >= MAX_PHYSENTS )
 			break;
 
+#if XASH_PSP
+		cl_playerphys.base = 0;
+#endif
 		pe = &clgame.pmove->physents[clgame.pmove->numphysent];
 		CL_CopyEntityToPhysEnt( pe, state, false );
 		clgame.pmove->numphysent++;
