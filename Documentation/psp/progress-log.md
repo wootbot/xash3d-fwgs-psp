@@ -912,3 +912,11 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   - Muzzle flashes were missing since the ME draws the models (user report): R_MuzzleFlash adds a sprite for
     the current frame, the events of those models come after it's drawn (R_StudioFinishMeModels). They wait
     for the next frame in a list now (psp_late_events), ~13 a frame in the scene.
+  - The ~110 dropped rifles of the scene were the test's: kicked bots left them every time it was set up
+    again. The plugin removes them; demo `stress3` is 31 firing bots and 32 monsters, 41 ms median (repeats
+    within 2%). stress1 (no gunfire, rifles) can't be compared with it.
+  - Beams that aren't drawn computed their noise, 64 random numbers each: fx_beams 4.7 -> 0.3% of the frame.
+    stress3 41.2 -> 39.6 ms.
+  - What's left in stress3 is flat: shots ~16% (sounds, traces, shells, decals), packets 14%, prediction 9%,
+    entities 11%, drawing ~30%, the network sleep 4%. The ME is busy for 81% of the frame, 29% for full
+    skeletons: at 25 ms it would be the limit.
