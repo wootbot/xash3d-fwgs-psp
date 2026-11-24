@@ -1167,6 +1167,9 @@ void CL_InitTempEnts( void );
 void CL_FreeTempEnts( void );
 void CL_TempEntUpdate( void );
 #if XASH_PSP
+void CL_AddLateMuzzleFlashes( void );
+#endif
+#if XASH_PSP
 void CL_TempEntBegin( void );
 #endif
 void CL_InitViewBeams( void );

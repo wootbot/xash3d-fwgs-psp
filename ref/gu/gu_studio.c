@@ -9406,7 +9406,7 @@ static void R_StudioClientEvents( void )
 
 		ClearBits( e->curstate.effects, EF_MUZZLEFLASH );
 		VectorCopy( e->attachment[0], el->origin );
-		el->die = gp_cl->time + 0.05f;
+		el->die = gp_cl->time + Q_max( 0.05f, gp_host->frametime * 1.5f ); // seen in the next frame
 		el->color.r = 255;
 		el->color.g = 192;
 		el->color.b = 64;
@@ -11181,7 +11181,9 @@ static void R_StudioMeItem( int i )
 		RI.currentmodel = it->player ? (model_t *)it->player->mod : e->model;
 		R_StudioSetHeader( (studiohdr_t *)d->hdr );
 		Matrix3x4_Copy( g_studio.rotationmatrix, res->rotation );
+		psp_late_events = true; // the scene is drawn
 		R_StudioClientEvents();
+		psp_late_events = false;
 	}
 }
 

@@ -638,6 +638,7 @@ qboolean R_ViewModelSolid( void );
 #define R_STUDIO_ME	2	// in the culled flags: drawn by R_StudioDrawMeModels
 void R_StudioDrawMeModels( void );
 void R_StudioFinishMeModels( void );
+extern qboolean psp_late_events; // engine/client/cl_tent.c
 void R_StudioMeSync( int list );
 void R_StudioDrawMeModel( cl_entity_t *e );
 extern void (*psp_entities_hook)( qboolean complete );

@@ -1356,6 +1356,10 @@ void CL_EmitEntities( void )
 	// fire events (client and server)
 	CL_FireEvents ();
 
+#if XASH_PSP
+	CL_AddLateMuzzleFlashes();
+#endif
+
 	// handle spectator camera movement
 	CL_MoveSpectatorCamera();
 

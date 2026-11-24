@@ -1472,9 +1472,48 @@ R_MuzzleFlash
 Do muzzleflash
 ==============
 */
+#if XASH_PSP
+/*
+A muzzle flash lives for the frame it's added in. The animation events of models the
+Media Engine draws come when that's drawn already: theirs are the next frame's
+*/
+qboolean psp_late_events;
+
+#define MAX_LATE_FLASHES 64
+
+static struct
+{
+	vec3_t	pos;
+	int	type;
+} cl_late_flashes[MAX_LATE_FLASHES];
+
+static int	cl_num_late_flashes;
+
+void CL_AddLateMuzzleFlashes( void )
+{
+	const int count = cl_num_late_flashes;
+
+	cl_num_late_flashes = 0;
+	for( int i = 0; i < count; i++ )
+		R_MuzzleFlash( cl_late_flashes[i].pos, cl_late_flashes[i].type );
+}
+#endif
+
 void GAME_EXPORT R_MuzzleFlash( const vec3_t pos, int type )
 {
 	TEMPENTITY	*pTemp;
+
+#if XASH_PSP
+	if( psp_late_events )
+	{
+		if( cl_num_late_flashes < MAX_LATE_FLASHES )
+		{
+			VectorCopy( pos, cl_late_flashes[cl_num_late_flashes].pos );
+			cl_late_flashes[cl_num_late_flashes++].type = type;
+		}
+		return;
+	}
+#endif
 
 	int index = ( type % 10 ) % MAX_MUZZLEFLASH;
 	float scale = ( type / 10 ) * 0.1f;
