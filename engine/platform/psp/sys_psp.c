@@ -551,6 +551,28 @@ static size_t PSP_LargestFreeBlock( void )
 	return lo;
 }
 
+/*
+===========
+PSP_PlayerModelFits
+
+players bring their own models: not over the memory the map needs
+===========
+*/
+qboolean PSP_PlayerModelFits( const char *name )
+{
+	// the file in one piece, its textures and 1.5 MB for the rest of the game
+	const size_t size = FS_FileSize( name, false ), total = size * 2 + 1536 * 1024;
+	void *volatile p = malloc( size + 256 * 1024 );
+
+	free( p );
+	if( !p || mallinfo().fordblks >= total )
+		return p != NULL;
+
+	p = malloc( total ); // the heap hasn't grown that far yet
+	free( p );
+	return p != NULL;
+}
+
 void PSP_PrintMemInfo( void )
 {
 	struct mallinfo mi = mallinfo();

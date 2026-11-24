@@ -54,17 +54,17 @@ static void CL_CalcPlayerVelocity( int idx, vec3_t velocity )
 	}
 	else
 	{
-		double dt = clgame.entities[idx].curstate.animtime - clgame.entities[idx].prevstate.animtime;
+		double dt = CL_EntityAt( idx )->curstate.animtime - CL_EntityAt( idx )->prevstate.animtime;
 
 		if( dt != 0.0 )
 		{
 			vec3_t delta;
-			VectorSubtract( clgame.entities[idx].curstate.velocity, clgame.entities[idx].prevstate.velocity, delta );
+			VectorSubtract( CL_EntityAt( idx )->curstate.velocity, CL_EntityAt( idx )->prevstate.velocity, delta );
 			VectorScale( delta, 1.0f / dt, velocity );
 		}
 		else
 		{
-			VectorCopy( clgame.entities[idx].curstate.velocity, velocity );
+			VectorCopy( CL_EntityAt( idx )->curstate.velocity, velocity );
 		}
 	}
 }

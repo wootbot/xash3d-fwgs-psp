@@ -162,7 +162,14 @@ void SCR_DrawEnts( void )
 	// as entities might get added by client.dll
 	for( int i = 0; i < clgame.maxEntities; i++ )
 	{
-		const cl_entity_t *ent = &clgame.entities[i];
+#if XASH_PSP
+		if( !clgame.entchunks[i >> ENT_CHUNK_BITS] )
+		{
+			i |= ENT_CHUNK_MASK;
+			continue;
+		}
+#endif
+		const cl_entity_t *ent = CL_EntityAt( i );
 		string msg;
 		vec3_t screen;
 

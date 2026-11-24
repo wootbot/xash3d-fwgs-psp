@@ -624,7 +624,7 @@ void CL_ProcessPacket( frame_t *frame )
 		state->msg_time = cl.mtime[0];
 
 		// mark all the players
-		cl_entity_t *ent = &clgame.entities[state->number];
+		cl_entity_t *ent = CL_EntityAt( state->number );
 		ent->player = CL_IsPlayerIndex( state->number );
 
 		if( state->number == ( cl.playernum + 1 ))
@@ -1039,7 +1039,7 @@ static void CL_LinkPlayers( frame_t *frame )
 		if( !state->modelindex || FBitSet( state->effects, EF_NODRAW ))
 			continue;
 
-		ent = &clgame.entities[i + 1];
+		ent = CL_EntityAt( i + 1 );
 
 		// fixup the player indexes...
 		if( ent->index != ( i + 1 )) ent->index = (i + 1);

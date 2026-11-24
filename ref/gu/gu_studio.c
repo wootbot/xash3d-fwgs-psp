@@ -7470,7 +7470,7 @@ static model_t *R_StudioSetupPlayerModel( int index )
 
 			Q_snprintf( state->modelname, sizeof( state->modelname ), "models/player/%s/%s.mdl", info->model, info->model );
 
-			if( gEngfuncs.fsapi->FileExists( state->modelname, false ))
+			if( gEngfuncs.fsapi->FileExists( state->modelname, false ) && PSP_PlayerModelFits( state->modelname ))
 				state->model = gEngfuncs.Mod_ForName( state->modelname, false, true );
 			else
 				state->model = NULL;

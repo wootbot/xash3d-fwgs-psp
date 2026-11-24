@@ -328,7 +328,7 @@ typedef struct
 	// get from engine
 	model_t *worldmodel;
 	world_static_t *world;
-	cl_entity_t *entities;
+	cl_entity_t **entchunks;
 	color24 *palette;
 	cl_entity_t *viewent;
 	dlight_t *elights;
@@ -624,6 +624,7 @@ qboolean R_StudioMeBonesPosted( const cl_entity_t *e );
 // engine/platform/psp/me_psp.c: the renderer is linked into the engine
 qboolean PSP_MeStart( void );
 uint32_t PSP_MeRunKeep( void (*func)( void *arg ), void *arg );
+qboolean PSP_PlayerModelFits( const char *name );
 void PSP_MeWaitFor( uint32_t ticket );
 qboolean PSP_MeDone( uint32_t ticket );
 void PSP_MeWriteback( const void *start, size_t size );
@@ -777,10 +778,10 @@ extern glwstate_t	glw_state;
 //
 static inline cl_entity_t *CL_GetEntityByIndex( int index )
 {
-	if( unlikely( index < 0 || index >= tr.max_entities || !tr.entities ))
+	if( unlikely( index < 0 || index >= tr.max_entities || !tr.entchunks || !tr.entchunks[index >> 4] ))
 		return NULL;
 
-	return &tr.entities[index];
+	return &tr.entchunks[index >> 4][index & 15];
 }
 
 static inline model_t *CL_ModelHandle( int index )

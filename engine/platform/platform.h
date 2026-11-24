@@ -192,6 +192,7 @@ int PSP_UnloadModule( int modid, int *sce_code );
 void PSP_RegisterCommands( void );
 void PSP_DelayMicroseconds( int usec );
 void PSP_PrintMemInfo( void );
+qboolean PSP_PlayerModelFits( const char *name );
 void PSP_VolatileInit( void );
 void PSP_VolatileShutdown( void );
 void *PSP_VolatileAlloc( size_t size );

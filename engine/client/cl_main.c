@@ -731,7 +731,7 @@ static void CL_UpdateClientData( void )
 	client_data_t	cdat =
 	{
 		.viewangles = Vec3( cl.viewangles ),
-		.origin = Vec3( clgame.entities[cl.viewentity].origin ),
+		.origin = Vec3( CL_EntityAt( cl.viewentity )->origin ),
 		.iWeaponBits = cl.local.weapons,
 		.fov = cl.local.scr_fov,
 	};

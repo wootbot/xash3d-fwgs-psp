@@ -265,12 +265,12 @@ static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned
 		tr.draw_list->num_beam_entities = 0;
 
 		tr.max_entities = 0;
-		tr.entities = NULL;
+		tr.entchunks = NULL;
 	}
 	else
 	{
 		tr.max_entities = max_entities;
-		tr.entities = entities;
+		tr.entchunks = (cl_entity_t **)entities; // an array in pieces, see CL_EntityAt of the engine
 	}
 
 	if( gEngfuncs.drawFuncs->R_ProcessEntData )

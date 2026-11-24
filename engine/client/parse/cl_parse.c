@@ -840,6 +840,9 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 		background = false;
 		clgame.maxEntities = GI->max_edicts + (( cl.maxclients - 1 ) * 15 );
 		clgame.maxEntities = Q_min( clgame.maxEntities, MAX_GOLDSRC_EDICTS );
+#if XASH_PSP // whatever the server's -num_edicts: they only take memory when they're used
+		clgame.maxEntities = BIT( MAX_GOLDSRC_ENTITY_BITS );
+#endif
 		clgame.maxModels = 512; // ???
 		Q_strncpy( clgame.maptitle, clgame.mapname, sizeof( clgame.maptitle ));
 

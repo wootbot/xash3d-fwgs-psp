@@ -465,6 +465,9 @@ typedef struct
 	string		itemspath;		// path to items description for auto-complete func
 
 	cl_entity_t	*entities;		// dynamically allocated entity array
+#if XASH_PSP
+	cl_entity_t	**entchunks;		// the array in pieces, allocated when one is used; entities is the first one
+#endif
 	cl_entity_t	*static_entities;		// dynamically allocated static entity array
 	remap_info_t	**remap_info;		// store local copy of all remap textures for each entity
 
@@ -913,6 +916,25 @@ struct msurface_s *pfnTraceSurface( int ground, float *vstart, float *vend );
 void CL_EnableScissor( scissor_state_t *scissor, int x, int y, int width, int height );
 void CL_DisableScissor( scissor_state_t *scissor );
 qboolean CL_Scissor( const scissor_state_t *scissor, float *x, float *y, float *width, float *height, float *u0, float *v0, float *u1, float *v1 );
+#if XASH_PSP
+#define ENT_CHUNK_BITS	4	// 16 entities, 48 KB
+#define ENT_CHUNK_MASK	( BIT( ENT_CHUNK_BITS ) - 1 )
+cl_entity_t *CL_AllocEntityChunk( int chunk );
+#endif
+// the index must be valid
+static inline cl_entity_t *CL_EntityAt( int index )
+{
+#if XASH_PSP
+	cl_entity_t *chunk = clgame.entchunks[index >> ENT_CHUNK_BITS];
+
+	if( unlikely( !chunk ))
+		chunk = CL_AllocEntityChunk( index >> ENT_CHUNK_BITS );
+	return chunk + ( index & ENT_CHUNK_MASK );
+#else
+	return clgame.entities + index;
+#endif
+}
+
 static inline cl_entity_t *CL_EDICT_NUM( int index )
 {
 	if( unlikely( !clgame.entities )) // not in game yet
@@ -927,7 +949,7 @@ static inline cl_entity_t *CL_EDICT_NUM( int index )
 		return NULL;
 	}
 
-	return clgame.entities + index;
+	return CL_EntityAt( index );
 }
 
 static inline cl_entity_t *CL_GetEntityByIndex( int index )
@@ -938,7 +960,7 @@ static inline cl_entity_t *CL_GetEntityByIndex( int index )
 	if( unlikely( index < 0 || index >= clgame.maxEntities ))
 		return NULL;
 
-	return clgame.entities + index;
+	return CL_EntityAt( index );
 }
 
 static inline model_t *CL_ModelHandle( int modelindex )
