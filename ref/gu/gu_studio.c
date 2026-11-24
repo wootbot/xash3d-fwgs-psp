@@ -1061,7 +1061,7 @@ static CVAR_DEFINE_AUTO( r_studio_me_draw, "1", FCVAR_ARCHIVE, "light them and w
 static CVAR_DEFINE_AUTO( r_studio_me_players, "1", FCVAR_ARCHIVE, "players too (needs r_studio_me_draw)" );
 
 #define MEBONES_MAXENTS	224
-#define MEBONES_ENTS	254	// with the weapons of players, fits a byte
+#define MEBONES_ENTS	288	// with the weapons of players, and the ones that aren't drawn after all
 #define MEBONES_POOL	2048	// bones in the output pool
 #define MEBONES_SCRATCH	( 2 * MAXSTUDIOBONES )	// and of a model with its weapon after them
 #define MEBONES_ATTACHMENTS	4	// cl_entity_t.attachment
@@ -1165,6 +1165,8 @@ typedef struct mebones_ent_s
 	int		partial;	// only the ones a level of detail needs
 	int		lit;	// light is known, without the entity lights
 	melight_t		light;
+	int		index;	// the entity's, and its origin
+	vec3_t		origin;
 } __attribute__(( aligned( 64 ))) mebones_ent_t;
 
 // what both jobs need to know about this frame
@@ -1211,6 +1213,8 @@ typedef struct
 	int		lod;	// of draw
 	const byte	*need;	// bones of the level of detail
 	int		period;	// frames a pose of that is kept for
+	int		entindex;	// of a packet entity or player
+	int		numattachments;
 } mebones_item_t;
 
 enum { MEMODE_SOLID = 0, MEMODE_BLEND, MEMODE_ADD };
@@ -1257,6 +1261,8 @@ static struct
 	uint32_t		ticket, early_ticket;
 	qboolean		begun;	// the first early job is posted
 	qboolean		finish;	// R_StudioFinishMeModels has something to do
+	qboolean		settle;	// R_StudioMeSettle has
+	int		list;	// the GE's that waits for the commands
 	double		refused;	// R_StudioMeRefused until then
 	qboolean		table;	// the table is this frame's
 	qboolean		tableread;	// it's in this CPU's cache
@@ -1290,7 +1296,7 @@ to them. The main CPU doesn't wait for the models
 #define MEBONES_GATEWORDS	4
 static uint r_mebones_gates[2][( MEBONES_MAXENTS + 4 ) * MEBONES_GATEWORDS] __attribute__(( aligned( 64 ))); // whole cache lines
 #define MEBONES_SOLIDGATE	MEBONES_MAXENTS
-static mebones_ent_t r_mebones_ents[MEBONES_ENTS + 2] __attribute__(( aligned( 64 )));
+static mebones_ent_t r_mebones_ents[MEBONES_ENTS] __attribute__(( aligned( 64 )));
 
 // its own, in cache lines of their own (aligned as a type: the size is too)
 typedef struct
@@ -1326,10 +1332,10 @@ typedef struct
 {
 	int	count;	// of r_mebones_ents
 	int	used;	// of r_mebones_out
-	qboolean	scratch;	// both are full: the next ones are only for the commands
+	qboolean	scratch;	// the pool is full: the next one's bones are only for its commands
 	uint	*p;	// end of the commands
 	const cl_entity_t	*ents[MECULL_MAX];
-	byte	slot[MECULL_MAX];	// of r_mebones_ents + 1, by table index
+	uint16_t	slot[MECULL_MAX];	// of r_mebones_ents + 1, by table index
 	uint16_t	lodseen[256];	// when it was last R_MeBonesLod's, as seen
 	uint16_t	seen[256];	// when an entity was last not culled, by a hash of its address: the low bits of tr.framecount
 	megait_t	gait[4];	// R_MeGaitBones
@@ -1341,10 +1347,10 @@ typedef struct
 
 static mebones_me_t r_mebones_me;
 
-// only accessed uncached: items done, the table is complete, the early job should stop
+// only accessed uncached: items done, the table is complete, the early job should stop, what's needed of the entities is copied
 static volatile uint32_t r_mebones_sync[16] __attribute__(( aligned( 64 )));
 #define MEBONES_SYNC	((volatile uint32_t *)( 0x40000000 | (uintptr_t)r_mebones_sync ))
-enum { MESYNC_ITEMS = 0, MESYNC_TABLE, MESYNC_YIELD };	// the number of the early job
+enum { MESYNC_ITEMS = 0, MESYNC_TABLE, MESYNC_YIELD, MESYNC_GATHERED };	// the number of the early job
 
 // ME scratch: the rotations of the sequence, its blends, the previous sequence
 static struct
@@ -1985,11 +1991,11 @@ static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e, const st
 // a new entry, not counted yet
 static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 {
-	const int slot = ( r_mebones_me.scratch ? MEBONES_ENTS : r_mebones_me.count ) + ofs;
+	const int slot = r_mebones_me.count + ofs;
 	const int used = ( r_mebones_me.scratch ? MEBONES_POOL : r_mebones_me.used ) + usedofs;
 	mebones_ent_t *m = &r_mebones_ents[slot];
 
-	if( !r_mebones_me.scratch && ( slot >= MEBONES_ENTS || used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL ))
+	if( slot >= MEBONES_ENTS || ( !r_mebones_me.scratch && used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL ))
 		return NULL;
 
 	m->hdr = hdr;
@@ -2092,11 +2098,12 @@ static mebones_ent_t *R_MeGather( const mebones_frame_t *frame, const cl_entity_
 		count++;
 	}
 
+	m->index = e->index;
+	VectorCopy( e->origin, m->origin );
+
 	if( !r_mebones_me.scratch )
-	{
 		r_mebones_me.used += used;
-		r_mebones_me.count += count;
-	}
+	r_mebones_me.count += count;
 	PSP_MeWriteback( m, sizeof( *m ));
 	return m;
 }
@@ -2533,7 +2540,7 @@ static void R_MeDynamicLight( const mebones_frame_t *frame, const cl_entity_t *e
 }
 
 // R_StudioEntityLight and R_StudioGEFoldElights
-static void R_MeEntityLight( const mebones_job_t *job, const mebones_ent_t *m, const cl_entity_t *e, const float attachment[][3], melight_t *l )
+static void R_MeEntityLight( const mebones_job_t *job, const mebones_ent_t *m, const float attachment[][3], melight_t *l )
 {
 	const vec3_t origin = { m->rotation[0][3], m->rotation[1][3], m->rotation[2][3] };
 	int lights[MAX_LOCALLIGHTS], num = 0;
@@ -2545,13 +2552,12 @@ static void R_MeEntityLight( const mebones_job_t *job, const mebones_ent_t *m, c
 		vec3_t at = { el->origin[0], el->origin[1], el->origin[2] }, mid;
 		int k = num;
 
-		if(( el->key & 0xFFF ) == e->index )
+		if(( el->key & 0xFFF ) == m->index )
 		{
 			const int att = ( el->key >> 12 ) & 0xF;
 
-			if( !att ) VectorCopy( e->origin, at );
+			if( !att ) VectorCopy( m->origin, at );
 			else if( att < m->hdr->numattachments ) VectorCopy( attachment[att], at );
-			else if( att < MEBONES_ATTACHMENTS ) VectorCopy( e->attachment[att], at );
 		}
 
 		VectorSubtract( origin, at, mid );
@@ -2917,6 +2923,89 @@ static void R_MeSolidDone( const mebones_job_t *job )
 	R_MeGateOpen( job, MEBONES_SOLIDGATE, (uintptr_t)job->cmds );
 }
 
+// bones and attachments
+static void R_MeItemBones( const mebones_job_t *job, int i, mebones_ent_t *m )
+{
+	const mebones_item_t *it = &job->items[i];
+	const mstudioattachment_t *pAtt = (const mstudioattachment_t *)((const byte *)m->hdr + m->hdr->attachmentindex );
+	mebones_res_t *res = &r_mebones_res[i];
+
+	if( !m->done )
+	{
+		if( it->draw && it->need )
+			R_MeBonesLod( m, it->e, it->need, it->lod, job->frame->framecount, it->period );
+		else R_MeBones( m, NULL );
+	}
+
+	if( !it->draw )
+		return;
+
+	for( int k = 0; k < m->hdr->numattachments; k++ )
+	{
+		const float (*b)[4] = (const float (*)[4])m->out[pAtt[k].bone];
+
+		for( int j = 0; j < 3; j++ )
+			res->attachment[k][j] = DotProduct( pAtt[k].org, b[j] ) + b[j][3];
+	}
+
+	// as R_StudioClientEvents
+	for( int k = 0; k < MEBONES_ATTACHMENTS && m->hdr->numattachments <= 0; k++ )
+		Matrix3x4_OriginFromMatrix( m->rotation, res->attachment[k] );
+}
+
+// everything that's read from the entity: the main CPU may go on to the next frame then
+static void R_MeItemGather( const mebones_job_t *job, int i )
+{
+	const mebones_item_t *it = &job->items[i];
+	const int slot = r_mebones_me.slot[it->index];
+	const mecull_t *c = &r_mecull[it->index];
+	mebones_ent_t *m = slot ? &r_mebones_ents[slot - 1] : R_MeGather( job->frame, it->e, c->hdr, it->player );
+	mebones_res_t *res = &r_mebones_res[i];
+
+	res->scratch = false;
+	if( !m && it->draw )
+	{
+		// no space: its bones, one after the other in the same place
+		r_mebones_me.scratch = res->scratch = true;
+		m = R_MeGather( job->frame, it->e, c->hdr, it->player );
+		r_mebones_me.scratch = false;
+	}
+
+	res->cmds = 0;
+	res->ent = m;
+	res->visible = true;
+	res->events = true;
+
+	*R_MeBonesSeen( it->e ) = job->frame->framecount + 1;
+
+	if( m )
+	{
+		res->visible = !it->draw || !R_MeBonesCulled( job, m, it->player ? it->player->mod : it->e->model );
+		res->blendprev = m->blendprev;
+		res->prevframe = m->prevframe;
+		Matrix3x4_Copy( res->rotation, m->rotation );
+
+		if( res->visible && it->draw )
+		{
+			if( !m->lit )
+				R_MeDynamicLight( job->frame, it->e, c->small, &m->light );
+			m->lit = true;
+			res->floor = m->light.floor;
+			res->events = R_MeEvents( job->frame, it->e, m );
+
+			// the main CPU wants to know where they are
+			if( res->events )
+			{
+				R_MeItemBones( job, i, m );
+				if( res->scratch )
+					m->done = false;
+			}
+		}
+	}
+
+	PSP_MeWriteback( res, sizeof( *res ));
+}
+
 static void R_MeBonesJob( void *arg )
 {
 	const mebones_job_t *job = arg;
@@ -2924,75 +3013,33 @@ static void R_MeBonesJob( void *arg )
 	r_mebones_me.p = job->cmds;
 
 	for( int i = 0; i < job->count; i++ )
+		R_MeItemGather( job, i );
+	MEBONES_SYNC[MESYNC_GATHERED] = 1;
+
+	for( int i = 0; i < job->count; i++ )
 	{
+		const mebones_item_t *it = &job->items[i];
+		mebones_res_t *res = &r_mebones_res[i];
+		mebones_ent_t *m = res->ent;
+
 		if( i == job->numsolid )
 			R_MeSolidDone( job );
 
-		const mebones_item_t *it = &job->items[i];
-		const int slot = r_mebones_me.slot[it->index];
-		const mecull_t *c = &r_mecull[it->index];
-		mebones_ent_t *m = slot ? &r_mebones_ents[slot - 1] : R_MeGather( job->frame, it->e, c->hdr, it->player );
-		mebones_res_t *res = &r_mebones_res[i];
-
-		res->scratch = false;
-		if( !m && it->draw )
-		{
-			// no space: one after the other in the same place
-			r_mebones_me.scratch = res->scratch = true;
-			m = R_MeGather( job->frame, it->e, c->hdr, it->player );
-			r_mebones_me.scratch = false;
-		}
-
-		res->cmds = 0;
-		res->ent = m;
-		res->visible = true;
-		res->events = true;
-
-		*R_MeBonesSeen( it->e ) = job->frame->framecount + 1;
-
 		if( m )
 		{
-			res->visible = !it->draw || !R_MeBonesCulled( job, m, it->player ? it->player->mod : it->e->model );
-			res->blendprev = m->blendprev;
-			res->prevframe = m->prevframe;
-			Matrix3x4_Copy( res->rotation, m->rotation );
-
-			if( res->visible && !m->done )
-			{
-				if( it->draw && it->need )
-					R_MeBonesLod( m, it->e, it->need, it->lod, job->frame->framecount, it->period );
-				else R_MeBones( m, NULL );
-			}
+			if( res->visible )
+				R_MeItemBones( job, i, m );
 			res->scratch |= m->partial;
 			if( it->need )
 				*R_MeLodSeen( it->e ) = job->frame->framecount + 1;
 
 			if( res->visible && it->draw )
 			{
-				const mstudioattachment_t *pAtt = (const mstudioattachment_t *)((const byte *)m->hdr + m->hdr->attachmentindex );
 				uint *const cmds = r_mebones_me.p;
-				melight_t light;
+				melight_t light = m->light;
 
-				for( int k = 0; k < m->hdr->numattachments; k++ )
-				{
-					const float (*b)[4] = (const float (*)[4])m->out[pAtt[k].bone];
-
-					for( int j = 0; j < 3; j++ )
-						res->attachment[k][j] = DotProduct( pAtt[k].org, b[j] ) + b[j][3];
-				}
-
-				// as R_StudioClientEvents
-				for( int k = 0; k < MEBONES_ATTACHMENTS && m->hdr->numattachments <= 0; k++ )
-					Matrix3x4_OriginFromMatrix( m->rotation, res->attachment[k] );
-
-				res->events = R_MeEvents( job->frame, it->e, m );
-
-				if( !m->lit )
-					R_MeDynamicLight( job->frame, it->e, c->small, &m->light );
-				light = m->light;
-				res->floor = light.floor;
 				if( job->numelights )
-					R_MeEntityLight( job, m, it->e, (const float (*)[3])res->attachment, &light );
+					R_MeEntityLight( job, m, (const float (*)[3])res->attachment, &light );
 
 				uint *const p = R_MeModelCommands( job, it, m, &light );
 				if( p )
@@ -3022,8 +3069,11 @@ static void R_StudioMeAllocCmds( void );
 static model_t *R_StudioSetupPlayerModel( int index );
 static void R_StudioProcessGait( entity_state_t *pplayer );
 
+static void R_StudioMeSettle( void );
+
 static void R_StudioMeReset( void )
 {
+	R_StudioMeSettle();
 	r_mebones.finish = false;
 	// the last jobs still read the frame and write the pool
 	PSP_MeWaitFor( r_mebones.early_ticket );
@@ -3300,6 +3350,7 @@ void R_StudioMeDrop( void )
 {
 	const int count = r_mebones.count;
 
+	r_mebones.settle = false;
 	R_StudioMeReset();
 	r_mebones.begun = false;
 
@@ -3578,6 +3629,7 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	it->mode = c->mode;
 	it->lod = 0;
 	it->need = NULL;
+	it->entindex = e->index;
 
 	// the solid ones are drawn in one go
 	if( it->mode != MEMODE_SOLID && it->index < MECULL_MAXSOLID )
@@ -3634,6 +3686,7 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	if( it->draw )
 		it->need = R_StudioMeDrawNeed( it->draw, &it->lod );
 	it->period = it->need ? R_StudioMePeriod( c, it->lod ) : 1;
+	it->numattachments = it->draw && c->hdr->numattachments > 0 ? Q_min( c->hdr->numattachments, MEBONES_ATTACHMENTS ) : MEBONES_ATTACHMENTS;
 
 	job->count++;
 	job->words += R_StudioMeDrawWords( it );
@@ -3678,7 +3731,7 @@ static void R_StudioMePost( void )
 	for( int i = job->numsolid; i < job->count; i++ )
 		R_MeGateClose( job, i );
 
-	MEBONES_SYNC[MESYNC_ITEMS] = 0;
+	MEBONES_SYNC[MESYNC_ITEMS] = MEBONES_SYNC[MESYNC_GATHERED] = 0;
 	r_mebones.ticket = PSP_MeRunKeep( R_MeBonesJob, job );
 	if( r_mebones.ticket )
 		r_mebones.count = job->count;
@@ -10995,21 +11048,19 @@ static void R_StudioMeClose( void )
 =================
 R_StudioMeItem
 
-what's left to do here for a model the ME draws, NULL if it's not the ME's after all
+what's left to do here for a model the ME draws, once the job has copied what it needs
 =================
 */
-static const mebones_res_t *R_StudioMeItem( int i )
+static void R_StudioMeItem( int i )
 {
 	const mebones_item_t *it = &r_mebones.job.items[i];
+	const mebones_res_t *res = &r_mebones_res[i];
 	const medraw_t *d = it->draw;
 	cl_entity_t *e = it->e;
-	const mebones_res_t *res = R_StudioMeWait( i );
 
-	if( !res || !res->ent || ( res->visible && !res->cmds ))
-		return NULL;
-
-	if( !res->visible )
-		return res;
+	sceKernelDcacheInvalidateRange( res, sizeof( *res ));
+	if( !res->ent || !res->visible )
+		return;
 
 	r_stats.c_studio_models_drawn++;
 	r_stats.c_studio_polys += d->polys + ( it->wdraw ? it->wdraw->polys : 0 );
@@ -11025,30 +11076,17 @@ static const mebones_res_t *R_StudioMeItem( int i )
 		e->cvFloorColor.b = ( res->floor >> 16 ) & 255;
 	}
 
-	// R_StudioCalcAttachments
-	memcpy( e->attachment, res->attachment, sizeof( vec3_t ) * ( d->hdr->numattachments > 0 ? d->hdr->numattachments : MEBONES_ATTACHMENTS ));
-
 	if( res->events )
 	{
+		// R_StudioCalcAttachments
+		memcpy( e->attachment, res->attachment, sizeof( vec3_t ) * it->numattachments );
+
 		RI.currententity = e;
 		RI.currentmodel = it->player ? (model_t *)it->player->mod : e->model;
 		R_StudioSetHeader( (studiohdr_t *)d->hdr );
 		Matrix3x4_Copy( g_studio.rotationmatrix, res->rotation );
 		R_StudioClientEvents();
 	}
-
-	// copy attachments into global entity array
-	if( e->index > 0 )
-	{
-		cl_entity_t *ent = CL_GetEntityByIndex( e->index );
-
-		if( ent != e )
-			memcpy( ent->attachment, e->attachment, sizeof( vec3_t ) * 4 );
-		if( r_mebones.job.numelights )
-			R_StudioMoveElights( e );
-	}
-
-	return res;
 }
 
 static const uint *R_StudioMeLastSkin( const mebones_item_t *it )
@@ -11105,9 +11143,8 @@ void R_StudioDrawMeModel( cl_entity_t *e )
 =================
 R_StudioFinishMeModels
 
-events and attachments of these models, as late in the frame as possible: the
-ME may still be at it. In the next frames the main CPU draws the ones the ME
-couldn't
+events of these models, as late in the frame as possible. The ME may still be at
+their bones and commands, it doesn't read the entities for that
 =================
 */
 void R_StudioFinishMeModels( void )
@@ -11117,27 +11154,99 @@ void R_StudioFinishMeModels( void )
 
 	r_mebones.finish = false;
 
+	if( !MEBONES_SYNC[MESYNC_GATHERED] )
+	{
+		const uint32_t t0 = sceKernelGetSystemTimeLow();
+
+		for( uint n = 0; !MEBONES_SYNC[MESYNC_GATHERED] && !PSP_MeDone( r_mebones.ticket ); n++ )
+		{
+			if( n > 1000000 )
+				PSP_MeWaitFor( r_mebones.ticket ); // the ME's timeout
+		}
+		r_mebones.waited += sceKernelGetSystemTimeLow() - t0;
+	}
+
 	cl_entity_t *saveent = RI.currententity;
 	model_t *savemodel = RI.currentmodel;
 
 	R_StudioSetupTimings();
 
+	for( int i = 0; i < r_mebones.count && MEBONES_SYNC[MESYNC_GATHERED]; i++ )
+	{
+		if( r_mebones.job.items[i].draw )
+			R_StudioMeItem( i );
+	}
+
+	r_mebones.settle = true;
+	r_mebones.list = extGuListId();
+	RI.currententity = saveent;
+	RI.currentmodel = savemodel;
+}
+
+/*
+=================
+R_StudioMeSettle
+
+their attachments, once the ME is done: in the next frame, before it's told what to
+draw in that. The main CPU draws the ones the ME couldn't in the next frames
+=================
+*/
+static void R_StudioMeSettle( void )
+{
+	if( !r_mebones.settle )
+		return;
+
+	r_mebones.settle = false;
+
+	if( !PSP_MeDone( r_mebones.ticket ))
+	{
+		const uint32_t t0 = sceKernelGetSystemTimeLow();
+
+		PSP_MeWaitFor( r_mebones.ticket );
+		r_mebones.waited += sceKernelGetSystemTimeLow() - t0;
+	}
+
+	const int done = MEBONES_SYNC[MESYNC_ITEMS];
+
 	for( int i = 0; i < r_mebones.count; i++ )
 	{
 		const mebones_item_t *it = &r_mebones.job.items[i];
+		const mebones_res_t *res = &r_mebones_res[i];
 
-		if( it->draw && !R_StudioMeItem( i ))
+		if( !it->draw )
+			continue;
+
+		sceKernelDcacheInvalidateRange( res, sizeof( *res ));
+		if( i >= done || !res->ent || ( res->visible && !res->cmds ))
+		{
 			R_StudioMeRefuse( it->e );
+			continue;
+		}
+
+		// it->e may be gone by now
+		cl_entity_t *const ent = res->visible && it->entindex > 0 ? CL_GetEntityByIndex( it->entindex ) : NULL;
+
+		if( !ent )
+			continue;
+
+		// R_StudioCalcAttachments
+		memcpy( ent->attachment, res->attachment, sizeof( vec3_t ) * it->numattachments );
+		if( r_mebones.job.numelights )
+			R_StudioMoveElights( ent );
 	}
 
 	// it was given up on: the GE skips the others
-	if( MEBONES_SYNC[MESYNC_ITEMS] < r_mebones.job.numsolid )
+	if( done < r_mebones.job.numsolid )
 		R_MeGateOpen( &r_mebones.job, MEBONES_SOLIDGATE, 0 );
-	for( int i = Q_max( MEBONES_SYNC[MESYNC_ITEMS], r_mebones.job.numsolid ); i < r_mebones.count; i++ )
+	for( int i = Q_max( done, r_mebones.job.numsolid ); i < r_mebones.count; i++ )
 		R_MeGateOpen( &r_mebones.job, i, 0 );
+}
 
-	RI.currententity = saveent;
-	RI.currentmodel = savemodel;
+// before the GE's list is waited for
+void R_StudioMeSync( int list )
+{
+	if( r_mebones.settle && r_mebones.list == list )
+		R_StudioMeSettle();
 }
 #endif
 

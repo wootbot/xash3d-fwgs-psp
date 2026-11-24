@@ -1318,7 +1318,10 @@ void R_EndFrame( void )
 static void R_SyncList( int id )
 {
 	if( id >= 0 )
+	{
+		R_StudioMeSync( id ); // it may wait for the ME
 		sceGeListSync( id, 0 );
+	}
 }
 
 /*
