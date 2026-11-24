@@ -795,6 +795,7 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   itself, replaced with a NOP by the ME with uncached writes), events and attachments moved to
   R_EndFrame, the brush models' job before the models'. +3.5 fps. What the ME can't draw (no space, a
   sequence group not loaded) is missing for one frame, then the main CPU draws it for half a second.
-  Lights made by an event show a frame later. Compared with the main CPU: solid, texture and additive
-  grunts look the same, also in a live firefight. A pushed restart left the Wi-Fi join hanging twice
-  more (menu running fine the first time); cause not known.
+  Lights made by an event show a frame later. Compared with the main CPU: solid and
+  half transparent grunts look the same up close, additive ones from afar; a live firefight ran without
+  ME errors (its pictures weren't compared). A pushed restart left the Wi-Fi join hanging twice
+  more (menu running fine both times); cause not known.
