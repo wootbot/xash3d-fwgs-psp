@@ -401,7 +401,17 @@ cl_entity_t *R_BeamGetEntity( int index )
 {
 	if( index < 0 )
 		return clgame.dllFuncs.pfnGetUserEntity( BEAMENT_ENTITY( -index ));
+#if XASH_PSP
+	// the server sends beams that are in view without the entities at their ends:
+	// those are where they were seen last, or at the origin of the map
+	cl_entity_t *ent = CL_GetEntityByIndex( BEAMENT_ENTITY( index ));
+
+	if( ent && BEAMENT_ENTITY( index ) > cl.maxclients && ( !ent->model || cl.parsecount - ent->curstate.messagenum > 3 ))
+		return NULL;
+	return ent;
+#else
 	return CL_GetEntityByIndex( BEAMENT_ENTITY( index ));
+#endif
 }
 
 /*
@@ -425,7 +435,7 @@ void CL_KillDeadBeams( cl_entity_t *pDeadEntity )
 		pnext = pbeam->next;
 
 		// link into new list.
-		if( R_BeamGetEntity( pbeam->startEntity ) != pDeadEntity )
+		if(( pbeam->startEntity < 0 ? R_BeamGetEntity( pbeam->startEntity ) : CL_GetEntityByIndex( BEAMENT_ENTITY( pbeam->startEntity ))) != pDeadEntity )
 		{
 			pbeam->next = pnewlist;
 			pnewlist = pbeam;
