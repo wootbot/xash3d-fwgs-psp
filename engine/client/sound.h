@@ -132,6 +132,9 @@ uint S_RawSamplesStereo( portable_samplepair_t *rawsamples, uint rawend, uint ma
 void S_RawEntSamples( int entnum, uint samples, uint rate, word width, word channels, const byte *data, int snd_vol, float attn );
 void S_StopSound( int entnum, int channel, const char *soundname );
 void S_UpdateFrame( struct ref_viewpass_s *rvp );
+#if XASH_PSP
+qboolean S_UpdatedEarly( void );
+#endif
 void S_StopAllSounds( qboolean ambient );
 void S_FreeSounds( void );
 

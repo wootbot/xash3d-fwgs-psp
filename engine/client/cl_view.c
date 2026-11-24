@@ -422,8 +422,13 @@ void V_RenderView( void )
 			ref.dllFuncs.R_ClearScreen();
 		}
 
+#if XASH_PSP
+		S_UpdateFrame( &rvp ); // CL_ExtraUpdate updates the sound while the renderer waits
+		GL_RenderFrame( &rvp );
+#else
 		GL_RenderFrame( &rvp );
 		S_UpdateFrame( &rvp );
+#endif
 		viewnum++;
 
 	} while( rp.nextView );

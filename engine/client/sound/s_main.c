@@ -1573,6 +1573,20 @@ static void S_UpdateChannels( void )
 	SNDDMA_Submit();
 }
 
+#if XASH_PSP
+static qboolean snd_listener_set;	// S_UpdateFrame was called, SND_UpdateSound not yet
+static qboolean snd_updated;	// S_ExtraUpdate did the frame's SND_UpdateSound
+
+// whether it did, for the end of the frame
+qboolean S_UpdatedEarly( void )
+{
+	const qboolean updated = snd_updated;
+
+	snd_updated = false;
+	return updated;
+}
+#endif
+
 /*
 =================
 S_ExtraUpdate
@@ -1584,6 +1598,14 @@ void S_ExtraUpdate( void )
 {
 	if( !snd.initialized ) return;
 #if XASH_PSP
+	// this frame's update, while the renderer waits
+	if( snd_listener_set )
+	{
+		SND_UpdateSound();
+		snd_updated = true;
+		return;
+	}
+
 	// S_Update mixed s_mixahead ahead: while more than half of it is still left,
 	// topping it up mid-frame only splits the same mixing into more calls, each
 	// with its own per-channel setup
@@ -1608,6 +1630,9 @@ void S_UpdateFrame( struct ref_viewpass_s *rvp )
 	VectorCopy( rvp->vieworigin, snd.origin );
 	AngleVectors( rvp->viewangles, snd.forward, snd.right, snd.up );
 	snd.entnum = rvp->viewentity; // can be camera entity too
+#if XASH_PSP
+	snd_listener_set = !snd_updated;
+#endif
 }
 
 /*
@@ -1621,6 +1646,9 @@ void SND_UpdateSound( void )
 {
 	if( !snd.initialized ) return;
 
+#if XASH_PSP
+	snd_listener_set = false;
+#endif
 	if( clgame.soundFuncs.pfnS_UpdateSound )
 		clgame.soundFuncs.pfnS_UpdateSound();
 

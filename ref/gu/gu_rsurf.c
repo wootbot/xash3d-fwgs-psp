@@ -2599,6 +2599,9 @@ static qboolean R_MeWorldEnd( void )
 	if( !r_meworld.ticket )
 		return false;
 
+	if( R_MeWorldBusy( ))
+		gEngfuncs.CL_ExtraUpdate(); // the sound, instead of waiting
+
 	PSP_MeWaitFor( r_meworld.ticket );
 	r_meworld.ticket = 0;
 

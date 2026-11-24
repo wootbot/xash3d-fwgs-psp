@@ -3968,6 +3968,9 @@ void Host_ClientFrame( void )
 	SCR_UpdateScreen ();
 
 	// update audio
+#if XASH_PSP
+	if( !S_UpdatedEarly( ))
+#endif
 	SND_UpdateSound ();
 
 	// play avi-files
