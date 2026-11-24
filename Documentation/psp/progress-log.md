@@ -895,3 +895,10 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     triangles instead of 45%/30%. stress1 29-32 ms with that, fight1 unchanged (8.3-8.4 ms), live ~30 fps
     (was ~18).
   - The first run of a demo is slower (loading, the levels of detail are being made): compare the others.
+- 2026-11-24: **Entities updated 1-2 times a second in the stress scene** (user report). Two causes: `rate 3500`
+  in the config of the old port (an update is 1.5 KB there; connecting raises it to 25000 now), and the
+  network threads only ran in the 200 us sleep of each frame. That's enough at 100 fps, not at 30, and the
+  main thread doesn't wait for the ME anymore: 20 packets a second arrived in bursts with gaps of up to
+  0.7 s, ping 500-1000 ms. The sleep is 4% of a long frame now: gaps 0.2 s, ping 80-180 ms, the lowest net
+  pool 75-90 KB instead of 0. 12-14 updates a second are what's left: the server's own limit is ~19 KB/s
+  (the same with rate 100000). `net_showpackets 1` shows it, tools/dbg/netburst.sh sums it up.
