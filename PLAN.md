@@ -72,7 +72,7 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [x] Reduced skeletons and decimated meshes: levels of detail made from the models at run time
       (`r_studio_lod`), poses kept for a few frames when the ME has too much to do. A cache of decoded
       keyframes was tried twice and saves almost nothing (see the progress log).
-- [ ] Sounds are loaded when they first play: 30-95 ms each. In the background instead.
+- [x] Sounds load in the background, decals with the map: no frames over ~35 ms in the blastcorpse1 fight.
 - [ ] Memory in the stress scene: ~1 MB left, the second join of a session can fail.
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
 - [~] World: compact copies of the world surfaces for the walk and both passes (done, world

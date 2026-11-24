@@ -862,3 +862,18 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     stack overflow that had switched the PSP off, and `doctor.mdl`, whose bones have parents out of range.
   - Left in stress1 (ms a frame, ~45): packets ~9, the ME wait ~5, entities 6, sound 2-3, world 4-5. Sounds
     that play for the first time stop the game for 30-95 ms each (open and read from the stick).
+- 2026-11-24 (2): **Long frames** (live blastcorpse1 fight, the sampler's last samples dumped after every frame
+  over 45 ms). Frames of up to 646 ms, now 33 ms at most:
+  - Sounds (30-95 ms when one first plays, mostly the stick looking for the file): `aio_psp.c`, a thread that
+    reads one file, and channels that wait for their sound. Frames are ~2 ms longer on average while it
+    reads. The first version ended in a power-off 2 s after a fight; its buffer shared cache lines with
+    other data, which the driver drops after the DMA while the game runs (suspected, not proven; with
+    whole lines several fights and the stress scene ran through). Tested on the PC with a fake driver
+    that overwrites the whole lines, failing reads and allocations, cancels (no race detector: it
+    doesn't run in the container).
+  - Decals, 69 ms each: FS_LoadImage without an extension searched `name.*`, which lists the directory
+    from the stick. The listing cache answers for every extension: 0.7 ms. 44 common decals load with
+    the map (0.2 s). Joining blastcorpse1 27.2 -> 23.2 s.
+  - Directory listings, 20-60 ms: any open for writing dropped all of them, only its directory's now.
+  - fight1: 108 fps, 4 of 1800 frames under 60. Stress scene: memory is the limit (largest block
+    104 KB after a few demos in the same session).
