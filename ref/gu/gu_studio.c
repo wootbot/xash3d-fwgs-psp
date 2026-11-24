@@ -1176,7 +1176,7 @@ typedef struct
 	int		negpitch;
 	cl_entity_t	**solid, **trans;
 	int		framecount;
-	int		hold;	// frames a pose is kept for, more than a level of detail's
+	int		hold;	// the ME has too much to do: 0-4
 	int		numplayers;
 	meplayer_t	players[MEBONES_MAXPLAYERS];
 
@@ -1210,6 +1210,7 @@ typedef struct
 	int		mode;	// MEMODE
 	int		lod;	// of draw
 	const byte	*need;	// bones of the level of detail
+	int		period;	// frames a pose of that is kept for
 } mebones_item_t;
 
 enum { MEMODE_SOLID = 0, MEMODE_BLEND, MEMODE_ADD };
@@ -1329,6 +1330,7 @@ typedef struct
 	uint	*p;	// end of the commands
 	const cl_entity_t	*ents[MECULL_MAX];
 	byte	slot[MECULL_MAX];	// of r_mebones_ents + 1, by table index
+	uint16_t	lodseen[256];	// when it was last R_MeBonesLod's, as seen
 	uint16_t	seen[256];	// when an entity was last not culled, by a hash of its address: the low bits of tr.framecount
 	megait_t	gait[4];	// R_MeGaitBones
 	int	nextgait;
@@ -1721,9 +1723,8 @@ static void R_MeBones( mebones_ent_t *m, matrix3x4 *parentbones )
 R_MeBonesLod
 
 The bones of an entity that's drawn with a level of detail: only the ones its
-vertices are on, and the pose is kept for a few frames. Nobody sees a small
-model move 20 times a second instead of 60. When there's too much to do for the
-ME all models keep theirs (frame->hold).
+vertices are on, and a small model keeps its pose for a few frames
+(R_StudioMePeriod).
 ====================
 */
 #define MELOD_CACHE		192	// entities
@@ -1745,22 +1746,19 @@ static melod_t *R_MeLodGet( const cl_entity_t *e )
 	return r_mebones.lods ? &r_mebones.lods[(((uint)(uintptr_t)e * 2654435761u ) >> 16 ) * MELOD_CACHE >> 16] : NULL;
 }
 
-static void R_MeBonesLod( mebones_ent_t *m, const cl_entity_t *e, const byte *lodneed, int lod, uint framecount, int hold )
+static void R_MeBonesLod( mebones_ent_t *m, const cl_entity_t *e, const byte *lodneed, int lod, uint framecount, uint period )
 {
 	static const matrix3x4 identity = {{ 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f }};
 	const studiohdr_t *hdr = m->hdr;
 	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
 	const mstudioseqdesc_t *const gait = m->gait ? m->seq[2].pseqdesc : NULL;
-	const qboolean blendprev = m->blendprev && lod < 2;
+	const qboolean blendprev = m->blendprev && ( lod < 2 || period <= 1 );
 	const int nb = hdr->numbones;
-	const uint period = lod + 1 + hold;
 	melod_t *c = R_MeLodGet( e );
 	byte need[MAXSTUDIOBONES];
 
-	if( lodneed )
-		memcpy( need, lodneed, nb );
-	else memset( need, true, nb );
-	if( m->weapon && lodneed )
+	memcpy( need, lodneed, nb );
+	if( m->weapon )
 	{
 		// and what the weapon's are merged with
 		const signed char *map = m->weapon->merge->map;
@@ -1772,8 +1770,8 @@ static void R_MeBonesLod( mebones_ent_t *m, const cl_entity_t *e, const byte *lo
 		}
 	}
 
-	// no space, or another entity's of this frame is there
-	if( !c || nb > MELOD_MAXBONES || ( c->ent != e && c->frame == framecount ))
+	// not kept, no space, or another entity's of this frame is there
+	if( !c || period <= 1 || nb > MELOD_MAXBONES || ( c->ent != e && c->frame == framecount ))
 		R_MeCalcBones( m, m->out, m->rotation, NULL, need, blendprev );
 	else
 	{
@@ -1800,8 +1798,7 @@ static void R_MeBonesLod( mebones_ent_t *m, const cl_entity_t *e, const byte *lo
 	}
 
 	PSP_MeWriteback( m->out, nb * sizeof( matrix3x4 ));
-	m->done = true;
-	m->partial = lodneed != NULL;
+	m->done = m->partial = true;
 
 	if( m->weapon )
 		R_MeBones( m->weapon, m->out );
@@ -2658,6 +2655,11 @@ static inline uint16_t *R_MeBonesSeen( const cl_entity_t *e )
 	return &r_mebones_me.seen[((uint)(uintptr_t)e * 2654435761u ) >> 24];
 }
 
+static inline uint16_t *R_MeLodSeen( const cl_entity_t *e )
+{
+	return &r_mebones_me.lodseen[((uint)(uintptr_t)e * 2654435761u ) >> 24];
+}
+
 // R_StudioPreCull's sphere
 static void R_MeSphere( const mebones_frame_t *frame, const cl_entity_t *e, const model_t *mod, const studiohdr_t *hdr, mecull_t *c )
 {
@@ -2800,8 +2802,7 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 			continue;
 
 		// R_MeBonesLod's, most likely again
-		const melod_t *lod = R_MeLodGet( e );
-		if( lod && lod->ent == e && lod->lod && frame->framecount - lod->frame <= 8 )
+		if( *R_MeLodSeen( e ) == last )
 			continue;
 
 		if( MEBONES_SYNC[MESYNC_YIELD] >= number )
@@ -2817,9 +2818,7 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 		if( !m )
 			continue;
 
-		if( frame->hold && !c->small )
-			R_MeBonesLod( m, e, NULL, 0, frame->framecount, frame->hold );
-		else R_MeBones( m, NULL );
+		R_MeBones( m, NULL );
 		if( frame->draw && c->type != MECULL_BONES )
 		{
 			R_MeDynamicLight( frame, e, c->small, &m->light );
@@ -2960,11 +2959,13 @@ static void R_MeBonesJob( void *arg )
 
 			if( res->visible && !m->done )
 			{
-				if( it->draw && ( it->need || ( job->frame->hold && !c->small )))
-					R_MeBonesLod( m, it->e, it->need, it->lod, job->frame->framecount, job->frame->hold );
+				if( it->draw && it->need )
+					R_MeBonesLod( m, it->e, it->need, it->lod, job->frame->framecount, it->period );
 				else R_MeBones( m, NULL );
 			}
 			res->scratch |= m->partial;
+			if( it->need )
+				*R_MeLodSeen( it->e ) = job->frame->framecount + 1;
 
 			if( res->visible && it->draw )
 			{
@@ -3529,6 +3530,30 @@ static int R_StudioMeLod( const mecull_t *c )
 	return lod;
 }
 
+/*
+how many frames a pose is kept for. Only small models on the screen keep theirs,
+and not for longer than anyone sees at that size
+*/
+static int R_StudioMePeriod( const mecull_t *c, int lod )
+{
+	const float radius = c->type == MECULL_PLAYER ? 40.0f : c->rpx;
+	const float px = radius * r_mebones.pxscale;
+	const float frametime = Q_max( r_mebones.frame.frametime, 0.001f );
+	vec3_t d;
+
+	VectorSubtract( c->org, RI.rvp.vieworigin, d );
+
+	const float d2 = DotProduct( d, d );
+
+	if( px * px >= 40.0f * 40.0f * d2 )
+		return 1;
+
+	const qboolean small = px * px < 20.0f * 20.0f * d2;
+	const int max = ( small ? 0.1f : 0.05f ) / frametime;
+
+	return bound( 1, Q_min( small ? lod + 1 + r_mebones.frame.hold : 2, max ), 8 );
+}
+
 static const struct medraw_s *R_StudioMeDrawLod( const studiohdr_t *hdr, cl_entity_t *e, const mecull_t *c, const mstudiotexture_t *remap, int lod )
 {
 	const struct medraw_s *d = lod ? R_StudioMeDrawGet( hdr, e, c->body, c->skin, remap, lod ) : NULL;
@@ -3608,6 +3633,7 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 
 	if( it->draw )
 		it->need = R_StudioMeDrawNeed( it->draw, &it->lod );
+	it->period = it->need ? R_StudioMePeriod( c, it->lod ) : 1;
 
 	job->count++;
 	job->words += R_StudioMeDrawWords( it );
