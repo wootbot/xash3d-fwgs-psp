@@ -61,7 +61,7 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 **Plan, by expected gain:**
 - [~] Benchmark that measures what matters: `timedemo` now also prints the in-game frames only
       (no level load), the 1% low, the minimum and how many frames were under 60 / 100 fps.
-      Still to do: a stress scene with many bots and monsters on the test server.
+      The stress scene (31 bots, 32 monsters, crossfire) exists, demo `stress1`: ~22 fps (2026-11-24).
 - [~] Batched studio renderer in the engine: run each phase (transform + cull, bones,
       lighting, GE output) for all models in a row instead of the whole pipeline per model.
       The first check (a whole model drawn twice in a row, 5.9 vs 6.6 ms) missed the point:
@@ -69,10 +69,11 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
       icache, so the repeat is cold too. Per phase cold vs warm repeat: ~45% misses. The
       solid list's plain models in two passes gave 56.9 -> 57.9 fps, but nothing once the GE
       lighting (one draw per batch) was in: dropped again.
-- [ ] Animation: decode only the bones that matter (reduced skeletons). A cache of decoded
+- [x] Reduced skeletons and decimated meshes: levels of detail made from the models at run time
+      (`r_studio_lod`), poses kept for a few frames when the ME has too much to do. A cache of decoded
       keyframes was tried twice and saves almost nothing (see the progress log).
-- [ ] PSP model variants generated offline (fewer bones, decimated meshes, small textures),
-      loaded by the renderer only, so server consistency checks still see the original files.
+- [ ] Sounds are loaded when they first play: 30-95 ms each. In the background instead.
+- [ ] Memory in the stress scene: ~1 MB left, the second join of a session can fail.
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
 - [~] World: compact copies of the world surfaces for the walk and both passes (done, world
       3.7 -> 2.0 ms in fight1), and a compact BSP tree for the walk (walk ~1.2 -> 0.92 ms).
@@ -81,7 +82,7 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [~] Media Engine (second CPU): sound mixing, studio bones, the world walk with its GE commands,
       static brush models, whole studio models with their light (translucent ones and props too),
       players with their weapons, the culling and temp entities are ME jobs. The main CPU hardly waits
-      for the ME or the GE anymore (two display lists), fight1 66 -> 102 fps (2026-11-23). Left: the ME
+      for the ME or the GE anymore (two display lists), fight1 66 -> 106 fps (2026-11-24). Left: the ME
       is idle until the packets are read and from the models on; packet entities, particles, sprites.
 - [~] GE time: ~8 ms of a fight1 frame (world ~4, models ~3.5; half fill, half vertices), and its
       texture and vertex fetches from RAM slow the CPUs down: the textures in sight move into VRAM

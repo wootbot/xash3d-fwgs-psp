@@ -833,3 +833,31 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   (the battery was fine). Memory: +100 KB, stays flat in a long live fight.
   Left on the main CPU (stage profile, ms): packet entities ~2 (states copied twice, physents), linking
   and adding entities ~0.9, the net yield 0.25, prediction ~1. A frame now and then takes 90 ms in some runs.
+- 2026-11-23/24: **Stress scene, levels of detail** (`867e70f5`, `6f6332f3`, `a753dbe9`, `ad07adb1`).
+  A metamod plugin on the test server fills crossfire with 31 bots and 32 monsters in combat (up to 200
+  studio models in view, 56 of them dropped rifles). Demo `stress1` has it; memory is nearly gone there
+  (31 of 32 MB), a second join in the same session can run out (Host_Error, back to the menu).
+  - First it didn't survive: entities now come in chunks of 16 instead of 3 KB each for all 2047, player
+    models are only loaded if they fit, the models' GE commands are budgeted exactly (they flickered),
+    and whatever frees world memory waits for the ME and the GE (R_DropFrame).
+  - The ME's model job is the limit there. Levels of detail are made from the models at run time: bones by
+    how little they move against their parent in 10 frames of the model's own sequences (root mean square,
+    with a limit), triangles by edge collapse in the frame closest to the others. The first version merged
+    bones by size in the default pose down to 8: legs welded to the pelvis, off by 40 units, the user saw
+    broken models at once. Now 0.3 units on average, 10 at worst (PC measurement over all frames).
+    Commands of a grunt 1352 words -> 604 -> 484.
+  - Poses are kept for 2-3 frames at those levels, longer and for all models (`frame->hold`, 0-4) while the
+    main CPU waits for the ME; the light traces as well. 224 models instead of 96 in the ME's list: the
+    ones that didn't fit cost 0.2-1 ms each on the main CPU. Same when a server update can't be used and
+    the lists stay: the ME had no table then and the main CPU drew all 200.
+  - The coprocessor 0 count register stands still on the ME: for a profile it stores what it's doing in an
+    uncached word, the main CPU's sampling thread reads that.
+  - stress1: about 10 -> 22 fps. fight1 (recorded again, the old one was lost): 106 fps with levels of
+    detail, 103 without, 5-9 of 1800 frames under 60.
+  - Demo recording took ~40 ms a frame (dozens of 1-40 byte writes to the stick): buffered. `timedemo in
+    game` counted server updates instead of frames; older numbers can't be compared with the new ones.
+  - The level of detail code ran on the PC first (extracted from gu_studio.c, 32 bit, address and undefined
+    behaviour sanitizers, all models of the game, failing mallocs, unloads in the middle). It found a
+    stack overflow that had switched the PSP off, and `doctor.mdl`, whose bones have parents out of range.
+  - Left in stress1 (ms a frame, ~45): packets ~9, the ME wait ~5, entities 6, sound 2-3, world 4-5. Sounds
+    that play for the first time stop the game for 30-95 ms each (open and read from the stick).
