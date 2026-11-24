@@ -122,6 +122,13 @@ void CL_SetIdealPitch( void )
 	if( cl.local.onground == -1 )
 		return;
 
+#if XASH_PSP
+	// 6 traces for something that changes slowly
+	static uint frame;
+	if( ++frame & 7 )
+		return;
+#endif
+
 	angleval = cl.viewangles[YAW] * M_PI2 / 360.0f;
 	SinCos( angleval, &sinval, &cosval );
 

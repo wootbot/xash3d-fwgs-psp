@@ -20,6 +20,7 @@ GNU General Public License for more details.
 
 #if XASH_PSP
 void GU_WorldSurfDlit( const msurface_t *surf ); // ref/gu/gu_rsurf.c
+extern uint psp_lightstyle_changes; // engine/client/cl_tent.c
 #endif
 
 CVAR_DEFINE_AUTO( r_dlight_virtual_radius, "3", FCVAR_GLCONFIG, "increase dlight radius virtually by this amount" );
@@ -39,17 +40,42 @@ void CL_RunLightStyles( lightstyle_t *ls )
 	if( !world )
 		return;
 
+#if XASH_PSP
+	// the styles are 1.2 KB each: the animated ones, the others when one was set
+	static byte animated[MAX_LIGHTSTYLES];
+	static int numanimated;
+	static uint changes = ~0u;
+#endif
+
 	if( r_fullbright->value || !world->lightdata )
 	{
 		for( int i = 0; i < MAX_LIGHTSTYLES; i++ )
 			g_lightstylevalue[i] = 256 * 256;
+#if XASH_PSP
+		changes = ~psp_lightstyle_changes;
+#endif
 		return;
 	}
 
 	// light animations
 	// 'm' is normal light, 'a' is no light, 'z' is double bright
+#if XASH_PSP
+	const qboolean all = changes != psp_lightstyle_changes;
+
+	changes = psp_lightstyle_changes;
+	if( all )
+		numanimated = 0;
+
+	for( int n = 0; n < ( all ? MAX_LIGHTSTYLES : numanimated ); n++ )
+	{
+		const int i = all ? n : animated[n];
+
+		if( all && ls[i].length > 1 )
+			animated[numanimated++] = i;
+#else
 	for( int i = 0; i < MAX_LIGHTSTYLES; i++ )
 	{
+#endif
 		if( !gp_cl->paused && frametime <= 0.1f )
 			ls[i].time += frametime; // evaluate local time
 

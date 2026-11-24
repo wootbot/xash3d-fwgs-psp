@@ -3016,6 +3016,10 @@ LIGHT STYLE MANAGEMENT
 */
 #define STYLE_LERPING_THRESHOLD	3.0f // because we wan't interpolate fast sequences (like on\off)
 
+#if XASH_PSP
+uint psp_lightstyle_changes; // for CL_RunLightStyles
+#endif
+
 /*
 ================
 CL_ClearLightStyles
@@ -3024,6 +3028,9 @@ CL_ClearLightStyles
 static void CL_ClearLightStyles( void )
 {
 	memset( cl.lightstyles, 0, sizeof( cl.lightstyles ));
+#if XASH_PSP
+	psp_lightstyle_changes++;
+#endif
 }
 
 void CL_SetLightstyle( int style, const char *s, float f )
@@ -3038,6 +3045,9 @@ void CL_SetLightstyle( int style, const char *s, float f )
 
 	ls->length = Q_strncpy( ls->pattern, s, sizeof( ls->pattern ));
 	ls->time = f; // set local time
+#if XASH_PSP
+	psp_lightstyle_changes++;
+#endif
 
 	for( int i = 0; i < ls->length; i++ )
 		ls->map[i] = (float)(s[i] - 'a');
