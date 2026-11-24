@@ -562,6 +562,7 @@ void R_BeginFrame( qboolean clearScene );
 void R_RenderFrame( const struct ref_viewpass_s *vp );
 void R_EndFrame( void );
 void R_WaitFrame( void );
+void R_DropFrame( void );
 void GU_OpenList( qboolean whole );
 void R_GetTextureParms( int *w, int *h, int texnum );
 void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum );
@@ -616,6 +617,7 @@ void GU_WorldSurfsNewFrame( void );
 void GU_ClipGetWorldPlanes( float planes[4][4] );
 void R_MeWorldRegister( void );
 void R_MeWorldBegin( void );
+void R_MeWorldWait( void );
 qboolean R_MeWorldBusy( void );
 #define R_GROUPED_ME	2	// in the flags of the draw lists: drawn by R_MeBrushesDraw
 void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped, const uint16_t *trans_order );
@@ -624,6 +626,9 @@ qboolean R_StudioMeBonesPosted( const cl_entity_t *e );
 // engine/platform/psp/me_psp.c: the renderer is linked into the engine
 qboolean PSP_MeStart( void );
 uint32_t PSP_MeRunKeep( void (*func)( void *arg ), void *arg );
+void *PSP_VolatileAlloc( size_t size );
+void PSP_VolatileFree( void *ptr );
+qboolean PSP_IsVolatile( const void *ptr );
 qboolean PSP_PlayerModelFits( const char *name );
 void PSP_MeWaitFor( uint32_t ticket );
 qboolean PSP_MeDone( uint32_t ticket );
@@ -691,6 +696,8 @@ typedef struct
 const mecull_t *R_StudioMeTable( int *numsolid, int *numtrans, const mesort_t **sort );
 void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *trans_order );
 void R_StudioMeYield( int number );
+void R_StudioMeDrop( void );
+void R_StudioMeFreeCmds( void );
 void R_StudioMeSceneCleared( void );
 qboolean R_StudioMostlyAdditive( const studiohdr_t *hdr );
 int R_RankForRenderMode( int rendermode );

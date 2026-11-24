@@ -1619,6 +1619,9 @@ CL_ClearState
 */
 void CL_ClearState( void )
 {
+#if XASH_PSP
+	PSP_MeWait(); // it reads what is freed here
+#endif
 	CL_ClearResourceLists();
 
 	for( int i = 0; i < MAX_CLIENTS; i++ )

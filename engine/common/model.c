@@ -146,6 +146,9 @@ void Mod_FreeModel( model_t *mod )
 
 	if( mod->type != mod_brush || mod->name[0] != '*' )
 	{
+#if XASH_PSP
+		PSP_MeWait();
+#endif
 		Mod_FreeUserData( mod );
 		Mem_FreePool( &mod->mempool );
 	}

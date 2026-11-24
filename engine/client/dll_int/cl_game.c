@@ -1074,6 +1074,9 @@ void CL_InitEdicts( int maxclients )
 
 void CL_FreeEdicts( void )
 {
+#if XASH_PSP
+	PSP_MeWait();
+#endif
 	ref.dllFuncs.R_ProcessEntData( false, NULL, 0 );
 
 #if XASH_PSP

@@ -1382,6 +1382,28 @@ void R_WaitFrame( void )
 
 /*
 ===============
+R_DropFrame
+
+the frame won't be finished (Host_Error): the GE is done with what there is of it and
+the Media Engine with its jobs, nothing of it is used anymore
+===============
+*/
+void R_DropFrame( void )
+{
+	R_StudioMeDrop();
+	R_MeWorldWait();
+	R_WaitFrame();
+
+	extGuClose( 2 );
+	sceGuSync( GU_SYNC_FINISH, GU_SYNC_WAIT );
+	R_StudioMeFreeCmds();
+	guRender.vert_frame++;
+	GU_OpenList( true );
+	glState.currentTexture = -1;
+}
+
+/*
+===============
 R_DrawCubemapView
 ===============
 */

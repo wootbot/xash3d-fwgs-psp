@@ -258,6 +258,9 @@ static const byte *GL_TextureData( unsigned int texnum )
 
 static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
 {
+	// a frame that was given up on (Host_Error): nothing of it is used anymore
+	R_DropFrame();
+
 	if( !allocate )
 	{
 		tr.draw_list->num_solid_entities = 0;
@@ -350,7 +353,7 @@ static const char *R_GetConfigName( void )
 
 static void R_NewMap( void )
 {
-	R_WaitFrame();
+	R_DropFrame();
 	tr.worldmodel = gp_cl->models[1];
 
 	R_ClearDecals(); // clear all level decals

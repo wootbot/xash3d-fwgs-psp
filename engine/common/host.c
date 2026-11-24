@@ -736,6 +736,9 @@ void GAME_EXPORT Host_Error( const char *error, ... )
 	COM_InitHostState();
 	Cbuf_Clear();
 
+#if XASH_PSP
+	PSP_MeWait(); // the frame stops here, the Media Engine's jobs of it read what is freed
+#endif
 	SV_Shutdown( "Server was killed due to an error\n" );
 	CL_Drop(); // drop clients
 

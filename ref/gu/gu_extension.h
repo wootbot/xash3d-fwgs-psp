@@ -24,6 +24,7 @@ int extGuListId( void );
 void *extGuGetMemoryNoStall( unsigned int size );
 void extGuDrawArrayNoStall( int prim, int vtype, int count, const void *vertices );
 void extGuDrawArrayBatched( int prim, int vtype, int count, const void *vertices );
+void extGuClose( int id );
 void extGuUpdateStall( void );
 unsigned int *extGuCmdBegin( void );
 void extGuCmdEnd( unsigned int *p );

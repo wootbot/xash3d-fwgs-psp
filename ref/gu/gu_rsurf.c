@@ -2338,7 +2338,7 @@ static void R_MeBrushesJob( void *arg )
 	}
 }
 
-static void R_MeWorldWait( void )
+void R_MeWorldWait( void )
 {
 	PSP_MeWaitFor( r_meworld.ticket );
 	PSP_MeWaitFor( r_meworld.brush_ticket );

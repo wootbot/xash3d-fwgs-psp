@@ -1039,11 +1039,13 @@ static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "cull studio models an
 static CVAR_DEFINE_AUTO( r_studio_me_draw, "1", FCVAR_ARCHIVE, "light them and write their draw commands there too, without the client DLL's renderer" );
 static CVAR_DEFINE_AUTO( r_studio_me_players, "1", FCVAR_ARCHIVE, "players too (needs r_studio_me_draw)" );
 
-#define MEBONES_MAXENTS	64
-#define MEBONES_POOL	1536	// bones in the output pool
+#define MEBONES_MAXENTS	96
+#define MEBONES_POOL	2048	// bones in the output pool
+#define MEBONES_SCRATCH	( 2 * MAXSTUDIOBONES )	// and of a model with its weapon after them
 #define MEBONES_ATTACHMENTS	4	// cl_entity_t.attachment
-#define MEBONES_CMDS	16384	// GE commands of all models
-#define MEBONES_MAXPLAYERS	16
+#define MEBONES_CMDS	98304	// GE commands of all models, ~1000 each
+#define MEBONES_CMDSMIN	16384	// if there's no space for so many
+#define MEBONES_MAXPLAYERS	32
 #define MEMERGE_CACHE	16
 #define MELIGHT_MAXPHYS	64	// brush models the floor light may come from
 #define MELIGHT_MAXELIGHTS	16
@@ -1190,6 +1192,7 @@ typedef struct
 	const mebones_frame_t *frame;
 	uint		*cmds, *gates;	// r_mebones_cmds and r_mebones_gates of the frame
 	int		count, numsolid;	// the solid ones come first
+	int		words, maxwords;	// of their commands, at most
 	mebones_item_t	items[MEBONES_MAXENTS];
 
 	// for the ones with a medraw_t
@@ -1210,7 +1213,7 @@ typedef struct
 	float		prevframe;
 	uint32_t		events;	// R_StudioClientEvents may have something to do
 	uint32_t		floor;	// of melight_t
-	uint32_t		pad;
+	uint32_t		scratch;	// the bones are gone
 	float		attachment[MEBONES_ATTACHMENTS][3];
 	matrix3x4		rotation;
 } mebones_res_t;
@@ -1232,14 +1235,17 @@ static struct
 	int		count;	// items valid for this frame's draw
 	uint32_t		hits, misses;
 	uint32_t		vert_frame;
+	void		*alloc;	// what cmds are in, from the first frame on a map
+	qboolean		allocfailed;
+	uint		*cmds[2];	// by guRender.vert_frame & 1, as the gates
+	int		words;	// each
 } r_mebones __attribute__(( aligned( 64 )));
 
 // written by the ME only, read by the main CPU after the progress counts say so
 static mecull_t r_mecull[MECULL_MAX] __attribute__(( aligned( 64 )));
 static mesort_t r_mesort[MECULL_MAXTRANS] __attribute__(( aligned( 64 )));
-static matrix3x4 r_mebones_out[MEBONES_POOL] __attribute__(( aligned( 64 )));
+static matrix3x4 r_mebones_out[MEBONES_POOL + MEBONES_SCRATCH] __attribute__(( aligned( 64 )));
 static mebones_res_t r_mebones_res[MEBONES_MAXENTS] __attribute__(( aligned( 64 )));
-static uint r_mebones_cmds[2][MEBONES_CMDS] __attribute__(( aligned( 64 )));	// by guRender.vert_frame & 1, as the gates
 
 /*
 The GE calls the list of the solid models, and those of the translucent ones,
@@ -1250,7 +1256,7 @@ to them. The main CPU doesn't wait for the models
 #define MEBONES_GATEWORDS	4
 static uint r_mebones_gates[2][( MEBONES_MAXENTS + 4 ) * MEBONES_GATEWORDS] __attribute__(( aligned( 64 ))); // whole cache lines
 #define MEBONES_SOLIDGATE	MEBONES_MAXENTS
-static mebones_ent_t r_mebones_ents[MEBONES_MAXENTS * 2] __attribute__(( aligned( 64 )));
+static mebones_ent_t r_mebones_ents[MEBONES_MAXENTS * 2 + 2] __attribute__(( aligned( 64 )));
 
 // its own, in cache lines of their own (aligned as a type: the size is too)
 typedef struct
@@ -1286,6 +1292,7 @@ typedef struct
 {
 	int	count;	// of r_mebones_ents
 	int	used;	// of r_mebones_out
+	qboolean	scratch;	// both are full: the next ones are only for the commands
 	uint	*p;	// end of the commands
 	const cl_entity_t	*ents[MECULL_MAX];
 	byte	slot[MECULL_MAX];	// of r_mebones_ents + 1, by table index
@@ -1837,10 +1844,11 @@ static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e, const st
 // a new entry, not counted yet
 static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 {
-	const int slot = r_mebones_me.count + ofs, used = r_mebones_me.used + usedofs;
+	const int slot = ( r_mebones_me.scratch ? MEBONES_MAXENTS * 2 : r_mebones_me.count ) + ofs;
+	const int used = ( r_mebones_me.scratch ? MEBONES_POOL : r_mebones_me.used ) + usedofs;
 	mebones_ent_t *m = &r_mebones_ents[slot];
 
-	if( slot >= MEBONES_MAXENTS * 2 || used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL )
+	if( !r_mebones_me.scratch && ( slot >= MEBONES_MAXENTS * 2 || used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL ))
 		return NULL;
 
 	m->hdr = hdr;
@@ -1943,8 +1951,11 @@ static mebones_ent_t *R_MeGather( const mebones_frame_t *frame, const cl_entity_
 		count++;
 	}
 
-	r_mebones_me.used += used;
-	r_mebones_me.count += count;
+	if( !r_mebones_me.scratch )
+	{
+		r_mebones_me.used += used;
+		r_mebones_me.count += count;
+	}
 	PSP_MeWriteback( m, sizeof( *m ));
 	return m;
 }
@@ -2766,6 +2777,15 @@ static void R_MeBonesJob( void *arg )
 		mebones_ent_t *m = slot ? &r_mebones_ents[slot - 1] : R_MeGather( job->frame, it->e, c->hdr, it->player );
 		mebones_res_t *res = &r_mebones_res[i];
 
+		res->scratch = false;
+		if( !m && it->draw )
+		{
+			// no space: one after the other in the same place
+			r_mebones_me.scratch = res->scratch = true;
+			m = R_MeGather( job->frame, it->e, c->hdr, it->player );
+			r_mebones_me.scratch = false;
+		}
+
 		res->cmds = 0;
 		res->ent = m;
 		res->visible = true;
@@ -2831,7 +2851,9 @@ static void R_MeBonesJob( void *arg )
 }
 
 static const struct medraw_s *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap );
+static int R_StudioMeDrawWords( const mebones_item_t *it );
 static void R_StudioMeElights( mebones_job_t *job );
+static void R_StudioMeAllocCmds( void );
 static model_t *R_StudioSetupPlayerModel( int index );
 static void R_StudioProcessGait( entity_state_t *pplayer );
 
@@ -3059,6 +3081,58 @@ static void R_StudioMeLights( mebones_frame_t *frame )
 	}
 }
 
+// the P5 RAM is the map's while it's loading, and free after
+static void R_StudioMeAllocCmds( void )
+{
+	if( r_mebones.alloc || r_mebones.allocfailed )
+		return;
+
+	r_mebones.words = MEBONES_CMDS;
+	r_mebones.alloc = PSP_VolatileAlloc( r_mebones.words * sizeof( uint ) * 2 + 64 );
+	if( !r_mebones.alloc )
+	{
+		r_mebones.words = MEBONES_CMDSMIN;
+		r_mebones.alloc = malloc( r_mebones.words * sizeof( uint ) * 2 + 64 );
+	}
+
+	if( !r_mebones.alloc )
+	{
+		r_mebones.allocfailed = true;
+		r_mebones.words = 0;
+		return;
+	}
+
+	r_mebones.cmds[0] = (uint *)(((uintptr_t)r_mebones.alloc + 63 ) & ~63 );
+	r_mebones.cmds[1] = r_mebones.cmds[0] + r_mebones.words;
+	sceKernelDcacheWritebackInvalidateRange( r_mebones.cmds[0], r_mebones.words * sizeof( uint ) * 2 );
+}
+
+void R_StudioMeFreeCmds( void )
+{
+	if( PSP_IsVolatile( r_mebones.alloc ))
+		PSP_VolatileFree( r_mebones.alloc );
+	else free( r_mebones.alloc );
+	r_mebones.alloc = NULL;
+	r_mebones.allocfailed = false;
+	r_mebones.words = 0;
+}
+
+// the entities are going to be freed
+void R_StudioMeDrop( void )
+{
+	const int count = r_mebones.count;
+
+	R_StudioMeReset();
+	r_mebones.begun = false;
+
+	// the GE may be waiting for them, if the ME was given up on
+	for( int i = r_mebones.job.numsolid; i < count; i++ )
+		R_MeGateOpen( &r_mebones.job, i, 0 );
+	if( count && MEBONES_SYNC[MESYNC_ITEMS] < r_mebones.job.numsolid )
+		R_MeGateOpen( &r_mebones.job, MEBONES_SOLIDGATE, 0 );
+	r_mebones.job.count = r_mebones.job.numsolid = 0;
+}
+
 /*
 ====================
 R_StudioMeEarly
@@ -3099,7 +3173,10 @@ static qboolean R_StudioMeBegin( void )
 	frame->numplayers = 0;
 	frame->draw = R_StudioMeDrawAllowed();
 	if( frame->draw )
+	{
+		R_StudioMeAllocCmds();
 		R_StudioMeLights( frame );
+	}
 
 	if( r_studio_me_players.value && list->num_players > 0 && frame->draw )
 	{
@@ -3290,6 +3367,9 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 			if( !it->wdraw )
 				return false;
 		}
+
+		if( job->words + R_StudioMeDrawWords( it ) > r_mebones.words - 4 )
+			return false;
 		break;
 	case MECULL_SMALL:
 		if( !draw )
@@ -3298,6 +3378,8 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	case MECULL_DRAW:
 		if( draw )
 			it->draw = R_StudioMeDrawGet( c->hdr, e, c->body, c->skin, NULL );
+		if( it->draw && job->words + R_StudioMeDrawWords( it ) > r_mebones.words - 4 )
+			it->draw = NULL; // no space for its commands
 		if( !it->draw && c->type == MECULL_SMALL )
 			return false;
 		break;
@@ -3308,6 +3390,7 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	}
 
 	job->count++;
+	job->words += R_StudioMeDrawWords( it );
 	return it->draw != NULL;
 }
 
@@ -3342,7 +3425,8 @@ static void R_StudioMePost( void )
 	VectorCopy( RI.vright, job->vright );
 	R_StudioMeElights( job );
 
-	job->cmds = r_mebones_cmds[guRender.vert_frame & 1];
+	job->cmds = r_mebones.cmds[guRender.vert_frame & 1];
+	job->maxwords = r_mebones.words;
 	job->gates = r_mebones_gates[guRender.vert_frame & 1];
 	R_MeGateClose( job, MEBONES_SOLIDGATE );
 	for( int i = job->numsolid; i < job->count; i++ )
@@ -3399,7 +3483,7 @@ static qboolean R_StudioMeBonesUse( cl_entity_t *e )
 
 	// not computed if it's off screen, but it's a follower's parent
 	const mebones_ent_t *m = res->ent;
-	if( !m || !res->visible )
+	if( !m || !res->visible || res->scratch )
 		return false;
 
 	sceKernelDcacheInvalidateRange( m, sizeof( *m ));
@@ -6673,6 +6757,11 @@ typedef struct medraw_s
 
 static medraw_t	r_medraw[MEDRAW_CACHE];
 
+static int R_StudioMeDrawWords( const mebones_item_t *it )
+{
+	return ( it->draw ? it->draw->words : 0 ) + ( it->wdraw ? it->wdraw->words : 0 );
+}
+
 static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstudiotexture_t *remap )
 {
 	const studiohdr_t *hdr = m_pStudioHeader;
@@ -6725,9 +6814,36 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 				d->firstflat++;
 			}
 			d->items[at] = it;
-			d->words += 4 + it->numbatches * ( GE_MAXBONES * 13 + 13 + 2 );
 		}
 		d->polys += pl->polys;
+	}
+
+	// as R_MeDrawCommands, the most it takes
+	int slot_bone[GE_MAXBONES];
+
+	for( int i = 0; i < GE_MAXBONES; i++ )
+		slot_bone[i] = -1;
+
+	for( int i = 0; i < d->numitems; i++ )
+	{
+		const geplanitem_t *it = d->items[i];
+
+		d->words += 4; // skin, blending
+		for( int k = 0; k < it->numbatches; k++ )
+		{
+			const gebatch_t *b = &it->batches[k];
+			int next = -1;
+
+			for( int n = 0; n < b->numbones; n++ )
+			{
+				if( slot_bone[n] == b->bones[n] )
+					continue;
+				d->words += next != n ? 13 : 12;
+				next = n + 1;
+				slot_bone[n] = b->bones[n];
+			}
+			d->words += 2 + ( it->chrome ? 13 : 0 );
+		}
 	}
 
 	d->words += 3 + 2 * 2 + 1; // light, smooth and flat, RET
@@ -6958,7 +7074,7 @@ static uint *R_MeModelCommands( const mebones_job_t *job, const mebones_item_t *
 {
 	uint *p = r_mebones_me.p;
 
-	if( p + it->draw->words + ( it->wdraw ? it->wdraw->words : 0 ) >= job->cmds + MEBONES_CMDS )
+	if( p + R_StudioMeDrawWords( it ) >= job->cmds + job->maxwords )
 		return NULL;
 
 	// toward the light
@@ -9157,7 +9273,7 @@ void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *
 
 	cull = R_StudioMeTable( &numsolid, &numtrans, NULL );
 	const qboolean draw = r_mebones.frame.draw && R_StudioMeDrawAllowed();
-	r_mebones.job.count = r_mebones.count = 0;
+	r_mebones.job.count = r_mebones.job.words = r_mebones.count = 0;
 
 	cl_entity_t *saveent = RI.currententity;
 	model_t *savemodel = RI.currentmodel;

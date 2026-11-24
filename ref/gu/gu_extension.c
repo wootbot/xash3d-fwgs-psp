@@ -110,6 +110,14 @@ void extGuUpdateStall( void )
 		sceGeListUpdateStallAddr( ge_list_executed[0], gu_list->current );
 }
 
+/* closes the display list, with the one in it if there is */
+void extGuClose( int id )
+{
+	while( gu_curr_context )
+		sceGuFinish();
+	sceGuFinishId( id );
+}
+
 /* Begin user packet */
 void *extGuBeginPacket( unsigned int *maxsize )
 {
