@@ -807,3 +807,29 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   again; output is kept while the PC is silent. Tested: pushed restart (5 attempts, 27 s), listener
   off for 100 s (left after 60 s, back after 9 attempts and 44 s), then a server connect. Whether the
   outages were dead links isn't known, `wifi.log` on the stick should tell next time.
+- 2026-11-23 (6): **Waits, the bus and temp entities** (fight1 clean 87.8 -> 102 fps, frames under 60:
+  4 -> 2). Timers in the clean build (PSP_MeWaitFor, sceGuSync): the main CPU waited 0.36 ms a frame
+  for the GE and 0.35 ms for the world's job, which is why savings on it hardly showed. Steps:
+  - Temp entities on the ME (`2c27b78f`): it runs HUD_TempEntUpdate's simulation (gravity, bounces off
+    the world, animation, fading, PVS) after the packets are read, while the main CPU predicts and
+    links, and only reads them; CL_TempEntUpdate applies the results. Callbacks, players, entities,
+    sine waves: still the client DLL. **The benchmark didn't use it at first**: CL_LerpPoint sets cl.time
+    in timedemos after the job is posted and the results were dropped; found with the stage profile
+    (`b9e3826c`, 95.4 -> 99.6). Visents filled in on demand (16 KB of writes a packet).
+  - Two display lists (`9102f2be`, 90.3 -> 92): the next frame is built while the GE draws the last one,
+    shown by the GE's finish interrupt. Everything it reads that changes every frame is there twice.
+  - The sound update while waiting for the world (`e6d386f5`): world wait 340 -> 60 us, but no fps.
+    With the waits gone the main CPU itself got slower: the GE and both CPUs share the bus.
+  - So: textures (`4b32313f`, 92 -> 95.4). gu_texture_maxsize 32 gave 98.2 and 64 97.1, 128 only 93.4:
+    it's the fetches from RAM. The textures drawn lately now move into VRAM (one a frame), the cold
+    ones out: a run of neighbouring cold and free blocks, the cheapest. First versions: evicting
+    until the largest block fits never ends when the VRAM is fragmented (2 MB of VRAM empty, the heap
+    full); one victim that is big enough is hardly ever there. A NULL palette must never get to the
+    GE (address 0 can hang the console).
+  - Light styles and ideal pitch (`b1ab7a4e`, 99.6 -> 102): 64 structs of 1.2 KB scanned every frame
+    with double math, 6 traces for the ideal pitch.
+  The PSP switched off once, right after a single player map had loaded, with a build that had the
+  endless eviction and the palette bug; the same steps ran through with the fixed one. Cause not proven
+  (the battery was fine). Memory: +100 KB, stays flat in a long live fight.
+  Left on the main CPU (stage profile, ms): packet entities ~2 (states copied twice, physents), linking
+  and adding entities ~0.9, the net yield 0.25, prediction ~1. A frame now and then takes 90 ms in some runs.

@@ -80,13 +80,12 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
       leaf marks and surface culling), decals.
 - [~] Media Engine (second CPU): sound mixing, studio bones, the world walk with its GE commands,
       static brush models, whole studio models with their light (translucent ones and props too),
-      players with their weapons and the culling are ME jobs (fight1 66 -> 88.6 fps, 2026-11-23).
-      The main CPU waits for the world and the brush models only, the GE for the studio models. Left:
-      the ME is the longer path from the packet entities on, what it does has to get faster or start
-      earlier; particles and sprites.
-- [ ] GE time: ~8 ms of a fight1 frame (world ~4, models ~3.5; half fill, half vertices), and its
-      texture and vertex fetches from RAM slow the CPU down. At 100 fps it is the limit: textures of
-      models into VRAM (HUD and menu images take 500 KB), fewer vertices, less overdraw.
+      players with their weapons, the culling and temp entities are ME jobs. The main CPU hardly waits
+      for the ME or the GE anymore (two display lists), fight1 66 -> 102 fps (2026-11-23). Left: the ME
+      is idle until the packets are read and from the models on; packet entities, particles, sprites.
+- [~] GE time: ~8 ms of a fight1 frame (world ~4, models ~3.5; half fill, half vertices), and its
+      texture and vertex fetches from RAM slow the CPUs down: the textures in sight move into VRAM
+      now. Left: vertices and commands from RAM, fewer vertices, less overdraw.
 - [ ] The non-render floor: engine-side traces, delta parsing, HUD and client frame (same math).
 
 ---
