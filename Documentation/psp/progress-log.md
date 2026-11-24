@@ -909,3 +909,6 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   for the frame, 23 fps.
   - A stretched alien slave beam (user report): the server sends a beam in view without the entity at its end
     (R_BeamGetEntity: no beam if that wasn't in one of the last 3 updates).
+  - Muzzle flashes were missing since the ME draws the models (user report): R_MuzzleFlash adds a sprite for
+    the current frame, the events of those models come after it's drawn (R_StudioFinishMeModels). They wait
+    for the next frame in a list now (psp_late_events), ~13 a frame in the scene.
