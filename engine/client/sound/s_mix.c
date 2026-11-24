@@ -1111,6 +1111,13 @@ static void S_PaintFinish( void )
 	S_TransferSamples16( s_me.out16, s_me_pending.start, s_me_pending.end );
 }
 
+// the ME isn't done, and what's in the DMA buffer lasts for a while
+qboolean S_PaintBusy( void )
+{
+	return s_me_pending.active && !PSP_MeDone( s_me_pending.ticket )
+		&& (int)( s_me_pending.start - snd.soundtime ) > SOUND_DMA_SPEED / 20;
+}
+
 void S_PaintDiscard( void )
 {
 	PSP_MeWaitFor( s_me_pending.ticket );
@@ -1165,9 +1172,13 @@ void S_PaintChannels( int endtime )
 			s_me_pending.end = end;
 			snd.paintedtime = end;
 
-			// more to paint now: this chunk can't wait
+			// more to paint: now, if the next update may come too late
 			if( snd.paintedtime < endtime )
+			{
+				if( S_PaintBusy( ))
+					return;
 				S_PaintFinish();
+			}
 			continue;
 		}
 #endif

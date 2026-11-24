@@ -159,7 +159,7 @@ R_StudioInit
 */
 #if XASH_PSP
 static void R_StudioMeEarly( qboolean complete );
-static convar_t r_studio_me, r_studio_me_draw, r_studio_me_players, r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
+static convar_t r_studio_lod, r_studio_lod_px, r_studio_me, r_studio_me_draw, r_studio_me_players, r_studio_precull, r_studio_ge_elights, r_studio_minpixels, r_studio_minpixels_small, r_studio_propcache, r_studio_proplist, r_studio_geplan, r_studio_atlas, r_studio_ge_hwlight;
 #endif
 
 void R_StudioInit( void )
@@ -183,6 +183,8 @@ void R_StudioInit( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_proplist );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_geplan );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_me );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_lod );
+	gEngfuncs.Cvar_RegisterVariable( &r_studio_lod_px );
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_me_players );
 	psp_entities_hook = R_StudioMeEarly;
 	gEngfuncs.Cvar_RegisterVariable( &r_studio_me_draw );
@@ -1035,21 +1037,42 @@ data and writes only cache lines the main CPU doesn't write to. Followers,
 the view model and the random render effects stay on the main CPU.
 ====================
 */
+static void R_StudioLodThink( void );
+static CVAR_DEFINE_AUTO( r_studio_lod, "1", FCVAR_ARCHIVE, "simpler studio models far away (2, 3: force a level)" );
+static CVAR_DEFINE_AUTO( r_studio_lod_px, "30", FCVAR_ARCHIVE, "radius on the screen below which they are used" );
+
+// how much is left
+#define GE_LODS		2
+
+static const struct
+{
+	byte	bones;
+	float	error;	// but not if that moves vertices farther than this (units, root mean square)
+	float	tris;	// part of them
+	float	px;	// part of r_studio_lod_px
+} ge_lodlevels[GE_LODS] =
+{
+	{ 14, 1.5f, 0.45f, 1.0f },
+	{ 9, 3.0f, 0.30f, 0.45f },
+};
+
 static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "cull studio models and compute the bones of animated ones on the Media Engine" );
 static CVAR_DEFINE_AUTO( r_studio_me_draw, "1", FCVAR_ARCHIVE, "light them and write their draw commands there too, without the client DLL's renderer" );
 static CVAR_DEFINE_AUTO( r_studio_me_players, "1", FCVAR_ARCHIVE, "players too (needs r_studio_me_draw)" );
 
-#define MEBONES_MAXENTS	96
+#define MEBONES_MAXENTS	224
+#define MEBONES_ENTS	254	// with the weapons of players, fits a byte
 #define MEBONES_POOL	2048	// bones in the output pool
 #define MEBONES_SCRATCH	( 2 * MAXSTUDIOBONES )	// and of a model with its weapon after them
 #define MEBONES_ATTACHMENTS	4	// cl_entity_t.attachment
 #define MEBONES_CMDS	98304	// GE commands of all models, ~1000 each
 #define MEBONES_CMDSMIN	16384	// if there's no space for so many
+#define MEBONES_LODWORDS	16384	// more of them: simpler models
 #define MEBONES_MAXPLAYERS	32
 #define MEMERGE_CACHE	16
 #define MELIGHT_MAXPHYS	64	// brush models the floor light may come from
 #define MELIGHT_MAXELIGHTS	16
-#define MELIGHT_CACHE	256
+#define MELIGHT_CACHE	512	// a power of 2
 #define MELIGHT_CELLS	512
 
 // the light of a model, as alight_t
@@ -1139,6 +1162,7 @@ typedef struct mebones_ent_s
 	const memerge_t	*merge;	// a weapon's
 	struct mebones_ent_s *weapon;
 	int		done;	// the bones
+	int		partial;	// only the ones a level of detail needs
 	int		lit;	// light is known, without the entity lights
 	melight_t		light;
 } __attribute__(( aligned( 64 ))) mebones_ent_t;
@@ -1152,6 +1176,7 @@ typedef struct
 	int		negpitch;
 	cl_entity_t	**solid, **trans;
 	int		framecount;
+	int		hold;	// frames a pose is kept for, more than a level of detail's
 	int		numplayers;
 	meplayer_t	players[MEBONES_MAXPLAYERS];
 
@@ -1183,6 +1208,8 @@ typedef struct
 	int		index;	// in the table
 	const meplayer_t	*player;
 	int		mode;	// MEMODE
+	int		lod;	// of draw
+	const byte	*need;	// bones of the level of detail
 } mebones_item_t;
 
 enum { MEMODE_SOLID = 0, MEMODE_BLEND, MEMODE_ADD };
@@ -1213,7 +1240,7 @@ typedef struct
 	float		prevframe;
 	uint32_t		events;	// R_StudioClientEvents may have something to do
 	uint32_t		floor;	// of melight_t
-	uint32_t		scratch;	// the bones are gone
+	uint32_t		scratch;	// the bones are gone, or not all there
 	float		attachment[MEBONES_ATTACHMENTS][3];
 	matrix3x4		rotation;
 } mebones_res_t;
@@ -1239,6 +1266,12 @@ static struct
 	qboolean		allocfailed;
 	uint		*cmds[2];	// by guRender.vert_frame & 1, as the gates
 	int		words;	// each
+	struct melod_s	*lods;	// R_MeBonesLod's, in lodalloc
+	void		*lodalloc;
+	uint32_t		waited;	// us for the ME, in this frame
+	float		load;	// frame.hold: how much too much the ME has to do
+	float		lodscale;	// of r_studio_lod_px
+	float		pxscale;	// pixels of a unit at distance 1
 } r_mebones __attribute__(( aligned( 64 )));
 
 // written by the ME only, read by the main CPU after the progress counts say so
@@ -1256,7 +1289,7 @@ to them. The main CPU doesn't wait for the models
 #define MEBONES_GATEWORDS	4
 static uint r_mebones_gates[2][( MEBONES_MAXENTS + 4 ) * MEBONES_GATEWORDS] __attribute__(( aligned( 64 ))); // whole cache lines
 #define MEBONES_SOLIDGATE	MEBONES_MAXENTS
-static mebones_ent_t r_mebones_ents[MEBONES_MAXENTS * 2 + 2] __attribute__(( aligned( 64 )));
+static mebones_ent_t r_mebones_ents[MEBONES_ENTS + 2] __attribute__(( aligned( 64 )));
 
 // its own, in cache lines of their own (aligned as a type: the size is too)
 typedef struct
@@ -1620,25 +1653,37 @@ static const byte *R_MeGaitBones( const studiohdr_t *hdr )
 	return cache[n].bones;
 }
 
-// parentbones: the bones a weapon's are merged with
-static void R_MeBones( mebones_ent_t *m, matrix3x4 *parentbones )
+/*
+need: the bones to compute, or NULL: all of them
+parentbones: the bones a weapon's are merged with
+*/
+static void R_MeCalcBones( const mebones_ent_t *m, matrix3x4 *out, matrix3x4 rotation, matrix3x4 *parentbones, const byte *need, qboolean blendprev )
 {
 	const studiohdr_t *hdr = m->hdr;
 	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
 	const int nb = hdr->numbones;
 	const byte *gait = m->gait ? R_MeGaitBones( hdr ) : NULL;
+	byte filter[MAXSTUDIOBONES];
+
+	// 0: the sequence's, 1: the gait's, 2: not needed
+	if( need )
+	{
+		for( int i = 0; i < nb; i++ )
+			filter[i] = !need[i] ? 2 : gait ? gait[i] : 0;
+		gait = filter;
+	}
 
 	if( m->merge )
 		R_MeCalcRotations( hdr, r_mebones_tmp.pos[0], r_mebones_tmp.q[0], m->seq[0].pseqdesc, m->seq[0].panim, m->seq[0].f, m->adj, (const byte *)m->merge->map, 0xff );
 	else R_MeSequence( m, &m->seq[0], 0, m->adj, gait );
 
-	if( m->blendprev )
+	if( blendprev )
 	{
 		R_MeSequence( m, &m->seq[1], 4, m->adj, gait );
 		R_MeSlerpBones( nb, r_mebones_tmp.q[0], r_mebones_tmp.pos[0], r_mebones_tmp.q[4], r_mebones_tmp.pos[4], m->sprev, gait );
 	}
 
-	if( gait )
+	if( m->gait )
 		R_MeCalcRotations( hdr, r_mebones_tmp.pos[0], r_mebones_tmp.q[0], m->seq[2].pseqdesc, m->seq[2].panim, m->seq[2].f, m->adj, gait, 1 );
 
 	for( int i = 0; i < nb; i++ )
@@ -1646,18 +1691,117 @@ static void R_MeBones( mebones_ent_t *m, matrix3x4 *parentbones )
 		matrix3x4 bonematrix;
 		const int parent = pbones[i].parent;
 
+		if( need && !need[i] )
+			continue;
+
 		if( m->merge && m->merge->map[i] >= 0 )
 		{
-			Matrix3x4_Copy( m->out[i], parentbones[m->merge->map[i]] );
+			Matrix3x4_Copy( out[i], parentbones[m->merge->map[i]] );
 			continue;
 		}
 
 		R_StudioBoneMatrix( bonematrix, r_mebones_tmp.q[0][i], r_mebones_tmp.pos[0][i] );
-		Matrix3x4_ConcatTransforms( m->out[i], parent == -1 ? m->rotation : m->out[parent], bonematrix );
+		Matrix3x4_ConcatTransforms( out[i], parent == -1 ? rotation : out[parent], bonematrix );
+	}
+}
+
+static void R_MeBones( mebones_ent_t *m, matrix3x4 *parentbones )
+{
+	R_MeCalcBones( m, m->out, m->rotation, parentbones, NULL, m->blendprev );
+	PSP_MeWriteback( m->out, m->hdr->numbones * sizeof( matrix3x4 ));
+	m->done = true;
+	m->partial = false;
+
+	if( m->weapon )
+		R_MeBones( m->weapon, m->out );
+}
+
+/*
+====================
+R_MeBonesLod
+
+The bones of an entity that's drawn with a level of detail: only the ones its
+vertices are on, and the pose is kept for a few frames. Nobody sees a small
+model move 20 times a second instead of 60. When there's too much to do for the
+ME all models keep theirs (frame->hold).
+====================
+*/
+#define MELOD_CACHE		192	// entities
+#define MELOD_MAXBONES	64
+
+typedef struct melod_s
+{
+	const cl_entity_t	*ent;
+	const studiohdr_t	*hdr;
+	const mstudioseqdesc_t	*seq, *gait;
+	uint	frame;	// tr.framecount it's from
+	int	lod, numbones;
+	byte	need[MAXSTUDIOBONES];
+	matrix3x4	bones[MELOD_MAXBONES];	// in the entity's space
+} __attribute__(( aligned( 64 ))) melod_t;
+
+static melod_t *R_MeLodGet( const cl_entity_t *e )
+{
+	return r_mebones.lods ? &r_mebones.lods[(((uint)(uintptr_t)e * 2654435761u ) >> 16 ) * MELOD_CACHE >> 16] : NULL;
+}
+
+static void R_MeBonesLod( mebones_ent_t *m, const cl_entity_t *e, const byte *lodneed, int lod, uint framecount, int hold )
+{
+	static const matrix3x4 identity = {{ 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f }};
+	const studiohdr_t *hdr = m->hdr;
+	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex);
+	const mstudioseqdesc_t *const gait = m->gait ? m->seq[2].pseqdesc : NULL;
+	const qboolean blendprev = m->blendprev && lod < 2;
+	const int nb = hdr->numbones;
+	const uint period = lod + 1 + hold;
+	melod_t *c = R_MeLodGet( e );
+	byte need[MAXSTUDIOBONES];
+
+	if( lodneed )
+		memcpy( need, lodneed, nb );
+	else memset( need, true, nb );
+	if( m->weapon && lodneed )
+	{
+		// and what the weapon's are merged with
+		const signed char *map = m->weapon->merge->map;
+
+		for( int i = 0; i < m->weapon->hdr->numbones; i++ )
+		{
+			for( int p = map[i]; p >= 0 && !need[p]; p = pbones[p].parent )
+				need[p] = true;
+		}
+	}
+
+	// no space, or another entity's of this frame is there
+	if( !c || nb > MELOD_MAXBONES || ( c->ent != e && c->frame == framecount ))
+		R_MeCalcBones( m, m->out, m->rotation, NULL, need, blendprev );
+	else
+	{
+		if( c->ent != e || c->hdr != hdr || c->numbones != nb || c->lod != lod || c->seq != m->seq[0].pseqdesc || c->gait != gait
+			|| framecount - c->frame >= period || (( framecount + ( c - r_mebones.lods )) % period == 0 && c->frame != framecount )
+			|| memcmp( c->need, need, nb ))
+		{
+			R_MeCalcBones( m, c->bones, (float (*)[4])identity, NULL, need, blendprev );
+			c->ent = e;
+			c->hdr = hdr;
+			c->numbones = nb;
+			c->lod = lod;
+			c->seq = m->seq[0].pseqdesc;
+			c->gait = gait;
+			c->frame = framecount;
+			memcpy( c->need, need, nb );
+		}
+
+		for( int i = 0; i < nb; i++ )
+		{
+			if( need[i] )
+				Matrix3x4_ConcatTransforms( m->out[i], m->rotation, c->bones[i] );
+		}
 	}
 
 	PSP_MeWriteback( m->out, nb * sizeof( matrix3x4 ));
 	m->done = true;
+	m->partial = lodneed != NULL;
 
 	if( m->weapon )
 		R_MeBones( m->weapon, m->out );
@@ -1844,11 +1988,11 @@ static void R_StudioMeBonesKey( mebones_key_t *k, const cl_entity_t *e, const st
 // a new entry, not counted yet
 static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 {
-	const int slot = ( r_mebones_me.scratch ? MEBONES_MAXENTS * 2 : r_mebones_me.count ) + ofs;
+	const int slot = ( r_mebones_me.scratch ? MEBONES_ENTS : r_mebones_me.count ) + ofs;
 	const int used = ( r_mebones_me.scratch ? MEBONES_POOL : r_mebones_me.used ) + usedofs;
 	mebones_ent_t *m = &r_mebones_ents[slot];
 
-	if( !r_mebones_me.scratch && ( slot >= MEBONES_MAXENTS * 2 || used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL ))
+	if( !r_mebones_me.scratch && ( slot >= MEBONES_ENTS || used + (( hdr->numbones + 3 ) & ~3 ) > MEBONES_POOL ))
 		return NULL;
 
 	m->hdr = hdr;
@@ -1857,7 +2001,7 @@ static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 	m->gait = false;
 	m->merge = NULL;
 	m->weapon = NULL;
-	m->done = false;
+	m->done = m->partial = false;
 	m->lit = false;
 	return m;
 }
@@ -2300,7 +2444,13 @@ static void R_MeDynamicLight( const mebones_frame_t *frame, const cl_entity_t *e
 		return;
 	}
 
-	melightcache_t *c = &r_mebones_me.light[((uint)(uintptr_t)e * 2654435761u ) >> 24];
+	// two places
+	melightcache_t *c = &r_mebones_me.light[(((uint)(uintptr_t)e * 2654435761u ) >> 20 ) & ( MELIGHT_CACHE - 1 )];
+	melightcache_t *const c2 = &r_mebones_me.light[( c - r_mebones_me.light ) ^ 1];
+
+	if( c->ent != e && c->skyent != e && ( c2->ent == e || c2->skyent == e || c2->time < c->time ))
+		c = c2;
+
 	const int effects = e->curstate.effects & EF_INVLIGHT;
 	const float dirz = effects ? 1.0f : -1.0f;
 	vec3_t dir = { 0.0f, 0.0f, dirz };
@@ -2320,9 +2470,9 @@ static void R_MeDynamicLight( const mebones_frame_t *frame, const cl_entity_t *e
 	if( rgb[0] + rgb[1] + rgb[2] == 0 )
 	{
 		const float time = frame->time;
-		const float dist = small ? 16.0f : 2.0f; // shells and gibs fly
+		const float dist = small ? 16.0f : 2.0f + frame->hold * 6.0f; // shells and gibs fly
 
-		if( c->ent != e || c->effects != effects || time < c->time || time >= c->time + 0.25f || VectorDistance2( c->origin, e->origin ) > dist * dist )
+		if( c->ent != e || c->effects != effects || time < c->time || time >= c->time + 0.25f * ( 1 + frame->hold ) || VectorDistance2( c->origin, e->origin ) > dist * dist )
 		{
 			R_MeFloorLight( frame, c, e->origin, dirz );
 			c->ent = e;
@@ -2648,6 +2798,12 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 			continue;
 		if( r_mebones_me.slot[i] || *R_MeBonesSeen( e ) != last )
 			continue;
+
+		// R_MeBonesLod's, most likely again
+		const melod_t *lod = R_MeLodGet( e );
+		if( lod && lod->ent == e && lod->lod && frame->framecount - lod->frame <= 8 )
+			continue;
+
 		if( MEBONES_SYNC[MESYNC_YIELD] >= number )
 			return;
 
@@ -2661,7 +2817,9 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 		if( !m )
 			continue;
 
-		R_MeBones( m, NULL );
+		if( frame->hold && !c->small )
+			R_MeBonesLod( m, e, NULL, 0, frame->framecount, frame->hold );
+		else R_MeBones( m, NULL );
 		if( frame->draw && c->type != MECULL_BONES )
 		{
 			R_MeDynamicLight( frame, e, c->small, &m->light );
@@ -2801,7 +2959,12 @@ static void R_MeBonesJob( void *arg )
 			Matrix3x4_Copy( res->rotation, m->rotation );
 
 			if( res->visible && !m->done )
-				R_MeBones( m, NULL );
+			{
+				if( it->draw && ( it->need || ( job->frame->hold && !c->small )))
+					R_MeBonesLod( m, it->e, it->need, it->lod, job->frame->framecount, job->frame->hold );
+				else R_MeBones( m, NULL );
+			}
+			res->scratch |= m->partial;
 
 			if( res->visible && it->draw )
 			{
@@ -2850,8 +3013,9 @@ static void R_MeBonesJob( void *arg )
 		R_MeSolidDone( job );
 }
 
-static const struct medraw_s *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap );
+static const struct medraw_s *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap, int lod );
 static int R_StudioMeDrawWords( const mebones_item_t *it );
+static const byte *R_StudioMeDrawNeed( const struct medraw_s *d, int *lod );
 static void R_StudioMeElights( mebones_job_t *job );
 static void R_StudioMeAllocCmds( void );
 static model_t *R_StudioSetupPlayerModel( int index );
@@ -2984,7 +3148,7 @@ static qboolean R_StudioMePlayer( cl_entity_t *e, meplayer_t *p )
 		return false;
 
 	RI.currentmodel = mod;
-	if( !R_StudioMeDrawGet( hdr, e, e->curstate.body, e->curstate.skin, R_StudioMeRemap( e, mod, index )))
+	if( !R_StudioMeDrawGet( hdr, e, e->curstate.body, e->curstate.skin, R_StudioMeRemap( e, mod, index ), 0 ))
 		return false;
 
 	if( pplayer->weaponmodel )
@@ -2996,7 +3160,7 @@ static qboolean R_StudioMePlayer( cl_entity_t *e, meplayer_t *p )
 			return false;
 
 		RI.currentmodel = wmod;
-		if( !R_StudioMeDrawGet( whdr, e, e->curstate.body, e->curstate.skin, NULL ))
+		if( !R_StudioMeDrawGet( whdr, e, e->curstate.body, e->curstate.skin, NULL, 0 ))
 			return false;
 
 		p->wmod = wmod;
@@ -3105,6 +3269,15 @@ static void R_StudioMeAllocCmds( void )
 	r_mebones.cmds[0] = (uint *)(((uintptr_t)r_mebones.alloc + 63 ) & ~63 );
 	r_mebones.cmds[1] = r_mebones.cmds[0] + r_mebones.words;
 	sceKernelDcacheWritebackInvalidateRange( r_mebones.cmds[0], r_mebones.words * sizeof( uint ) * 2 );
+
+	// the ME's, and only from memory nothing else wants
+	r_mebones.lodalloc = PSP_VolatileAlloc( MELOD_CACHE * sizeof( melod_t ) + 64 );
+	r_mebones.lods = r_mebones.lodalloc ? (melod_t *)(((uintptr_t)r_mebones.lodalloc + 63 ) & ~63 ) : NULL;
+	if( r_mebones.lods )
+	{
+		memset( r_mebones.lods, 0, MELOD_CACHE * sizeof( melod_t ));
+		sceKernelDcacheWritebackInvalidateRange( r_mebones.lods, MELOD_CACHE * sizeof( melod_t ));
+	}
 }
 
 void R_StudioMeFreeCmds( void )
@@ -3113,6 +3286,10 @@ void R_StudioMeFreeCmds( void )
 		PSP_VolatileFree( r_mebones.alloc );
 	else free( r_mebones.alloc );
 	r_mebones.alloc = NULL;
+	if( r_mebones.lodalloc )
+		PSP_VolatileFree( r_mebones.lodalloc );
+	r_mebones.lodalloc = NULL;
+	r_mebones.lods = NULL;
 	r_mebones.allocfailed = false;
 	r_mebones.words = 0;
 }
@@ -3170,6 +3347,7 @@ static qboolean R_StudioMeBegin( void )
 	frame->solid = (cl_entity_t **)list->solid_entities;
 	frame->trans = (cl_entity_t **)list->trans_entities;
 	frame->framecount = tr.framecount;
+	frame->hold = r_mebones.load;
 	frame->numplayers = 0;
 	frame->draw = R_StudioMeDrawAllowed();
 	if( frame->draw )
@@ -3220,6 +3398,9 @@ static void R_StudioMeEarly( qboolean complete )
 	{
 		const mebones_early_t *last = &r_mebones.early[0];
 
+		// no update from the server this time (or paused): the lists are the last frame's, all of them
+		if( !r_mebones.begun )
+			R_StudioMeEarly( false );
 		if( !r_mebones.begun )
 			return;
 
@@ -3322,9 +3503,43 @@ static qboolean R_StudioMeRefused( const cl_entity_t *e )
 	return false;
 }
 
+/*
+the level of detail: by the size on the screen, and by how much there is to draw
+(lodscale: from the frames before)
+*/
+static int R_StudioMeLod( const mecull_t *c )
+{
+	const float radius = c->type == MECULL_PLAYER ? 40.0f : c->rpx;
+	vec3_t d;
+
+	if( !r_studio_lod.value || c->small )
+		return 0;
+	if( r_studio_lod.value > 1 )
+		return Q_min( (int)r_studio_lod.value - 1, GE_LODS );
+
+	VectorSubtract( c->org, RI.rvp.vieworigin, d );
+
+	const float px2 = radius * radius * r_mebones.pxscale * r_mebones.pxscale;
+	const float min = r_studio_lod_px.value * r_mebones.lodscale;
+	const float d2 = DotProduct( d, d );
+	int lod = 0;
+
+	while( lod < GE_LODS && px2 < min * min * ge_lodlevels[lod].px * ge_lodlevels[lod].px * d2 )
+		lod++;
+	return lod;
+}
+
+static const struct medraw_s *R_StudioMeDrawLod( const studiohdr_t *hdr, cl_entity_t *e, const mecull_t *c, const mstudiotexture_t *remap, int lod )
+{
+	const struct medraw_s *d = lod ? R_StudioMeDrawGet( hdr, e, c->body, c->skin, remap, lod ) : NULL;
+
+	return d ? d : R_StudioMeDrawGet( hdr, e, c->body, c->skin, remap, 0 );
+}
+
 // true: R_StudioDrawMeModels draws it
 static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw )
 {
+	const int lod = draw ? R_StudioMeLod( c ) : 0;
 	mebones_job_t *job = &r_mebones.job;
 	mebones_item_t *it = &job->items[job->count];
 
@@ -3336,6 +3551,8 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	it->draw = it->wdraw = NULL;
 	it->player = NULL;
 	it->mode = c->mode;
+	it->lod = 0;
+	it->need = NULL;
 
 	// the solid ones are drawn in one go
 	if( it->mode != MEMODE_SOLID && it->index < MECULL_MAXSOLID )
@@ -3356,14 +3573,14 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 			return false;
 
 		RI.currentmodel = (model_t *)it->player->mod;
-		it->draw = R_StudioMeDrawGet( c->hdr, e, c->body, c->skin, R_StudioMeRemap( e, RI.currentmodel, e->index - 1 ));
+		it->draw = R_StudioMeDrawLod( c->hdr, e, c, R_StudioMeRemap( e, RI.currentmodel, e->index - 1 ), lod );
 		if( !it->draw )
 			return false;
 
 		if( it->player->whdr )
 		{
 			RI.currentmodel = (model_t *)it->player->wmod;
-			it->wdraw = R_StudioMeDrawGet( it->player->whdr, e, c->body, c->skin, NULL );
+			it->wdraw = R_StudioMeDrawLod( it->player->whdr, e, c, NULL, lod );
 			if( !it->wdraw )
 				return false;
 		}
@@ -3377,7 +3594,7 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 		// fallthrough
 	case MECULL_DRAW:
 		if( draw )
-			it->draw = R_StudioMeDrawGet( c->hdr, e, c->body, c->skin, NULL );
+			it->draw = R_StudioMeDrawLod( c->hdr, e, c, NULL, lod );
 		if( it->draw && job->words + R_StudioMeDrawWords( it ) > r_mebones.words - 4 )
 			it->draw = NULL; // no space for its commands
 		if( !it->draw && c->type == MECULL_SMALL )
@@ -3388,6 +3605,9 @@ static qboolean R_StudioMeAdd( cl_entity_t *e, const mecull_t *c, qboolean draw 
 	default:
 		return false;
 	}
+
+	if( it->draw )
+		it->need = R_StudioMeDrawNeed( it->draw, &it->lod );
 
 	job->count++;
 	job->words += R_StudioMeDrawWords( it );
@@ -3441,10 +3661,17 @@ static void R_StudioMePost( void )
 // until the ME is done with item i, NULL if it was given up on
 static const mebones_res_t *R_StudioMeWait( int i )
 {
-	for( uint n = 0; MEBONES_SYNC[MESYNC_ITEMS] <= (uint32_t)i && !PSP_MeDone( r_mebones.ticket ); n++ )
+	if( MEBONES_SYNC[MESYNC_ITEMS] <= (uint32_t)i && !PSP_MeDone( r_mebones.ticket ))
 	{
-		if( n > 1000000 )
-			PSP_MeWaitFor( r_mebones.ticket ); // the ME's timeout
+		const uint32_t t0 = sceKernelGetSystemTimeLow();
+
+		for( uint n = 0; MEBONES_SYNC[MESYNC_ITEMS] <= (uint32_t)i && !PSP_MeDone( r_mebones.ticket ); n++ )
+		{
+			if( n > 1000000 )
+				PSP_MeWaitFor( r_mebones.ticket ); // the ME's timeout
+		}
+
+		r_mebones.waited += sceKernelGetSystemTimeLow() - t0;
 	}
 
 	if( MEBONES_SYNC[MESYNC_ITEMS] <= (uint32_t)i )
@@ -5200,10 +5427,24 @@ typedef struct gemerge_s
 	struct gemerge_s	*next;
 } gemerge_t;
 
+// a submodel with fewer bones and triangles, see R_StudioLodThink
+enum { LODSTATE_NONE = 0, LODSTATE_QUEUED, LODSTATE_READY, LODSTATE_FAILED };
+
+typedef struct
+{
+	vec3_t		*verts, *norms;
+	byte		*vertbone;
+	short		*cmds;	// strips as the model's
+	int		*ofs;	// of each mesh, in cmds
+	int		numcmds, numtris;
+} gelod_t;
+
 typedef struct
 {
 	const studiohdr_t	*hdr;
 	const mstudiomodel_t *submodel;
+	gelod_t		lods[GE_LODS];
+	int		lodstate;
 	qboolean		cpumeshes;	// some meshes still need the CPU path
 	int		nummesh;
 	gemesh_t		*meshes;
@@ -5228,8 +5469,12 @@ static uint R_StudioGEHash( const void *p )
 	return (((uint)p ) >> 4 ) % GE_CACHE_SIZE;
 }
 
+static void R_StudioLodForget( gemodel_t *gm );
+static void R_StudioLodForgetBones( const studiohdr_t *hdr );
+
 static void R_StudioGEFreeModel( gemodel_t *gm )
 {
+	R_StudioLodForget( gm );
 	for( int i = 0; i < gm->numblocks; i++ )
 		free( gm->blocks[i] );
 	for( int i = 0; i < gm->nummesh; i++ )
@@ -5268,6 +5513,8 @@ static void R_StudioGEUnload( const studiohdr_t *hdr )
 			ge_cache[i] = NULL;
 		}
 	}
+
+	R_StudioLodForgetBones( hdr );
 
 	// reinsert what came after a freed slot, open addressing
 	for( int i = 0; i < GE_CACHE_SIZE; i++ )
@@ -5703,6 +5950,1087 @@ static void R_StudioGEMeshBatches( gemodel_t *gm, int j )
 		gmesh->ge = false;
 		gmesh->numbatches = 0;
 		gm->cpumeshes = true;
+	}
+}
+
+/*
+=============================================================================
+
+LEVELS OF DETAIL
+
+Models that are small on the screen are drawn with fewer bones and triangles
+(by the Media Engine only, R_StudioMeAdd decides): a 30 bone, 800 triangle grunt
+is ~1000 GE command words, most of them bone matrices, and half a hundred of
+them don't fit a frame, neither the GE's nor the ME's.
+
+Made here, when a model is first seen from far, a little every frame
+(R_StudioLodThink). Bones: the ones that move least against their parent in the
+model's animations follow it instead, as they do in one typical frame, until
+there are few enough. Triangles: edge collapse of a submodel in that frame (as
+Stan Melax's: the cost is the length of the edge times the curvature). No new
+vertices, the ones left keep what they have.
+
+=============================================================================
+*/
+// the bones of a model
+typedef struct
+{
+	const studiohdr_t	*hdr;
+	byte	bone[GE_LODS][MAXSTUDIOBONES];	// the one that moves this one's vertices
+	matrix3x4	pose[MAXSTUDIOBONES];	// the frame that's used
+} lodbones_t;
+
+typedef struct
+{
+	uint16_t	v[3];
+	short	n[3], s[3], t[3];
+	byte	mesh, dead;
+	vec3_t	nrm;
+} lodtri_t;
+
+typedef struct
+{
+	vec3_t	org;
+	float	cost;	// 1e30f: gone
+	int	target;
+	int	head;	// its corners: triangle * 3 + corner, -1
+	byte	bone;
+} lodvert_t;
+
+// the submodel being worked on
+static struct
+{
+	gemodel_t		*gm;
+	const mstudiomodel_t *submodel;
+	lodtri_t		*tris;
+	lodvert_t		*verts;
+	int		*next;	// of a corner
+	vec3_t		*norms;
+	int		numtris, numverts, left, level;
+	int		stage, mesh;	// of the level
+	gelod_t		out;
+	int		outnorms, firstnorm;
+	struct lodout_s	*outtris;	// of the mesh
+	short		(*strip)[4];
+	int		outnum, outtri, outread;
+} ge_lod;
+
+static gemodel_t	*ge_lodqueue[64];
+static int	ge_numlodqueue;
+
+static void R_StudioLodFreeOut( gelod_t *l )
+{
+	free( l->verts );
+	free( l->norms );
+	free( l->vertbone );
+	free( l->cmds );
+	free( l->ofs );
+	memset( l, 0, sizeof( *l ));
+}
+
+static void R_StudioLodAbort( void )
+{
+	free( ge_lod.outtris );
+	free( ge_lod.strip );
+	free( ge_lod.tris );
+	free( ge_lod.verts );
+	free( ge_lod.next );
+	free( ge_lod.norms );
+	R_StudioLodFreeOut( &ge_lod.out );
+	memset( &ge_lod, 0, sizeof( ge_lod ));
+}
+
+// it's going to be freed
+static void R_StudioLodForget( gemodel_t *gm )
+{
+	if( ge_lod.gm == gm )
+		R_StudioLodAbort();
+
+	for( int i = 0; i < ge_numlodqueue; i++ )
+	{
+		if( ge_lodqueue[i] == gm )
+			ge_lodqueue[i--] = ge_lodqueue[--ge_numlodqueue];
+	}
+
+	for( int i = 0; i < GE_LODS; i++ )
+		R_StudioLodFreeOut( &gm->lods[i] );
+}
+
+/*
+===============
+R_StudioLodBones
+===============
+*/
+#define LOD_SAMPLES	10
+
+static lodbones_t	*ge_lodbones[4];
+
+static float R_StudioLodAnimValue( const mstudioanim_t *panim, int j, int frame, float base, float scale )
+{
+	const mstudioanimvalue_t *v;
+
+	if( !panim->offset[j] )
+		return base;
+
+	v = (const mstudioanimvalue_t *)((const byte *)panim + panim->offset[j] );
+	while( v->num.total <= frame )
+	{
+		if( !v->num.total )
+			return base;
+		frame -= v->num.total;
+		v += v->num.valid + 1;
+	}
+
+	v += v->num.valid > frame ? frame + 1 : v->num.valid;
+	return base + v->value * scale;
+}
+
+// the bones in a frame of one of the model's own sequences, or in the default pose
+static void R_StudioLodPose( const studiohdr_t *hdr, const mstudioseqdesc_t *pseqdesc, int frame, matrix3x4 *out )
+{
+	const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex );
+	const mstudioanim_t *panim = pseqdesc ? (const mstudioanim_t *)((const byte *)hdr + pseqdesc->animindex ) : NULL;
+
+	for( int i = 0; i < hdr->numbones; i++ )
+	{
+		matrix3x4 local;
+		float v[6];
+		vec4_t q;
+
+		for( int j = 0; j < 6; j++ )
+			v[j] = panim ? R_StudioLodAnimValue( &panim[i], j, frame, pbone[i].value[j], pbone[i].scale[j] ) : pbone[i].value[j];
+
+		AngleQuaternion( v + 3, q, true );
+		Matrix3x4_FromOriginQuat( local, q, v );
+		if( pbone[i].parent >= 0 )
+			Matrix3x4_ConcatTransforms( out[i], out[pbone[i].parent], local );
+		else Matrix3x4_Copy( out[i], local );
+	}
+}
+
+// the box of a bone's vertices, in the bone's space
+typedef struct
+{
+	vec3_t	mins, maxs;
+	int	count;
+} lodbox_t;
+
+/*
+how far a bone's vertices move on average when they follow another bone as in
+frame ref, squared
+*/
+static float R_StudioLodError( const lodbox_t *b, int bone, int other, matrix3x4 *samples, int num, int numbones, int ref )
+{
+	vec3_t local[4], corner[4];
+	float sum = 0.0f;
+
+	for( int n = 0; n < 4; n++ )
+	{
+		const int bits = "\0\3\5\6"[n];
+		vec3_t p;
+
+		for( int i = 0; i < 3; i++ )
+			corner[n][i] = FBitSet( bits, BIT( i )) ? b->maxs[i] : b->mins[i];
+		Matrix3x4_VectorTransform( samples[ref * numbones + bone], corner[n], p );
+		Matrix3x4_VectorITransform( samples[ref * numbones + other], p, local[n] );
+	}
+
+	for( int s = 0; s < num; s++ )
+	{
+		for( int n = 0; n < 4; n++ )
+		{
+			vec3_t p, q, d;
+
+			Matrix3x4_VectorTransform( samples[s * numbones + bone], corner[n], p );
+			Matrix3x4_VectorTransform( samples[s * numbones + other], local[n], q );
+			VectorSubtract( p, q, d );
+			sum += DotProduct( d, d );
+		}
+	}
+
+	return sum / ( num * 4 );
+}
+
+static const lodbones_t *R_StudioLodBones( const studiohdr_t *hdr )
+{
+	static int next;
+	const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex );
+	const mstudioseqdesc_t *pseqdesc = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	const int numbones = hdr->numbones;
+	byte map[MAXSTUDIOBONES], to[MAXSTUDIOBONES], has[MAXSTUDIOBONES];
+	int used = 0, num = 0, own = 0, seen = 0, ref = 0;
+	float bestsum = 0.0f;
+	matrix3x4 *samples;
+	lodbones_t *lb;
+	lodbox_t *box;
+	float *error;
+
+	for( int i = 0; i < ARRAYSIZE( ge_lodbones ); i++ )
+	{
+		if( ge_lodbones[i] && ge_lodbones[i]->hdr == hdr )
+			return ge_lodbones[i];
+	}
+
+	if( numbones > MAXSTUDIOBONES )
+		return NULL;
+
+	for( int i = 0; i < numbones; i++ )
+	{
+		if( pbone[i].parent >= i )
+			return NULL;
+	}
+
+	if( !ge_lodbones[next] && !( ge_lodbones[next] = malloc( sizeof( lodbones_t ))))
+		return NULL;
+
+	lb = ge_lodbones[next];
+	next = ( next + 1 ) % ARRAYSIZE( ge_lodbones );
+	lb->hdr = NULL;
+
+	samples = malloc( LOD_SAMPLES * numbones * sizeof( *samples ));
+	box = calloc( numbones, sizeof( *box ));
+	error = malloc( numbones * sizeof( *error ));
+	if( !samples || !box || !error )
+		goto out;
+
+	// frames from all over the sequences in this file
+	for( int i = 0; i < hdr->numseq; i++ )
+		own += pseqdesc[i].seqgroup == 0 && pseqdesc[i].numframes > 0;
+
+	for( int i = 0; i < hdr->numseq; i++ )
+	{
+		if( pseqdesc[i].seqgroup != 0 || pseqdesc[i].numframes <= 0 )
+			continue;
+
+		// as many of each, so that they are LOD_SAMPLES
+		seen++;
+		for( int k = 0; num < seen * LOD_SAMPLES / own; k++, num++ )
+			R_StudioLodPose( hdr, &pseqdesc[i], pseqdesc[i].numframes * (( num * 3 ) % 8 + 1 ) / 9, samples + num * numbones );
+	}
+
+	if( !num )
+		R_StudioLodPose( hdr, NULL, 0, samples + num++ * numbones );
+
+	for( int b = 0; b < hdr->numbodyparts; b++ )
+	{
+		const mstudiobodyparts_t *bp = (const mstudiobodyparts_t *)((const byte *)hdr + hdr->bodypartindex ) + b;
+
+		for( int m = 0; m < bp->nummodels; m++ )
+		{
+			const mstudiomodel_t *sub = (const mstudiomodel_t *)((const byte *)hdr + bp->modelindex ) + m;
+			const byte *vertbone = (const byte *)hdr + sub->vertinfoindex;
+			const vec3_t *verts = (const vec3_t *)((const byte *)hdr + sub->vertindex );
+
+			for( int i = 0; i < sub->numverts; i++ )
+			{
+				if( vertbone[i] >= numbones )
+					goto out;
+
+				lodbox_t *v = &box[vertbone[i]];
+
+				for( int c = 0; c < 3; c++ )
+				{
+					v->mins[c] = v->count ? Q_min( v->mins[c], verts[i][c] ) : verts[i][c];
+					v->maxs[c] = v->count ? Q_max( v->maxs[c], verts[i][c] ) : verts[i][c];
+				}
+				v->count++;
+			}
+		}
+	}
+
+	// the frame closest to the others
+	for( int s = 0; s < num; s++ )
+	{
+		float sum = 0.0f;
+
+		for( int i = 0; i < numbones; i++ )
+		{
+			if( box[i].count && pbone[i].parent >= 0 )
+				sum += R_StudioLodError( &box[i], i, pbone[i].parent, samples, num, numbones, s ) * box[i].count;
+		}
+
+		if( !s || sum < bestsum )
+		{
+			bestsum = sum;
+			ref = s;
+		}
+	}
+
+	memcpy( lb->pose, samples + ref * numbones, numbones * sizeof( matrix3x4 ));
+
+	// map: what moves a bone's vertices, has: if it has some; to: where they would go next, error: what that costs at most
+	for( int i = 0; i < numbones; i++ )
+	{
+		map[i] = i;
+		error[i] = -1.0f;
+		has[i] = box[i].count > 0;
+		used += has[i];
+	}
+
+	for( int level = 0; level < GE_LODS; level++ )
+	{
+		const float max = ge_lodlevels[level].error * ge_lodlevels[level].error;
+
+		while( used > ge_lodlevels[level].bones )
+		{
+			int best = -1;
+
+			for( int i = 0; i < numbones; i++ )
+			{
+				int parent = pbone[i].parent;
+
+				if( map[i] != i || !has[i] || parent < 0 )
+					continue;
+
+				if( error[i] < 0.0f )
+				{
+					// the first one up there that has some
+					to[i] = parent;
+					for( int p = parent; p >= 0; p = pbone[p].parent )
+					{
+						if( has[map[p]] )
+						{
+							to[i] = map[p];
+							break;
+						}
+					}
+
+					for( int k = 0; k < numbones; k++ )
+					{
+						if( map[k] == i && box[k].count )
+							error[i] = Q_max( error[i], R_StudioLodError( &box[k], k, to[i], samples, num, numbones, ref ));
+					}
+				}
+
+				if( best < 0 || error[i] < error[best] )
+					best = i;
+			}
+
+			if( best < 0 || error[best] > max )
+				break;
+
+			used -= has[to[best]];
+			has[to[best]] = true;
+			has[best] = false;
+			for( int i = 0; i < numbones; i++ )
+			{
+				if( map[i] == best )
+					map[i] = to[best];
+				error[i] = -1.0f;
+			}
+		}
+
+		memcpy( lb->bone[level], map, sizeof( map ));
+	}
+
+	lb->hdr = hdr;
+out:
+	free( samples );
+	free( box );
+	free( error );
+	return lb->hdr ? lb : NULL;
+}
+
+/*
+===============
+the collapse
+===============
+*/
+static void R_StudioLodNormal( lodtri_t *t )
+{
+	vec3_t a, b;
+
+	VectorSubtract( ge_lod.verts[t->v[1]].org, ge_lod.verts[t->v[0]].org, a );
+	VectorSubtract( ge_lod.verts[t->v[2]].org, ge_lod.verts[t->v[0]].org, b );
+	CrossProduct( a, b, t->nrm );
+	VectorNormalize( t->nrm );
+}
+
+static float R_StudioLodEdgeCost( int u, int v, qboolean open )
+{
+	const lodvert_t *pu = &ge_lod.verts[u], *pv = &ge_lod.verts[v];
+	float sides[8][3], curvature = 0.0f, flip = 0.0f;
+	uint sidemeshes = 0, meshes = 0;
+	int numsides = 0;
+	vec3_t d;
+
+	VectorSubtract( pu->org, pv->org, d );
+
+	for( int c = pu->head; c >= 0; c = ge_lod.next[c] )
+	{
+		const lodtri_t *t = &ge_lod.tris[c / 3];
+
+		SetBits( meshes, BIT( t->mesh & 31 ));
+		if( t->v[0] != v && t->v[1] != v && t->v[2] != v )
+			continue;
+		SetBits( sidemeshes, BIT( t->mesh & 31 ));
+		if( numsides < 8 )
+		{
+			VectorCopy( t->nrm, sides[numsides] );
+			numsides++;
+		}
+	}
+
+	for( int c = pu->head; c >= 0; c = ge_lod.next[c] )
+	{
+		const lodtri_t *t = &ge_lod.tris[c / 3];
+		float min = 1.0f;
+
+		for( int i = 0; i < numsides; i++ )
+		{
+			const float k = ( 1.0f - DotProduct( t->nrm, sides[i] )) * 0.5f;
+			min = Q_min( min, k );
+		}
+		curvature = Q_max( curvature, min );
+
+		// a triangle that stays must not turn over
+		if( t->v[0] != v && t->v[1] != v && t->v[2] != v )
+		{
+			vec3_t p[3], a, b, n;
+
+			for( int i = 0; i < 3; i++ )
+				VectorCopy( ge_lod.verts[t->v[i] == u ? v : t->v[i]].org, p[i] );
+			VectorSubtract( p[1], p[0], a );
+			VectorSubtract( p[2], p[0], b );
+			CrossProduct( a, b, n );
+			if( DotProduct( n, t->nrm ) <= 0.0f )
+				flip = 4.0f;
+		}
+	}
+
+	if( numsides < 2 )
+		curvature = Q_max( curvature, 0.5f ); // along an open edge
+	else if( open )
+		curvature = 1.0f; // away from one
+	if( meshes & ~sidemeshes )
+		curvature = 1.0f; // away from a texture's edge
+	if( pu->bone != pv->bone )
+		curvature += 0.15f;
+
+	return VectorLength( d ) * ( curvature + 0.03f + flip );
+}
+
+static void R_StudioLodCost( int u )
+{
+	lodvert_t *pu = &ge_lod.verts[u];
+
+	qboolean open = false;
+
+	pu->cost = 1e30f;
+	pu->target = -1;
+
+	// at an open edge: a neighbor in one triangle only
+	for( int c = pu->head; c >= 0 && !open; c = ge_lod.next[c] )
+	{
+		const lodtri_t *t = &ge_lod.tris[c / 3];
+
+		for( int i = 0; i < 3 && !open; i++ )
+		{
+			int count = 0;
+
+			if( t->v[i] == u )
+				continue;
+			for( int k = pu->head; k >= 0; k = ge_lod.next[k] )
+			{
+				const uint16_t *v = ge_lod.tris[k / 3].v;
+
+				count += v[0] == t->v[i] || v[1] == t->v[i] || v[2] == t->v[i];
+			}
+			open = count < 2;
+		}
+	}
+
+	for( int c = pu->head; c >= 0; c = ge_lod.next[c] )
+	{
+		const lodtri_t *t = &ge_lod.tris[c / 3];
+
+		for( int i = 0; i < 3; i++ )
+		{
+			if( t->v[i] == u )
+				continue;
+
+			const float cost = R_StudioLodEdgeCost( u, t->v[i], open );
+
+			if( cost < pu->cost )
+			{
+				pu->cost = cost;
+				pu->target = t->v[i];
+			}
+		}
+	}
+}
+
+static void R_StudioLodUnlink( int corner )
+{
+	int *p = &ge_lod.verts[ge_lod.tris[corner / 3].v[corner % 3]].head;
+
+	while( *p >= 0 && *p != corner )
+		p = &ge_lod.next[*p];
+	if( *p == corner )
+		*p = ge_lod.next[corner];
+}
+
+// the vertex that costs least goes
+static qboolean R_StudioLodCollapse( void )
+{
+	int u = -1;
+
+	for( int i = 0; i < ge_lod.numverts; i++ )
+	{
+		if( ge_lod.verts[i].target >= 0 && ( u < 0 || ge_lod.verts[i].cost < ge_lod.verts[u].cost ))
+			u = i;
+	}
+
+	if( u < 0 )
+		return false;
+
+	const int v = ge_lod.verts[u].target;
+	uint16_t touched[256];
+	int numtouched = 0, side[8], numside = 0;
+
+	// the triangles at the edge go
+	for( int c = ge_lod.verts[u].head; c >= 0; c = ge_lod.next[c] )
+	{
+		const lodtri_t *t = &ge_lod.tris[c / 3];
+
+		for( int i = 0; i < 3 && numtouched < ARRAYSIZE( touched ); i++ )
+			touched[numtouched++] = t->v[i];
+		if(( t->v[0] == v || t->v[1] == v || t->v[2] == v ) && numside < 8 )
+			side[numside++] = c / 3;
+	}
+
+	for( int c = ge_lod.verts[v].head; c >= 0; c = ge_lod.next[c] )
+	{
+		const lodtri_t *t = &ge_lod.tris[c / 3];
+
+		for( int i = 0; i < 3 && numtouched < ARRAYSIZE( touched ); i++ )
+			touched[numtouched++] = t->v[i];
+	}
+
+	for( int i = 0; i < numside; i++ )
+	{
+		for( int k = 0; k < 3; k++ )
+			R_StudioLodUnlink( side[i] * 3 + k );
+		ge_lod.tris[side[i]].dead = true;
+		ge_lod.left--;
+	}
+
+	// the others move to v, with the texture it had at the edge
+	while( ge_lod.verts[u].head >= 0 )
+	{
+		const int c = ge_lod.verts[u].head, k = c % 3;
+		lodtri_t *t = &ge_lod.tris[c / 3];
+		const lodtri_t *from = NULL;
+		int best = 0x7fffffff, fromk = 0;
+
+		for( int i = 0; i < numside; i++ )
+		{
+			const lodtri_t *s = &ge_lod.tris[side[i]];
+			int ku = 0, kv = 0;
+
+			if( s->mesh != t->mesh )
+				continue;
+
+			for( int j = 0; j < 3; j++ )
+			{
+				if( s->v[j] == u ) ku = j;
+				if( s->v[j] == v ) kv = j;
+			}
+
+			const int d = abs( s->s[ku] - t->s[k] ) + abs( s->t[ku] - t->t[k] );
+
+			if( d < best )
+			{
+				best = d;
+				from = s;
+				fromk = kv;
+			}
+		}
+
+		ge_lod.verts[u].head = ge_lod.next[c];
+		t->v[k] = v;
+		if( from )
+		{
+			t->n[k] = from->n[fromk];
+			t->s[k] = from->s[fromk];
+			t->t[k] = from->t[fromk];
+		}
+		ge_lod.next[c] = ge_lod.verts[v].head;
+		ge_lod.verts[v].head = c;
+		R_StudioLodNormal( t );
+	}
+
+	ge_lod.verts[u].target = -1;
+	ge_lod.verts[u].cost = 1e30f;
+
+	for( int i = 0; i < numtouched; i++ )
+	{
+		int j;
+
+		for( j = 0; j < i; j++ )
+		{
+			if( touched[j] == touched[i] )
+				break;
+		}
+		if( j == i && touched[i] != u )
+			R_StudioLodCost( touched[i] );
+	}
+
+	return true;
+}
+
+/*
+===============
+the result: vertices of the bones left and strips in the model's format
+===============
+*/
+static qboolean R_StudioLodOutBegin( void )
+{
+	gelod_t *l = &ge_lod.out;
+	const lodbones_t *lb = R_StudioLodBones( ge_lod.gm->hdr );
+	const int nummesh = ge_lod.gm->nummesh;
+
+	l->verts = malloc( ge_lod.numverts * sizeof( vec3_t ) + 4 );
+	l->norms = malloc( ge_lod.left * 3 * sizeof( vec3_t ) + 4 );
+	l->vertbone = malloc( ge_lod.numverts + 4 );
+	l->cmds = malloc(( ge_lod.left * ( 3 * 4 + 1 ) + nummesh ) * sizeof( short ));
+	l->ofs = malloc( nummesh * sizeof( int ));
+	l->numtris = ge_lod.left;
+	l->numcmds = 0;
+	ge_lod.outnorms = 0;
+	ge_lod.mesh = 0;
+
+	if( !lb || !l->verts || !l->norms || !l->vertbone || !l->cmds || !l->ofs )
+		return false;
+
+	for( int i = 0; i < ge_lod.numverts; i++ )
+	{
+		const int bone = lb->bone[ge_lod.level][ge_lod.verts[i].bone];
+
+		l->vertbone[i] = bone;
+		Matrix3x4_VectorITransform( lb->pose[bone], ge_lod.verts[i].org, l->verts[i] );
+	}
+
+	return true;
+}
+
+// the normals of a triangle's corners, the same ones are shared
+static void R_StudioLodOutNormals( lodtri_t *t, const lodbones_t *lb, short out[3], int first )
+{
+	gelod_t *l = &ge_lod.out;
+
+	for( int k = 0; k < 3; k++ )
+	{
+		vec3_t n;
+		int i;
+
+		Matrix3x4_VectorIRotate( lb->pose[l->vertbone[t->v[k]]], ge_lod.norms[t->n[k]], n );
+		for( i = first; i < ge_lod.outnorms; i++ )
+		{
+			if( fabsf( l->norms[i][0] - n[0] ) + fabsf( l->norms[i][1] - n[1] ) + fabsf( l->norms[i][2] - n[2] ) < 0.02f )
+				break;
+		}
+		if( i == ge_lod.outnorms )
+		{
+			VectorCopy( n, l->norms[i] );
+			ge_lod.outnorms++;
+		}
+		out[k] = i;
+	}
+}
+
+typedef struct lodout_s
+{
+	short	c[3][4];	// vertex, normal, s, t
+	byte	used;
+} lodout_t;
+
+static inline qboolean R_StudioLodSame( const short *a, const short *b )
+{
+	return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
+}
+
+static int R_StudioLodStripBones( byte *bones, int num, int bone )
+{
+	for( int i = 0; i < num; i++ )
+	{
+		if( bones[i] == bone )
+			return num;
+	}
+
+	if( num < GE_MAXBONES )
+		bones[num] = bone;
+	return num + 1;
+}
+
+// from triangle first, starting at corner k; what it takes is marked with mark
+static int R_StudioLodStrip( lodout_t *tris, int num, int first, int k, int mark, short (*out)[4] )
+{
+	const byte *vertbone = ge_lod.out.vertbone;
+	byte bones[GE_MAXBONES + 1];
+	int numbones = 0, count = 3;
+
+	for( int i = 0; i < 3; i++ )
+	{
+		memcpy( out[i], tris[first].c[( k + i ) % 3], sizeof( out[0] ));
+		numbones = R_StudioLodStripBones( bones, numbones, vertbone[out[i][0]] );
+	}
+
+	tris[first].used = mark;
+
+	for( ;; )
+	{
+		// the next triangle has this edge, in this order
+		const short *a = ( count & 1 ) ? out[count - 1] : out[count - 2];
+		const short *b = ( count & 1 ) ? out[count - 2] : out[count - 1];
+		qboolean found = false;
+
+		for( int i = 0; i < num && !found; i++ )
+		{
+			if( tris[i].used )
+				continue;
+
+			for( int j = 0; j < 3; j++ )
+			{
+				const short *c = tris[i].c[( j + 2 ) % 3];
+
+				if( !R_StudioLodSame( tris[i].c[j], a ) || !R_StudioLodSame( tris[i].c[( j + 1 ) % 3], b ))
+					continue;
+
+				const int nb = R_StudioLodStripBones( bones, numbones, vertbone[c[0]] );
+				if( nb > GE_MAXBONES )
+					continue;
+
+				numbones = nb;
+				memcpy( out[count++], c, sizeof( out[0] ));
+				tris[i].used = mark;
+				found = true;
+				break;
+			}
+		}
+
+		if( !found )
+			return count;
+	}
+}
+
+// the next mesh
+static qboolean R_StudioLodOutMeshBegin( int mesh )
+{
+	gelod_t *l = &ge_lod.out;
+	int num = 0;
+
+	for( int i = 0; i < ge_lod.numtris; i++ )
+		num += !ge_lod.tris[i].dead && ge_lod.tris[i].mesh == mesh;
+
+	l->ofs[mesh] = l->numcmds;
+	ge_lod.firstnorm = ge_lod.outnorms;
+	ge_lod.outnum = ge_lod.outtri = ge_lod.outread = 0;
+	ge_lod.outtris = malloc( sizeof( *ge_lod.outtris ) * num + 4 );
+	ge_lod.strip = malloc( sizeof( *ge_lod.strip ) * ( num + 2 ));
+	return ge_lod.outtris && ge_lod.strip;
+}
+
+// a triangle or a strip more of it, false when that was all
+static qboolean R_StudioLodOutMesh( int mesh, const lodbones_t *lb )
+{
+	gelod_t *l = &ge_lod.out;
+	lodout_t *tris = ge_lod.outtris;
+	int best = 0, bestk = 0, count;
+
+	if( ge_lod.outread < ge_lod.numtris )
+	{
+		lodtri_t *t = &ge_lod.tris[ge_lod.outread++];
+		lodout_t *o = &tris[ge_lod.outnum];
+		short n[3];
+
+		if( t->dead || t->mesh != mesh )
+			return true;
+
+		R_StudioLodOutNormals( t, lb, n, ge_lod.firstnorm );
+		for( int k = 0; k < 3; k++ )
+		{
+			o->c[k][0] = t->v[k];
+			o->c[k][1] = n[k];
+			o->c[k][2] = t->s[k];
+			o->c[k][3] = t->t[k];
+		}
+		o->used = 0;
+		ge_lod.outnum++;
+		return true;
+	}
+
+	while( ge_lod.outtri < ge_lod.outnum && tris[ge_lod.outtri].used )
+		ge_lod.outtri++;
+
+	if( ge_lod.outtri >= ge_lod.outnum )
+	{
+		l->cmds[l->numcmds++] = 0;
+		free( ge_lod.outtris );
+		free( ge_lod.strip );
+		ge_lod.outtris = NULL;
+		ge_lod.strip = NULL;
+		return false;
+	}
+
+	for( int k = 0; k < 3; k++ )
+	{
+		count = R_StudioLodStrip( tris, ge_lod.outnum, ge_lod.outtri, k, 2, ge_lod.strip );
+		if( count > best )
+		{
+			best = count;
+			bestk = k;
+		}
+		for( int j = 0; j < ge_lod.outnum; j++ )
+		{
+			if( tris[j].used == 2 )
+				tris[j].used = 0;
+		}
+	}
+
+	count = R_StudioLodStrip( tris, ge_lod.outnum, ge_lod.outtri, bestk, 1, ge_lod.strip );
+	l->cmds[l->numcmds++] = count;
+	memcpy( &l->cmds[l->numcmds], ge_lod.strip, sizeof( *ge_lod.strip ) * count );
+	l->numcmds += count * 4;
+	return true;
+}
+
+/*
+===============
+R_StudioLodBegin
+===============
+*/
+static qboolean R_StudioLodBegin( gemodel_t *gm )
+{
+	const byte *base = (const byte *)gm->hdr;
+	const mstudiomodel_t *sub = gm->submodel;
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)( base + sub->meshindex );
+	const byte *vertbone = base + sub->vertinfoindex, *normbone = base + sub->norminfoindex;
+	const vec3_t *verts = (const vec3_t *)( base + sub->vertindex );
+	const vec3_t *norms = (const vec3_t *)( base + sub->normindex );
+	const lodbones_t *lb = R_StudioLodBones( gm->hdr );
+	int max = 0;
+
+	memset( &ge_lod, 0, sizeof( ge_lod ));
+	ge_lod.gm = gm;
+	ge_lod.submodel = sub;
+
+	// only with memory to spare
+	void *volatile spare = malloc( 320 * 1024 );
+
+	free( spare );
+	if( !spare )
+		return false;
+
+	for( int j = 0; j < gm->nummesh; j++ )
+	{
+		const short *p = (const short *)( base + pmesh[j].triindex );
+		int i;
+
+		while(( i = *( p++ )))
+		{
+			if( i < 0 ) i = -i;
+			max += Q_max( 0, i - 2 );
+			p += i * 4;
+		}
+	}
+
+	ge_lod.numverts = sub->numverts;
+	ge_lod.tris = malloc( max * sizeof( lodtri_t ) + 4 );
+	ge_lod.next = malloc( max * 3 * sizeof( int ) + 4 );
+	ge_lod.verts = malloc( sub->numverts * sizeof( lodvert_t ) + 4 );
+	ge_lod.norms = malloc( sub->numnorms * sizeof( vec3_t ) + 4 );
+	if( !lb || !ge_lod.tris || !ge_lod.next || !ge_lod.verts || !ge_lod.norms || gm->nummesh > 255 )
+		return false;
+
+	for( int i = 0; i < sub->numverts; i++ )
+	{
+		if( vertbone[i] >= gm->hdr->numbones )
+			return false;
+		Matrix3x4_VectorTransform( lb->pose[vertbone[i]], verts[i], ge_lod.verts[i].org );
+		ge_lod.verts[i].bone = vertbone[i];
+		ge_lod.verts[i].head = -1;
+		ge_lod.verts[i].target = -1;
+		ge_lod.verts[i].cost = 1e30f;
+	}
+
+	for( int i = 0; i < sub->numnorms; i++ )
+	{
+		if( normbone[i] >= gm->hdr->numbones )
+			return false;
+		Matrix3x4_VectorRotate( lb->pose[normbone[i]], norms[i], ge_lod.norms[i] );
+	}
+
+	for( int j = 0; j < gm->nummesh; j++ )
+	{
+		const short *p = (const short *)( base + pmesh[j].triindex );
+		int i;
+
+		while(( i = *( p++ )))
+		{
+			const qboolean fan = i < 0;
+
+			if( fan ) i = -i;
+			for( int k = 0; k + 2 < i; k++ )
+			{
+				lodtri_t *t = &ge_lod.tris[ge_lod.numtris];
+				const short *c[3];
+
+				if( fan )
+				{
+					c[0] = p; c[1] = p + ( k + 1 ) * 4; c[2] = p + ( k + 2 ) * 4;
+				}
+				else if( k & 1 )
+				{
+					c[0] = p + ( k + 1 ) * 4; c[1] = p + k * 4; c[2] = p + ( k + 2 ) * 4;
+				}
+				else
+				{
+					c[0] = p + k * 4; c[1] = p + ( k + 1 ) * 4; c[2] = p + ( k + 2 ) * 4;
+				}
+
+				for( int n = 0; n < 3; n++ )
+				{
+					if( c[n][0] < 0 || c[n][0] >= sub->numverts || c[n][1] < 0 || c[n][1] >= sub->numnorms )
+						return false;
+				}
+
+				if( c[0][0] == c[1][0] || c[1][0] == c[2][0] || c[0][0] == c[2][0] )
+					continue;
+
+				for( int n = 0; n < 3; n++ )
+				{
+					t->v[n] = c[n][0];
+					t->n[n] = c[n][1];
+					t->s[n] = c[n][2];
+					t->t[n] = c[n][3];
+					ge_lod.next[ge_lod.numtris * 3 + n] = ge_lod.verts[t->v[n]].head;
+					ge_lod.verts[t->v[n]].head = ge_lod.numtris * 3 + n;
+				}
+				t->mesh = j;
+				t->dead = false;
+				R_StudioLodNormal( t );
+				ge_lod.numtris++;
+			}
+			p += i * 4;
+		}
+	}
+
+	ge_lod.left = ge_lod.numtris;
+	return true;
+}
+
+/*
+===============
+R_StudioLodThink
+
+once a frame, for about a millisecond at most
+===============
+*/
+enum { LOD_COSTS = 0, LOD_COLLAPSE, LOD_OUT };
+
+static void R_StudioLodThink( void )
+{
+	const uint32_t t0 = sceKernelGetSystemTimeLow();
+
+	if( !ge_lod.gm )
+	{
+		if( !ge_numlodqueue )
+			return;
+
+		gemodel_t *gm = ge_lodqueue[--ge_numlodqueue];
+
+		if( !R_StudioLodBegin( gm ))
+		{
+			R_StudioLodAbort();
+			gm->lodstate = LODSTATE_FAILED;
+			return;
+		}
+	}
+
+	do
+	{
+		gemodel_t *gm = ge_lod.gm;
+
+		switch( ge_lod.stage )
+		{
+		case LOD_COSTS:
+			for( int n = 0; n < 16 && ge_lod.mesh < ge_lod.numverts; n++ )
+				R_StudioLodCost( ge_lod.mesh++ );
+			if( ge_lod.mesh >= ge_lod.numverts )
+				ge_lod.stage = LOD_COLLAPSE;
+			break;
+		case LOD_COLLAPSE:
+			// a small one isn't worth it
+			if( ge_lod.left > Q_max( 12, (int)( ge_lod.numtris * ge_lodlevels[ge_lod.level].tris )) && R_StudioLodCollapse( ))
+				break;
+			if( !R_StudioLodOutBegin( ))
+			{
+				R_StudioLodAbort();
+				gm->lodstate = LODSTATE_FAILED;
+				return;
+			}
+			ge_lod.stage = LOD_OUT;
+			break;
+		case LOD_OUT:
+			if( ge_lod.mesh < gm->nummesh )
+			{
+				const lodbones_t *lb = R_StudioLodBones( gm->hdr );
+
+				if( !lb || ( !ge_lod.outtris && !R_StudioLodOutMeshBegin( ge_lod.mesh )))
+				{
+					R_StudioLodAbort();
+					gm->lodstate = LODSTATE_FAILED;
+					return;
+				}
+				if( !R_StudioLodOutMesh( ge_lod.mesh, lb ))
+					ge_lod.mesh++;
+				break;
+			}
+
+			gelod_t *l = &ge_lod.out;
+			void *p;
+
+			// what's needed of it
+			if(( p = realloc( l->norms, ge_lod.outnorms * sizeof( vec3_t ) + 4 )))
+				l->norms = p;
+			if(( p = realloc( l->cmds, l->numcmds * sizeof( short ) + 4 )))
+				l->cmds = p;
+			gm->lods[ge_lod.level] = *l;
+			memset( l, 0, sizeof( *l ));
+
+			if( ++ge_lod.level == GE_LODS )
+			{
+				gEngfuncs.Con_DPrintf( "GE studio: %s lods: %d, %d, %d triangles\n", ge_lod.submodel->name, ge_lod.numtris, gm->lods[0].numtris, gm->lods[1].numtris );
+				gm->lodstate = LODSTATE_READY;
+				R_StudioLodAbort();
+				return;
+			}
+			ge_lod.stage = LOD_COLLAPSE;
+			break;
+		}
+	}
+	while( sceKernelGetSystemTimeLow() - t0 < 700 );
+}
+
+// is it there? If it isn't it will be
+static qboolean R_StudioLodReady( gemodel_t *gm )
+{
+	if( gm->lodstate == LODSTATE_NONE && ge_numlodqueue < ARRAYSIZE( ge_lodqueue ))
+	{
+		ge_lodqueue[ge_numlodqueue++] = gm;
+		gm->lodstate = LODSTATE_QUEUED;
+	}
+
+	return gm->lodstate == LODSTATE_READY;
+}
+
+static void R_StudioLodForgetBones( const studiohdr_t *hdr )
+{
+	for( int i = 0; i < ARRAYSIZE( ge_lodbones ); i++ )
+	{
+		if( ge_lodbones[i] && ge_lodbones[i]->hdr == hdr )
+			ge_lodbones[i]->hdr = NULL;
 	}
 }
 
@@ -6466,6 +7794,7 @@ typedef struct geplan_s
 	struct geplan_s	*next;		// first, see R_StudioGEFreeModel
 	int		skin;		// skin family
 	int		atlas;		// r_studio_atlas it was built with
+	int		lod;
 	qboolean		usable;		// false: some mesh needs R_StudioDrawPoints
 	int		polys;
 	int		numitems;
@@ -6594,21 +7923,163 @@ static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotext
 	return pl;
 }
 
-static geplan_t *R_StudioGEGetPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref, int atlas )
+static qboolean R_StudioLodAny( const gelod_t *l, const int *meshes, int num )
+{
+	for( int i = 0; i < num; i++ )
+	{
+		if( l->cmds[l->ofs[meshes[i]]] )
+			return true;
+	}
+
+	return false;
+}
+
+// its batches go with the model
+static qboolean R_StudioLodBatches( gemodel_t *gm, const gelod_t *l, const int *meshes, int num, const mstudiotexture_t *ptexture, const short *pskinref, qboolean atlas, geplanitem_t *it )
+{
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	gebatch_t *batches = NULL;
+	geunit_t *units;
+	int nunits = 0, max = 0;
+
+	for( int i = 0; i < num; i++ )
+	{
+		for( const short *p = l->cmds + l->ofs[meshes[i]]; *p; p += 1 + *p * 4 )
+			max += *p;
+	}
+
+	if( !max || !( units = malloc( sizeof( *units ) * max )))
+		return false;
+
+	for( int i = 0; i < num; i++ )
+	{
+		const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[meshes[i]].skinref]];
+
+		nunits = R_StudioGEAddUnits( units, nunits, l->cmds + l->ofs[meshes[i]], l->vertbone, atlas ? &studio_atlas_slots[ptex->index] : NULL );
+	}
+
+	// the ones on the same bones together
+	for( int i = 1; i < nunits; i++ )
+	{
+		const geunit_t u = units[i];
+		const int bone = l->vertbone[u.first ? u.first[0] : u.verts[0][0]];
+		int j;
+
+		for( j = i; j > 0 && l->vertbone[units[j - 1].first ? units[j - 1].first[0] : units[j - 1].verts[0][0]] > bone; j-- )
+			units[j] = units[j - 1];
+		units[j] = u;
+	}
+
+	ge_build_prevn = 0;
+	const qboolean ok = R_StudioGEBatchUnits( gm, units, nunits, l->vertbone, (const vec3_t *)l->verts, (const vec3_t *)l->norms, &batches, &it->numbatches );
+
+	free( units );
+	if( !ok )
+		return false;
+
+	void **blocks = realloc( gm->blocks, sizeof( *blocks ) * ( gm->numblocks + 1 ));
+	if( !blocks )
+	{
+		free( batches );
+		return false;
+	}
+	gm->blocks = blocks;
+	gm->blocks[gm->numblocks++] = batches;
+	it->batches = batches;
+	return true;
+}
+
+// as R_StudioGEBuildPlan, of a level of detail
+static geplan_t *R_StudioLodBuildPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref, int atlas, int lod )
+{
+	const mstudiomesh_t *pmesh = (const mstudiomesh_t *)((const byte *)m_pStudioHeader + m_pSubModel->meshindex);
+	const gemerge_t *merge = atlas ? R_StudioGEGetMerge( gm, skin, ptexture, pskinref ) : NULL;
+	const gelod_t *l = &gm->lods[lod - 1];
+	geplan_t *pl = calloc( 1, sizeof( *pl ) + sizeof( geplanitem_t ) * ( ATLAS_MAX_PAGES + gm->nummesh ));
+	int *meshes = malloc( sizeof( int ) * gm->nummesh );
+
+	if( !pl || !meshes )
+	{
+		free( pl );
+		free( meshes );
+		return NULL;
+	}
+
+	pl->skin = skin;
+	pl->atlas = atlas;
+	pl->lod = lod;
+	pl->usable = !gm->cpumeshes;
+	pl->polys = l->numtris;
+	pl->next = gm->plans;
+	gm->plans = pl;
+
+	for( int g = 0; merge && g < merge->numgroups; g++ )
+	{
+		geplanitem_t *it = &pl->items[pl->numitems];
+		int num = 0;
+
+		for( int j = 0; j < gm->nummesh; j++ )
+		{
+			if( merge->merged[j] && studio_atlas_slots[ptexture[pskinref[pmesh[j].skinref]].index].atlas == merge->groups[g].atlas )
+				meshes[num++] = j;
+		}
+
+		if( !R_StudioLodBatches( gm, l, meshes, num, ptexture, pskinref, true, it ))
+		{
+			pl->usable &= !R_StudioLodAny( l, meshes, num );
+			continue;
+		}
+
+		it->ptex = &ge_atlas_ptex;
+		it->bindtex = merge->groups[g].atlas;
+		pl->numitems++;
+	}
+
+	for( int j = 0; j < gm->nummesh; j++ )
+	{
+		const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[j].skinref]];
+		geplanitem_t *it = &pl->items[pl->numitems];
+
+		if( merge && merge->merged[j] )
+			continue;
+
+		if( FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
+			pl->usable = false;
+
+		if( !R_StudioLodBatches( gm, l, &j, 1, ptexture, pskinref, false, it ))
+		{
+			pl->usable &= !R_StudioLodAny( l, &j, 1 ); // nothing left of it, or no memory
+			continue;
+		}
+
+		it->ptex = ptex;
+		it->skinindex = pskinref[pmesh[j].skinref];
+		it->flat = FBitSet( ptex->flags, STUDIO_NF_FLATSHADE ) ? true : false;
+		it->chrome = FBitSet( ptex->flags, STUDIO_NF_CHROME ) ? true : false;
+		pl->numitems++;
+	}
+
+	free( meshes );
+	return pl;
+}
+
+static geplan_t *R_StudioGEGetPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref, int atlas, int lod )
 {
 	for( geplan_t *pl = gm->plans; pl; pl = pl->next )
 	{
-		if( pl->skin == skin && pl->atlas == atlas )
+		if( pl->skin == skin && pl->atlas == atlas && pl->lod == lod )
 			return pl;
 	}
 
+	if( lod )
+		return R_StudioLodBuildPlan( gm, skin, ptexture, pskinref, atlas, lod );
 	return R_StudioGEBuildPlan( gm, skin, ptexture, pskinref, atlas );
 }
 
 // true when the submodel was drawn from its plan
 static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotexture_t *ptexture, const short *pskinref )
 {
-	const geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref, r_studio_atlas.value );
+	const geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref, r_studio_atlas.value, 0 );
 
 	if( !pl || !pl->usable )
 		return false;
@@ -6736,14 +8207,14 @@ DLL's renderer. A medraw_t has the plan items of a model, body
 and skin.
 ===============
 */
-#define MEDRAW_CACHE	64
+#define MEDRAW_CACHE	128
 #define MEDRAW_MAXITEMS	40
 
 typedef struct medraw_s
 {
 	const studiohdr_t	*hdr;
 	const mstudiotexture_t	*remap;	// a player's textures, or NULL
-	int		body, skin, atlas;
+	int		body, skin, atlas, lod;
 	uint		gen;		// ge_rec_gen it was built in
 	uint		frame;		// guRender.vert_frame the skin blocks were checked in
 	qboolean		usable;
@@ -6753,16 +8224,43 @@ typedef struct medraw_s
 	int		firstflat;	// the flat ones come last
 	const geplanitem_t	*items[MEDRAW_MAXITEMS];
 	const uint	*blocks[MEDRAW_MAXITEMS];	// their skins
+	byte		need[MAXSTUDIOBONES];	// bones, of a level of detail
 } medraw_t;
 
 static medraw_t	r_medraw[MEDRAW_CACHE];
+
+static const byte *R_StudioMeDrawNeed( const medraw_t *d, int *lod )
+{
+	*lod = d->lod;
+	return d->lod ? d->need : NULL;
+}
 
 static int R_StudioMeDrawWords( const mebones_item_t *it )
 {
 	return ( it->draw ? it->draw->words : 0 ) + ( it->wdraw ? it->wdraw->words : 0 );
 }
 
-static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstudiotexture_t *remap )
+// has this level of detail been made, of all its body parts?
+static qboolean R_StudioLodModelReady( const studiohdr_t *hdr )
+{
+	qboolean ready = true;
+
+	for( int i = 0; i < hdr->numbodyparts; i++ )
+	{
+		gemodel_t *gm;
+
+		R_StudioSetupModel( i, NULL, NULL );
+		if( m_pSubModel->nummesh <= 0 || !( gm = R_StudioGEGetModel( )))
+			continue;
+
+		if( !R_StudioLodReady( gm ) && gm->lodstate != LODSTATE_FAILED )
+			ready = false;
+	}
+
+	return ready;
+}
+
+static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstudiotexture_t *remap, int lod )
 {
 	const studiohdr_t *hdr = m_pStudioHeader;
 	const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)hdr + hdr->textureindex);
@@ -6774,6 +8272,7 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 	d->body = body;
 	d->skin = skinnum;
 	d->atlas = r_studio_atlas.value;
+	d->lod = lod;
 	d->usable = false;
 	d->frame = guRender.vert_frame - 1;
 	d->numitems = d->firstflat = d->polys = d->words = 0;
@@ -6798,7 +8297,7 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 			return;
 
 		// the pages of the atlas don't have a player's colors
-		geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref, remap ? 0 : (int)r_studio_atlas.value );
+		geplan_t *pl = R_StudioGEGetPlan( gm, skin, ptexture, pskinref, remap ? 0 : (int)r_studio_atlas.value, gm->lodstate == LODSTATE_READY ? lod : 0 );
 		if( !pl || !pl->usable || d->numitems + pl->numitems > MEDRAW_MAXITEMS )
 			return;
 
@@ -6847,29 +8346,64 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 	}
 
 	d->words += 3 + 2 * 2 + 1; // light, smooth and flat, RET
+
+	if( lod )
+	{
+		const mstudiobone_t *pbone = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex );
+		const mstudioattachment_t *pAtt = (const mstudioattachment_t *)((const byte *)hdr + hdr->attachmentindex );
+
+		memset( d->need, 0, sizeof( d->need ));
+		for( int i = 0; i < d->numitems; i++ )
+		{
+			for( int k = 0; k < d->items[i]->numbatches; k++ )
+			{
+				for( int n = 0; n < d->items[i]->batches[k].numbones; n++ )
+					d->need[d->items[i]->batches[k].bones[n]] = true;
+			}
+		}
+
+		for( int i = 0; i < hdr->numattachments; i++ )
+			d->need[bound( 0, pAtt[i].bone, MAXSTUDIOBONES - 1 )] = true;
+
+		for( int i = hdr->numbones - 1; i > 0; i-- )
+		{
+			if( !d->need[i] || pbone[i].parent < 0 )
+				continue;
+			if( pbone[i].parent >= i )
+			{
+				d->usable = false; // broken
+				return;
+			}
+			d->need[pbone[i].parent] = true;
+		}
+	}
+
 	d->gen = ge_rec_gen; // it may have built batches
 	d->usable = d->numitems > 0;
 }
 
 // NULL: not for the ME. body and skin are e's, it sets RI.currententity and m_pStudioHeader
-static const medraw_t *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap )
+static const medraw_t *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap, int lod )
 {
-	const uint h = ((uint)hdr >> 6 ) + body * 7 + skin * 13 + ((uint)remap >> 5 );
+	const uint h = ((uint)hdr >> 6 ) + body * 7 + skin * 13 + ((uint)remap >> 5 ) + lod * 37;
 	medraw_t *d = NULL;
 
-	for( int i = 0; i < 2; i++ )
+	for( int i = 0; i < 6; i++ )
 	{
 		medraw_t *s = &r_medraw[( h + i ) % MEDRAW_CACHE];
 
-		if( s->hdr == hdr && s->body == body && s->skin == skin && s->remap == remap && s->atlas == (int)r_studio_atlas.value && s->gen == ge_rec_gen )
+		if( s->hdr == hdr && s->body == body && s->skin == skin && s->remap == remap && s->lod == lod && s->atlas == (int)r_studio_atlas.value && s->gen == ge_rec_gen )
 		{
 			d = s;
 			break;
 		}
 
 		// the ME reads the ones used in this frame
-		if( !d && ( !s->hdr || s->frame != guRender.vert_frame ))
-			d = s;
+		if( !s->hdr || s->frame != guRender.vert_frame )
+		{
+			if( !d || ( d->hdr && ( !s->hdr || s->frame < d->frame )))
+				d = s;
+		}
 	}
 
 	if( !d )
@@ -6878,11 +8412,13 @@ static const medraw_t *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e
 	RI.currententity = e;
 	m_pStudioHeader = (studiohdr_t *)hdr;
 
-	if( d->hdr != hdr || d->body != body || d->skin != skin || d->remap != remap || d->atlas != (int)r_studio_atlas.value || d->gen != ge_rec_gen )
+	if( d->hdr != hdr || d->body != body || d->skin != skin || d->remap != remap || d->lod != lod || d->atlas != (int)r_studio_atlas.value || d->gen != ge_rec_gen )
 	{
 		if( d->hdr && d->frame == guRender.vert_frame )
 			return NULL;
-		R_StudioMeDrawBuild( d, body, skin, remap );
+		if( lod && !R_StudioLodModelReady( hdr ))
+			return NULL;
+		R_StudioMeDrawBuild( d, body, skin, remap, lod );
 	}
 
 	if( !d->usable )
@@ -9274,6 +10810,8 @@ void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *
 	cull = R_StudioMeTable( &numsolid, &numtrans, NULL );
 	const qboolean draw = r_mebones.frame.draw && R_StudioMeDrawAllowed();
 	r_mebones.job.count = r_mebones.job.words = r_mebones.count = 0;
+	r_mebones.pxscale = g_precull.px_scale;
+	R_StudioLodThink();
 
 	cl_entity_t *saveent = RI.currententity;
 	model_t *savemodel = RI.currentmodel;
@@ -9293,6 +10831,19 @@ void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *
 	if( cull )
 		R_StudioMePost();
 	g_precull.active = true;
+
+	// what the GE and the ME can do in time
+	if( r_mebones.waited > 1000 )
+		r_mebones.load += 0.1f;
+	else r_mebones.load -= 0.02f;
+	r_mebones.load = bound( 0.0f, r_mebones.load, 4.0f );
+
+	if( r_mebones.job.words > MEBONES_LODWORDS || r_mebones.waited > 1000 )
+		r_mebones.lodscale *= 1.05f;
+	else if( r_mebones.job.words < MEBONES_LODWORDS * 3 / 4 )
+		r_mebones.lodscale *= 0.98f;
+	r_mebones.waited = 0;
+	r_mebones.lodscale = bound( 1.0f, r_mebones.lodscale, 4.0f );
 }
 
 void R_StudioPreCullEnd( void )

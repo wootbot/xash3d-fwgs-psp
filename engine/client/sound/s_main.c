@@ -1549,6 +1549,14 @@ static void S_UpdateChannels( void )
 	// updates DMA time
 	snd.soundtime = S_GetSoundtime();
 
+#if XASH_PSP
+	if( S_PaintBusy( ))
+	{
+		SNDDMA_Submit();
+		return;
+	}
+#endif
+
 	// soundtime - total samples that have been played out to hardware at dmaspeed
 	// paintedtime - total samples that have been mixed at speed
 	// endtime - target for samples in mixahead buffer at speed
