@@ -23,6 +23,10 @@ GNU General Public License for more details.
 #include "studio.h"
 #include "wadfile.h"	// acess decal size
 #include "sound.h"
+#if XASH_PSP
+#include "mod_local.h"
+#include <psputils.h>
+#endif
 
 /*
 ==============================================================
@@ -62,6 +66,24 @@ typedef struct
 } tentvis_t;
 
 static tentvis_t *cl_tentvis;
+
+// the temp entities on the Media Engine, the main CPU's part
+static struct
+{
+	qboolean		posted;
+	uint32_t		ticket;
+	double		time, oldtime;
+	uint		serial;
+} cl_metent;
+
+static uint cl_tents_serial;	// changes whenever one is allocated or freed
+static convar_t *cl_tents_me;
+
+static void CL_MeTentsWait( void )
+{
+	PSP_MeWaitFor( cl_metent.ticket );
+	cl_metent.ticket = 0;
+}
 #endif
 
 static model_t *cl_sprite_muzzleflash[MAX_MUZZLEFLASH];	// muzzle flashes
@@ -203,6 +225,10 @@ static void CL_ClearTempEnts( void )
 {
 	if( !cl_tempents ) return;
 
+#if XASH_PSP
+	CL_MeTentsWait();
+	cl_metent.posted = false;
+#endif
 	for( int i = 0; i < GI->max_tents - 1; i++ )
 	{
 		cl_tempents[i].next = &cl_tempents[i+1];
@@ -230,6 +256,7 @@ void CL_InitTempEnts( void )
 	cl_tempents = Mem_Calloc( cls.mempool, sizeof( TEMPENTITY ) * GI->max_tents );
 #if XASH_PSP
 	cl_tentvis = Mem_Calloc( cls.mempool, sizeof( *cl_tentvis ) * GI->max_tents );
+	cl_tents_me = Cvar_Get( "cl_tents_me", "1", 0, "simulate temp entities on the Media Engine" );
 	cl_tents_cap = Cvar_Get( "cl_tents_cap", "32", FCVAR_ARCHIVE, "most temp entities alive at once (0 = max_tempents)" );
 #endif
 	CL_ClearTempEnts();
@@ -246,6 +273,10 @@ CL_FreeTempEnts
 */
 void CL_FreeTempEnts( void )
 {
+#if XASH_PSP
+	CL_MeTentsWait();
+	cl_metent.posted = false;
+#endif
 	if( cl_tempents )
 		Mem_Free( cl_tempents );
 	cl_tempents = NULL;
@@ -462,6 +493,476 @@ static int CL_TempEntAddEntity( cl_entity_t *pEntity )
 	return 0;
 }
 
+#if XASH_PSP
+/*
+==============================================================
+
+TEMPENTS ON THE MEDIA ENGINE
+
+after the packets are read, the ME simulates the temp entities the way the
+client DLL does (HUD_TempEntUpdate of the HLSDK) while the main CPU predicts and
+links the packet entities. It only reads them: CL_TempEntUpdate applies the
+results. Those that need callbacks, players or the entities around them stay
+with the client DLL
+
+==============================================================
+*/
+#define METENT_MAX		128
+
+// what the client DLL has to do
+#define METENT_DLLFLAGS	( FTENT_SINEWAVE|FTENT_FLICKER|FTENT_SPIRAL|FTENT_COLLIDEALL|FTENT_PLYRATTACHMENT|FTENT_SPARKSHOWER|FTENT_CLIENTCUSTOM )
+
+enum
+{
+	METENT_DLL	= BIT( 0 ),	// not done here
+	METENT_DEAD	= BIT( 1 ),
+	METENT_CHANGED	= BIT( 2 ),	// nothing to copy otherwise
+	METENT_SOUND	= BIT( 3 ),
+	METENT_VISIBLE	= BIT( 4 ),
+	METENT_RESTS	= BIT( 5 ),	// curstate and latched have its origin and angles already
+};
+
+typedef struct
+{
+	TEMPENTITY	*tent;
+	uint		status;
+	int		flags;
+	float		die;
+	vec3_t		origin, angles, velocity;
+	float		frame;
+	int		rendermode, renderamt;
+	float		damp;
+} metent_t;
+
+// read by the ME, only written by the main CPU
+static struct
+{
+	const TEMPENTITY	*first;
+	const hull_t	*hull;
+	const byte	*vis;
+	float		ft, time, gravity;
+} cl_metent_job;
+
+// written by the ME, cache lines of its own
+static struct
+{
+	int		count;
+	TEMPENTITY	*rest;	// the ones that didn't fit
+	uint		pad[14];
+	metent_t		tents[METENT_MAX];
+} __attribute__(( aligned( 64 ))) cl_metent_res;
+
+typedef struct
+{
+	const hull_t	*hull;
+	float		fraction;
+	vec3_t		normal;
+	qboolean		allsolid, startsolid;
+} metent_trace_t;
+
+static int CL_MeTentContents( const hull_t *hull, int num, const vec3_t p )
+{
+	while( num >= 0 )
+	{
+		const mplane_t *plane = &hull->planes[hull->clipnodes16[num].planenum];
+		num = hull->clipnodes16[num].children[PlaneDiff( p, plane ) < 0];
+	}
+	return num;
+}
+
+// PM_RecursiveHullCheck
+static qboolean CL_MeTentHullCheck( metent_trace_t *tr, int num, float p1f, float p2f, const vec3_t p1, const vec3_t p2 )
+{
+	const hull_t *hull = tr->hull;
+	const mplane_t *plane;
+	float t1, t2, frac, midf;
+	vec3_t mid;
+
+	while( 1 )
+	{
+		if( num < 0 )
+		{
+			if( num != CONTENTS_SOLID )
+				tr->allsolid = false;
+			else tr->startsolid = true;
+			return true;
+		}
+
+		plane = &hull->planes[hull->clipnodes16[num].planenum];
+		t1 = PlaneDiff( p1, plane );
+		t2 = PlaneDiff( p2, plane );
+
+		if( t1 >= 0.0f && t2 >= 0.0f )
+			num = hull->clipnodes16[num].children[0];
+		else if( t1 < 0.0f && t2 < 0.0f )
+			num = hull->clipnodes16[num].children[1];
+		else break;
+	}
+
+	const int side = t1 < 0.0f;
+	const mclipnode16_t *node = &hull->clipnodes16[num];
+
+	// put the crosspoint DIST_EPSILON pixels on the near side
+	frac = ( side ? t1 + DIST_EPSILON : t1 - DIST_EPSILON ) / ( t1 - t2 );
+	if( !( frac >= 0.0f )) frac = 0.0f; // NaN too
+	if( frac > 1.0f ) frac = 1.0f;
+
+	midf = p1f + ( p2f - p1f ) * frac;
+	VectorLerp( p1, frac, p2, mid );
+
+	if( !CL_MeTentHullCheck( tr, node->children[side], p1f, midf, p1, mid ))
+		return false;
+
+	if( CL_MeTentContents( hull, node->children[side^1], mid ) != CONTENTS_SOLID )
+		return CL_MeTentHullCheck( tr, node->children[side^1], midf, p2f, mid, p2 );
+
+	if( tr->allsolid )
+		return false;
+
+	if( !side )
+		VectorCopy( plane->normal, tr->normal );
+	else VectorNegate( plane->normal, tr->normal );
+
+	while( CL_MeTentContents( hull, hull->firstclipnode, mid ) == CONTENTS_SOLID )
+	{
+		frac -= 0.1f;
+		if( !( frac >= 0.0f ))
+			break;
+		midf = p1f + ( p2f - p1f ) * frac;
+		VectorLerp( p1, frac, p2, mid );
+	}
+
+	tr->fraction = midf;
+	return false;
+}
+
+// EV_PlayerTrace of a point through the world
+static float CL_MeTentTrace( const vec3_t start, const vec3_t end, vec3_t normal )
+{
+	metent_trace_t tr = { .hull = cl_metent_job.hull, .fraction = 1.0f, .allsolid = true };
+
+	if( tr.hull->firstclipnode >= tr.hull->lastclipnode )
+		return 1.0f;
+
+	CL_MeTentHullCheck( &tr, tr.hull->firstclipnode, 0.0f, 1.0f, start, end );
+	VectorCopy( tr.normal, normal );
+	return tr.allsolid || tr.startsolid ? 0.0f : tr.fraction;
+}
+
+static qboolean CL_MeTentInPVS( const model_t *mod, const vec3_t origin )
+{
+	vec3_t mins, maxs;
+	int clusters[32];
+
+	if( !cl_metent_job.vis )
+		return true;
+
+	VectorAdd( origin, mod->mins, mins );
+	VectorAdd( origin, mod->maxs, maxs );
+	const int count = Mod_BoxClusters( mins, maxs, clusters, ARRAYSIZE( clusters ));
+
+	for( int i = 0; i < count; i++ )
+	{
+		if( CHECKVISBIT( cl_metent_job.vis, clusters[i] ))
+			return true;
+	}
+	return count < 0; // too many
+}
+
+// HUD_TempEntUpdate for one of them
+static uint CL_MeTent( const TEMPENTITY *t, metent_t *r )
+{
+	const cl_entity_t *e = &t->entity;
+	const float ft = cl_metent_job.ft, time = cl_metent_job.time;
+	const float gravity = -ft * cl_metent_job.gravity;
+	const float life = t->die - time;
+	uint status = 0;
+	qboolean add = true;
+
+	if( FBitSet( t->flags, METENT_DLLFLAGS ) || ( FBitSet( t->flags, FTENT_COLLIDEWORLD ) && t->hitcallback ))
+		return METENT_DLL;
+
+	r->flags = t->flags;
+	r->die = t->die;
+	r->frame = e->curstate.frame;
+	r->rendermode = e->curstate.rendermode;
+	r->renderamt = e->curstate.renderamt;
+
+	if( life < 0.0f )
+	{
+		if( !FBitSet( t->flags, FTENT_FADEOUT ))
+			return METENT_DEAD;
+
+		if( r->rendermode == kRenderNormal )
+			r->rendermode = kRenderTransTexture;
+		r->renderamt = e->baseline.renderamt * ( 1.0f + life * t->fadeSpeed );
+		if( r->renderamt <= 0 )
+			return METENT_DEAD;
+	}
+
+	VectorCopy( e->angles, r->angles );
+	VectorCopy( e->baseline.origin, r->velocity );
+	VectorMA( e->origin, ft, r->velocity, r->origin );
+
+	if( FBitSet( r->flags, FTENT_SPRANIMATE ))
+	{
+		r->frame += ft * e->curstate.framerate;
+		if( r->frame >= t->frameMax )
+		{
+			r->frame -= (int)r->frame;
+
+			if( !FBitSet( r->flags, FTENT_SPRANIMATELOOP ))
+			{
+				// this animating sprite isn't set to loop
+				r->die = time;
+				add = false;
+			}
+		}
+	}
+	else if( FBitSet( r->flags, FTENT_SPRCYCLE ))
+	{
+		r->frame += ft * 10.0f;
+		if( r->frame >= t->frameMax )
+			r->frame -= (int)r->frame;
+	}
+
+	if( add )
+	{
+		if( FBitSet( r->flags, FTENT_ROTATE ))
+			VectorMA( r->angles, ft, e->baseline.angles, r->angles );
+
+		if( FBitSet( r->flags, FTENT_COLLIDEWORLD ))
+		{
+			vec3_t normal;
+			const float fraction = CL_MeTentTrace( e->origin, r->origin, normal );
+
+			if( fraction != 1.0f )
+			{
+				float damp = t->bounceFactor;
+
+				// place at contact point
+				VectorMA( e->origin, fraction * ft, r->velocity, r->origin );
+
+				if( FBitSet( r->flags, FTENT_GRAVITY|FTENT_SLOWGRAVITY ))
+				{
+					damp *= 0.5f;
+					if( normal[2] > 0.9f && r->velocity[2] <= 0.0f && r->velocity[2] >= gravity * 3.0f )
+					{
+						damp = 0.0f; // stop
+						ClearBits( r->flags, FTENT_ROTATE|FTENT_GRAVITY|FTENT_SLOWGRAVITY|FTENT_COLLIDEWORLD|FTENT_SMOKETRAIL );
+						r->angles[0] = r->angles[2] = 0.0f;
+					}
+				}
+
+				if( t->hitSound )
+				{
+					SetBits( status, METENT_SOUND );
+					r->damp = damp;
+				}
+
+				if( FBitSet( r->flags, FTENT_COLLIDEKILL ))
+				{
+					// die on impact
+					ClearBits( r->flags, FTENT_FADEOUT );
+					r->die = time;
+				}
+				else
+				{
+					// reflect velocity, and rotation (fake)
+					if( damp != 0.0f )
+					{
+						const float proj = DotProduct( r->velocity, normal );
+						VectorMA( r->velocity, -proj * 2.0f, normal, r->velocity );
+						r->angles[1] = -r->angles[1];
+					}
+
+					if( damp != 1.0f )
+					{
+						VectorScale( r->velocity, damp, r->velocity );
+						VectorScale( r->angles, 0.9f, r->angles );
+					}
+				}
+			}
+		}
+
+		if( FBitSet( r->flags, FTENT_GRAVITY ))
+			r->velocity[2] += gravity;
+		else if( FBitSet( r->flags, FTENT_SLOWGRAVITY ))
+			r->velocity[2] += gravity * 0.5f;
+
+		// cull to PVS of the last frame
+		if( !FBitSet( r->flags, FTENT_NOMODEL ))
+		{
+			if( e->model && CL_MeTentInPVS( e->model, r->origin ))
+			{
+				SetBits( status, METENT_VISIBLE );
+			}
+			else if( !FBitSet( r->flags, FTENT_PERSIST ))
+			{
+				// if we can't draw it this frame, just dump it
+				r->die = time;
+				ClearBits( r->flags, FTENT_FADEOUT );
+			}
+		}
+	}
+
+	if( r->flags != t->flags || r->die != t->die || r->frame != e->curstate.frame || r->rendermode != e->curstate.rendermode
+		|| r->renderamt != e->curstate.renderamt || !VectorCompare( r->origin, e->origin ) || !VectorCompare( r->angles, e->angles )
+		|| !VectorCompare( r->velocity, e->baseline.origin ) || !VectorCompare( e->prevstate.origin, e->origin ))
+		SetBits( status, METENT_CHANGED );
+
+	if( VectorCompare( r->origin, e->curstate.origin ) && VectorCompare( r->angles, e->curstate.angles )
+		&& VectorCompare( r->origin, e->latched.prevorigin ) && VectorCompare( r->angles, e->latched.prevangles ))
+		SetBits( status, METENT_RESTS );
+
+	return status;
+}
+
+static void CL_MeTentsJob( void *arg )
+{
+	const TEMPENTITY *t = cl_metent_job.first;
+	int count;
+
+	for( count = 0; t && count < METENT_MAX; t = t->next, count++ )
+	{
+		metent_t *r = &cl_metent_res.tents[count];
+
+		r->tent = (TEMPENTITY *)t;
+		r->status = CL_MeTent( t, r );
+	}
+
+	cl_metent_res.count = count;
+	cl_metent_res.rest = (TEMPENTITY *)t;
+}
+
+/*
+==============
+CL_TempEntBegin
+
+after the packets are read: starts the Media Engine on them
+==============
+*/
+void CL_TempEntBegin( void )
+{
+	const double ft = cl.time - cl.oldtime;
+
+	CL_MeTentsWait();
+	cl_metent.posted = false;
+
+	if( cls.state != ca_active || !cl.video_prepped || cl.paused || ft <= 0.0 || !cl_active_tents || !cl.worldmodel )
+		return;
+
+	if( !cl_tents_me->value || !PSP_MeActive() || world.version == QBSP2_VERSION )
+		return;
+
+	cl_metent_job.first = cl_active_tents;
+	cl_metent_job.hull = &cl.worldmodel->hulls[0];
+	cl_metent_job.vis = ref.dllFuncs.Mod_GetCurrentVis();
+	cl_metent_job.ft = ft;
+	cl_metent_job.time = cl.time;
+	cl_metent_job.gravity = clgame.movevars.gravity;
+
+	cl_metent.posted = true;
+	cl_metent.time = cl.time;
+	cl_metent.oldtime = cl.oldtime;
+	cl_metent.serial = cl_tents_serial;
+	cl_metent.ticket = PSP_MeRunKeep( CL_MeTentsJob, NULL );
+}
+
+/*
+==============
+CL_TempEntsFromMe
+
+applies what the Media Engine computed, leaves the client DLL's ones in
+cl_active_tents and puts the others into *first. False: they are all the DLL's
+==============
+*/
+static qboolean CL_TempEntsFromMe( TEMPENTITY **first )
+{
+	TEMPENTITY **last = first;
+	TEMPENTITY *dll = NULL, **dlllast = &dll;
+
+	if( !cl_metent.posted )
+		return false;
+
+	cl_metent.posted = false;
+	CL_MeTentsWait();
+
+	if( !PSP_MeActive() || cl_metent.time != cl.time || cl_metent.oldtime != cl.oldtime || cl_metent.serial != cl_tents_serial )
+		return false;
+
+	sceKernelDcacheInvalidateRange( &cl_metent_res, 64 );
+	const int count = cl_metent_res.count;
+	if( count <= 0 || count > METENT_MAX )
+		return false;
+	sceKernelDcacheInvalidateRange( cl_metent_res.tents, ( count * sizeof( metent_t ) + 63 ) & ~63 );
+
+	for( int i = 0; i < count; i++ )
+	{
+		const metent_t *r = &cl_metent_res.tents[i];
+		TEMPENTITY *t = r->tent;
+		cl_entity_t *e = &t->entity;
+
+		if( FBitSet( r->status, METENT_DLL ))
+		{
+			*dlllast = t;
+			dlllast = &t->next;
+			continue;
+		}
+
+		if( FBitSet( r->status, METENT_DEAD ))
+		{
+			t->next = cl_free_tents;
+			cl_free_tents = t;
+			continue;
+		}
+
+		*last = t;
+		last = &t->next;
+
+		if( FBitSet( r->status, METENT_CHANGED ))
+		{
+			VectorCopy( e->origin, e->prevstate.origin );
+			VectorCopy( r->origin, e->origin );
+			VectorCopy( r->angles, e->angles );
+			if( FBitSet( t->flags, FTENT_ROTATE ))
+				VectorCopy( r->angles, e->latched.prevangles );
+			e->curstate.frame = r->frame;
+			e->curstate.rendermode = r->rendermode;
+			e->curstate.renderamt = r->renderamt;
+
+			if( FBitSet( r->status, METENT_SOUND ))
+				CL_TempEntPlaySound( t, r->damp );
+
+			VectorCopy( r->velocity, e->baseline.origin );
+			t->flags = r->flags;
+			t->die = r->die;
+		}
+
+		if( FBitSet( r->flags, FTENT_SMOKETRAIL ))
+			R_RocketTrail( e->prevstate.origin, e->origin, 1 );
+
+		if( FBitSet( r->status, METENT_VISIBLE ))
+		{
+			if( !FBitSet( r->status, METENT_RESTS ))
+			{
+				VectorCopy( r->angles, e->curstate.angles );
+				VectorCopy( r->origin, e->curstate.origin );
+				VectorCopy( r->angles, e->latched.prevangles );
+				VectorCopy( r->origin, e->latched.prevorigin );
+			}
+
+			CL_AddVisibleEntity( e, ET_TEMPENTITY );
+		}
+	}
+
+	*last = NULL;
+	*dlllast = cl_metent_res.rest;
+	cl_active_tents = dll;
+	return true;
+}
+#endif
+
 /*
 ==============
 CL_AddTempEnts
@@ -475,8 +976,23 @@ void CL_TempEntUpdate( void )
 	double	ft = cl.time - cl.oldtime;
 	float	gravity = clgame.movevars.gravity;
 
+#if XASH_PSP
+	TEMPENTITY *first = NULL;
+	const qboolean me = CL_TempEntsFromMe( &first );
+
+	if( !me || cl_active_tents )
+#endif
 	clgame.dllFuncs.pfnTempEntUpdate( ft, cl.time, gravity, &cl_free_tents, &cl_active_tents, CL_TempEntAddEntity, CL_TempEntPlaySound );
 #if XASH_PSP
+	if( me )
+	{
+		TEMPENTITY **last = &cl_active_tents;
+
+		while( *last )
+			last = &(*last)->next;
+		*last = first;
+	}
+
 	// the client DLL frees them in its own list walk, so count afterwards
 	cl_tents_active = 0;
 	for( TEMPENTITY *t = cl_active_tents; t; t = t->next )
@@ -507,6 +1023,9 @@ static qboolean CL_FreeLowPriorityTempEnt( void )
 			// add to the free list.
 			pActive->next = cl_free_tents;
 			cl_free_tents = pActive;
+#if XASH_PSP
+			cl_tents_serial++;
+#endif
 
 			return true;
 		}
@@ -556,6 +1075,7 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 	cl_active_tents = pTemp;
 #if XASH_PSP
 	cl_tents_active++;
+	cl_tents_serial++;
 #endif
 
 	return pTemp;
@@ -609,6 +1129,7 @@ TEMPENTITY *CL_TempEntAllocHigh( const vec3_t org, model_t *pmodel )
 	cl_active_tents = pTemp;
 #if XASH_PSP
 	cl_tents_active++;
+	cl_tents_serial++;
 #endif
 
 	return pTemp;

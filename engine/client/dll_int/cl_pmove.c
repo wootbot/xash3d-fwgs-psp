@@ -333,7 +333,12 @@ static void CL_CopyEntityToPhysEnt( physent_t *pe, entity_state_t *state, qboole
 	else if( mod != NULL )
 	{
 		// otherwise copy the modelname
+#if XASH_PSP
+		memcpy( pe->name, mod->name, sizeof( pe->name ) - 1 );
+		pe->name[sizeof( pe->name ) - 1] = 0;
+#else
 		Q_strncpy( pe->name, mod->name, sizeof( pe->name ));
+#endif
 	}
 	else
 	{
@@ -399,6 +404,31 @@ static void CL_CopyEntityToPhysEnt( physent_t *pe, entity_state_t *state, qboole
 	VectorCopy( state->vuser4, pe->vuser4 );
 }
 
+#if XASH_PSP
+// the visents are only filled in when something looks at them: hardly ever,
+// and they are as big as the whole data cache
+static struct
+{
+	int filled;
+	entity_state_t *states[MAX_PHYSENTS];
+} visents;
+#endif
+
+/*
+====================
+CL_FillVisents
+
+pmove->visents must be valid
+====================
+*/
+void CL_FillVisents( void )
+{
+#if XASH_PSP
+	for( ; visents.filled < clgame.pmove->numvisent; visents.filled++ )
+		CL_CopyEntityToPhysEnt( &clgame.pmove->visents[visents.filled], visents.states[visents.filled], true );
+#endif
+}
+
 /*
 ====================
 CL_AddLinksToPmove
@@ -430,8 +460,12 @@ static void CL_AddLinksToPmove( frame_t *frame )
 
 		if(( model->hulls[1].lastclipnode || model->type == mod_studio ) && clgame.pmove->numvisent < MAX_PHYSENTS )
 		{
+#if XASH_PSP
+			visents.states[clgame.pmove->numvisent] = state;
+#else
 			pe = &clgame.pmove->visents[clgame.pmove->numvisent];
 			CL_CopyEntityToPhysEnt( pe, state, true );
+#endif
 			clgame.pmove->numvisent++;
 		}
 
@@ -531,6 +565,9 @@ void CL_SetSolidEntities( void )
 
 	// share to visents
 	clgame.pmove->visents[0] = clgame.pmove->physents[0];
+#if XASH_PSP
+	visents.filled = 1;
+#endif
 
 	// add all other entities exlucde players
 	CL_AddLinksToPmove( &cl.frames[cl.parsecountmod] );
@@ -691,6 +728,7 @@ pmtrace_t *CL_VisTraceLine( vec3_t start, vec3_t end, int flags )
 	int		old_usehull;
 	static pmtrace_t	tr;
 
+	CL_FillVisents();
 	old_usehull = clgame.pmove->usehull;
 	clgame.pmove->usehull = 2;
 	tr = PM_PlayerTraceExt( clgame.pmove, start, end, flags, clgame.pmove->numvisent, clgame.pmove->visents, -1, NULL );
@@ -771,6 +809,8 @@ static int GAME_EXPORT pfnTestPlayerPositionEx( float *pos, pmtrace_t *ptrace, p
 
 static pmtrace_t *pfnTraceLineEx( float *start, float *end, int flags, int usehull, pfnIgnore pmFilter )
 {
+	if( flags == PM_TRACELINE_ANYVISIBLE )
+		CL_FillVisents();
 	return PM_TraceLineEx( clgame.pmove, start, end, flags, usehull, pmFilter );
 }
 

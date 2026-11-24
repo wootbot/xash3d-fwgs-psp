@@ -2321,6 +2321,8 @@ int GAME_EXPORT PM_CL_PointContents( const float *p, int *truecontents )
 
 pmtrace_t *PM_CL_TraceLine( float *start, float *end, int flags, int usehull, int ignore_pe )
 {
+	if( flags == PM_TRACELINE_ANYVISIBLE )
+		CL_FillVisents();
 	return PM_TraceLine( clgame.pmove, start, end, flags, usehull, ignore_pe );
 }
 
@@ -2541,6 +2543,7 @@ static physent_t *pfnGetVisent( int idx )
 	if( idx >= 0 && idx < clgame.pmove->numvisent )
 	{
 		// return physent
+		CL_FillVisents();
 		return &clgame.pmove->visents[idx];
 	}
 	return NULL;

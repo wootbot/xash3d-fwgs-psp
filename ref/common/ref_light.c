@@ -65,7 +65,7 @@ void CL_RunLightStyles( lightstyle_t *ls )
 			continue;
 		}
 
-		int flight = (int)floor( ls[i].time * 10 );
+		int flight = (int)floorf( ls[i].time * 10 );
 
 		if( !ls[i].interp || !cl_lightstyle_lerping->value )
 		{
@@ -73,7 +73,7 @@ void CL_RunLightStyles( lightstyle_t *ls )
 			continue;
 		}
 
-		int clight = (int)ceil( ls[i].time * 10 );
+		int clight = (int)ceilf( ls[i].time * 10 );
 		float lerpfrac = ( ls[i].time * 10 ) - flight;
 		float backlerp = 1.0f - lerpfrac;
 

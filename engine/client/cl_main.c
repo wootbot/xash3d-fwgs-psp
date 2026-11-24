@@ -3929,6 +3929,10 @@ void Host_ClientFrame( void )
 	// read updates from server
 	CL_ReadPackets ();
 
+#if XASH_PSP
+	CL_TempEntBegin ();
+#endif
+
 	// do prediction again in case we got
 	// a new portion updates from server
 	CL_RedoPrediction ();

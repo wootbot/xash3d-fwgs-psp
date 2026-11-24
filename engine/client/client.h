@@ -1047,6 +1047,7 @@ void CL_CheckPredictionError( void );
 int CL_WaterEntity( const float *rgflPos );
 cl_entity_t *CL_GetWaterEntity( const float *rgflPos );
 pmtrace_t *CL_VisTraceLine( vec3_t start, vec3_t end, int flags );
+void CL_FillVisents( void );
 pmtrace_t CL_TraceLine( vec3_t start, vec3_t end, int flags );
 void CL_MoveSpectatorCamera( void );
 void CL_SetLastUpdate( void );
@@ -1133,6 +1134,9 @@ void CL_FreeParticles( void );
 void CL_InitTempEnts( void );
 void CL_FreeTempEnts( void );
 void CL_TempEntUpdate( void );
+#if XASH_PSP
+void CL_TempEntBegin( void );
+#endif
 void CL_InitViewBeams( void );
 void CL_ClearViewBeams( void );
 void CL_FreeViewBeams( void );
