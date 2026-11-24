@@ -232,7 +232,7 @@ void FS_CreatePath( char *path )
 			char save = *ofs;
 			*ofs = 0;
 #if XASH_PSP
-			FS_DirCacheClear();
+			FS_DirCacheDrop( path, true );
 #endif
 #if XASH_WIN32
 			_mkdir( path ); // use _wmkdir maybe?
@@ -379,7 +379,7 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 
 #if XASH_PSP
 	if( opt & O_CREAT ) // may add a file
-		FS_DirCacheClear();
+		FS_DirCacheDrop( filepath, false );
 #endif
 
 	// the 'm' flag let's user to create temporary file in memory

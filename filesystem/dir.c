@@ -432,8 +432,9 @@ directories), and finding one file takes a few of them across the search
 paths: ~45 ms per file found, ~65 ms per file missing, tens of seconds per
 connect. Each directory is listed once instead and lookups are answered from
 memory, missing directories included. A write through the filesystem
-(FS_SysOpen for writing, FS_CreatePath, FS_Rename, FS_Delete) drops
-everything, files written outside it in the search paths aren't seen.
+(FS_SysOpen for writing, FS_CreatePath, FS_Rename, FS_Delete) drops the
+listings of directories with that name, files written outside it in the search
+paths aren't seen.
 
 =============================================================================
 */
@@ -472,6 +473,8 @@ static uint32_t FS_DirCacheHash( const char *s, size_t len )
 	return h;
 }
 
+static void FS_DirCacheFree( fs_dircache_t *d );
+
 void FS_DirCacheClear( void )
 {
 	for( int i = 0; i < DIRCACHE_BUCKETS; i++ )
@@ -481,13 +484,70 @@ void FS_DirCacheClear( void )
 		for( d = fs_dircache[i]; d; d = next )
 		{
 			next = d->next;
-			if( d->hashes ) Mem_Free( d->hashes );
-			if( d->offsets ) Mem_Free( d->offsets );
-			if( d->sizes ) Mem_Free( d->sizes );
-			if( d->names ) Mem_Free( d->names );
-			Mem_Free( d );
+			FS_DirCacheFree( d );
 		}
 		fs_dircache[i] = NULL;
+	}
+}
+
+static void FS_DirCacheFree( fs_dircache_t *d )
+{
+	if( d->hashes ) Mem_Free( d->hashes );
+	if( d->offsets ) Mem_Free( d->offsets );
+	if( d->sizes ) Mem_Free( d->sizes );
+	if( d->names ) Mem_Free( d->names );
+	Mem_Free( d );
+}
+
+/*
+path is going to be written, or made if it's a directory. Which of the ways to
+spell its directory the listings have isn't known: all directories of that name
+are listed again
+*/
+void FS_DirCacheDrop( const char *path, qboolean isdir )
+{
+	const char *end = path + Q_strlen( path );
+
+	if( end > path && ( end[-1] == '/' || end[-1] == '\\' ))
+		end--;
+
+	for( int pass = isdir ? 0 : 1; pass < 2; pass++ )
+	{
+		const char *start;
+
+		// the last directory of it: a directory itself, then what it's in
+		if( pass == 1 )
+		{
+			while( end > path && end[-1] != '/' && end[-1] != '\\' )
+				end--;
+			if( end > path )
+				end--;
+		}
+
+		for( start = end; start > path && start[-1] != '/' && start[-1] != '\\' && start[-1] != ':'; start-- );
+
+		const size_t len = end - start;
+
+		if( len > 0 && *start == '.' )
+		{
+			FS_DirCacheClear();
+			return;
+		}
+
+		for( int i = 0; i < DIRCACHE_BUCKETS; i++ )
+		{
+			for( fs_dircache_t **prev = &fs_dircache[i], *d; ( d = *prev ); )
+			{
+				const char *name = d->path + Q_max( 0, (int)( d->pathlen - 1 - len )); // d->path ends with a slash
+
+				if( len == 0 ? d->pathlen <= 2 : d->pathlen > len && !Q_strnicmp( name, start, len ) && ( name == d->path || name[-1] == '/' || name[-1] == '\\' || name[-1] == ':' ))
+				{
+					*prev = d->next;
+					FS_DirCacheFree( d );
+				}
+				else prev = &d->next;
+			}
+		}
 	}
 }
 

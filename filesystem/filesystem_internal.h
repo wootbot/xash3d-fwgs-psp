@@ -134,6 +134,7 @@ extern searchpath_t *fs_writepath, *fs_searchpaths;
 extern poolhandle_t fs_mempool;
 #if XASH_PSP
 void FS_DirCacheClear( void ); // dir.c
+void FS_DirCacheDrop( const char *path, qboolean isdir );
 int FS_DirCacheLookup( const char *path );
 fs_offset_t FS_DirCacheFileSize( const char *path );
 #endif
