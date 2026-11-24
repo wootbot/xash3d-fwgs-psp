@@ -290,6 +290,7 @@ typedef struct
 	int		alphaskyTexture;	// quake1 alpha-sky layer
 	int		lightmapTextures[MAX_LIGHTMAPS];
 	int		dlightTexture;	// custom dlight texture
+	int		dlightTextures[2];	// one of these, by guRender.vert_frame & 1
 	int		skyboxTextures[SKYBOX_MAX_SIDES];	// skybox sides
 	int		skytexturenum;	// this not a gl_texturenum!
 	int		skyboxbasenum;	// start with 5800
@@ -557,6 +558,7 @@ void R_BeginFrame( qboolean clearScene );
 void R_RenderFrame( const struct ref_viewpass_s *vp );
 void R_EndFrame( void );
 void R_WaitFrame( void );
+void GU_OpenList( qboolean whole );
 void R_GetTextureParms( int *w, int *h, int texnum );
 void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum );
 qboolean R_SpeedsMessage( char *out, size_t size );
@@ -732,6 +734,8 @@ typedef struct
 	qboolean	extended;	// extended context allows to GL_Debug
 } glwstate_t;
 
+#define PSP_GU_LIST_SIZE	0x100000 // 1Mb
+
 typedef struct
 {
 	int		screen_width;
@@ -743,13 +747,17 @@ typedef struct
 	void		*disp_buffer;
 	void		*depth_buffer;
 	void		*lightmap_vram;	// kept free for GL_BuildLightmaps
-	void		*context_list;
+	void		*context_list;	// the open one's
 	size_t		context_list_size;
+	int		prev_list;	// GE id of the list before it, -1 if the GE is done with that
+	size_t		list_used;	// by the last one
+	qboolean		list_whole;	// the open list has all of the memory
+	void		*present[2];	// by vert_frame & 1: shown when the GE is done with that list
 	byte		*vert_vram;	// per-frame vertex memory in VRAM (uncached alias)
 	size_t		vert_vram_size;
 	size_t		vert_vram_used;
-	uint		vert_frame;	// bumped when the per-frame memory is reused
-	qboolean		frame_pending;	// the GE may still be drawing the last frame, R_WaitFrame
+	uint		vert_frame;	// bumped with every list: what the GE reads belongs to vert_frame & 1
+	qboolean		frame_pending;	// the last list is finished and the next one isn't open yet
 } gurender_t;
 
 extern glconfig_t	glConfig;
@@ -838,6 +846,7 @@ extern convar_t	r_detailtextures;
 extern convar_t	r_novis;
 #if XASH_PSP
 extern convar_t	r_drawworld;
+extern convar_t	r_ge_async;
 #endif
 extern convar_t	r_nocull;
 extern convar_t	r_lockpvs;

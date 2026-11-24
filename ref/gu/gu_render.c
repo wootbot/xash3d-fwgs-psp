@@ -39,6 +39,7 @@ CVAR_DEFINE_AUTO( r_detailtextures, "0", FCVAR_GLCONFIG, "enable detail textures
 CVAR_DEFINE_AUTO( r_novis, "0", 0, "ignore vis information (perfomance test)" );
 #if XASH_PSP
 CVAR_DEFINE_AUTO( r_drawworld, "1", FCVAR_CHEAT, "draw the world and water surfaces (perfomance test)" );
+CVAR_DEFINE_AUTO( r_ge_async, "1", FCVAR_ARCHIVE, "build a frame while the GE is still drawing the last one" );
 #endif
 CVAR_DEFINE_AUTO( r_nocull, "0", 0, "ignore frustrum culling (perfomance test)" );
 CVAR_DEFINE_AUTO( r_lockpvs, "0", FCVAR_CHEAT, "lockpvs area at current point (pvs test)" );
@@ -69,9 +70,42 @@ gurender_t	guRender;
 #define PSP_FB_BPP			4
 #endif
 
-#define PSP_GU_LIST_SIZE	0x100000 // 1Mb
 
 static byte context_list[PSP_GU_LIST_SIZE] __attribute__( ( aligned( 64 ) ) );
+
+// on the GE's finish interrupt: the list's frame onto the screen
+static void GU_Present( int id )
+{
+	if( id < 2 && guRender.present[id] )
+		sceDisplaySetFrameBuf( guRender.present[id], guRender.buffer_width, guRender.buffer_format, PSP_DISPLAY_SETBUF_IMMEDIATE );
+}
+
+/*
+===============
+GU_OpenList
+
+the next display list: half of the memory, the GE may still be reading the other one
+(guRender.vert_frame & 1 tells which), or all of it
+===============
+*/
+void GU_OpenList( qboolean whole )
+{
+	const uint half = guRender.vert_frame & 1;
+
+	guRender.list_whole = whole;
+	guRender.context_list = context_list + ( whole ? 0 : half * ( sizeof( context_list ) / 2 ));
+	guRender.context_list_size = whole ? sizeof( context_list ) : sizeof( context_list ) / 2;
+	guRender.vert_vram_used = half * ( guRender.vert_vram_size / 2 );
+
+	extGuStart( GU_DIRECT, guRender.context_list, guRender.context_list_size );
+
+	// sceGuSwapBuffers isn't used: the GE may not be done with the last frame
+	sceGuDrawBufferList( guRender.buffer_format, vrelptr( guRender.draw_buffer ), guRender.buffer_width );
+
+	// the GE list ids are reused
+	if( guRender.prev_list == extGuListId( ))
+		guRender.prev_list = -1;
+}
 
 /*
 ===============
@@ -103,6 +137,7 @@ static qboolean GU_Init( void )
 
 	guRender.context_list = context_list;
 	guRender.context_list_size = sizeof( context_list );
+	guRender.prev_list = -1;
 
 	// per-frame vertices and lighting ramps: CPU writes to VRAM are cheaper than to
 	// RAM while the GE reads its display list from RAM
@@ -118,6 +153,7 @@ static qboolean GU_Init( void )
 
 	// Initialise the GU.
 	sceGuInit();
+	sceGuSetCallback( GU_CALLBACK_FINISH, GU_Present );
 
 	// Set up the GU.
 	sceGuStart( GU_DIRECT, guRender.context_list );
@@ -183,7 +219,7 @@ static qboolean GU_Init( void )
 	sceGuDisplay( GU_TRUE );
 
 	// Start a new render.
-	extGuStart( GU_DIRECT, guRender.context_list, guRender.context_list_size );
+	GU_OpenList( true );
 
 	return true;
 }
@@ -296,7 +332,7 @@ list. No stall update: callers batch draws and call extGuUpdateStall
 void *GU_GetVertexMemory( unsigned int size )
 {
 	size = ( size + 15 ) & ~15u;
-	if( guRender.vert_vram_used + size <= guRender.vert_vram_size )
+	if( guRender.vert_vram_used + size <= guRender.vert_vram_size / 2 * ( 1 + ( guRender.vert_frame & 1 )))
 	{
 		void *p = guRender.vert_vram + guRender.vert_vram_used;
 		guRender.vert_vram_used += size;
@@ -311,6 +347,7 @@ static void GL_InitCommands( void )
 	gEngfuncs.Cvar_RegisterVariable( &r_novis );
 #if XASH_PSP
 	gEngfuncs.Cvar_RegisterVariable( &r_drawworld );
+	gEngfuncs.Cvar_RegisterVariable( &r_ge_async );
 	R_MeWorldRegister();
 #endif
 	gEngfuncs.Cvar_RegisterVariable( &r_nocull );

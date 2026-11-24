@@ -1188,6 +1188,7 @@ enum { MEMODE_SOLID = 0, MEMODE_BLEND, MEMODE_ADD };
 typedef struct
 {
 	const mebones_frame_t *frame;
+	uint		*cmds, *gates;	// r_mebones_cmds and r_mebones_gates of the frame
 	int		count, numsolid;	// the solid ones come first
 	mebones_item_t	items[MEBONES_MAXENTS];
 
@@ -1238,7 +1239,7 @@ static mecull_t r_mecull[MECULL_MAX] __attribute__(( aligned( 64 )));
 static mesort_t r_mesort[MECULL_MAXTRANS] __attribute__(( aligned( 64 )));
 static matrix3x4 r_mebones_out[MEBONES_POOL] __attribute__(( aligned( 64 )));
 static mebones_res_t r_mebones_res[MEBONES_MAXENTS] __attribute__(( aligned( 64 )));
-static uint r_mebones_cmds[MEBONES_CMDS] __attribute__(( aligned( 64 )));
+static uint r_mebones_cmds[2][MEBONES_CMDS] __attribute__(( aligned( 64 )));	// by guRender.vert_frame & 1, as the gates
 
 /*
 The GE calls the list of the solid models, and those of the translucent ones,
@@ -1247,8 +1248,7 @@ is done with the commands and replaces the jump with a NOP, then BASE and a jump
 to them. The main CPU doesn't wait for the models
 */
 #define MEBONES_GATEWORDS	4
-static volatile uint r_mebones_gates[( MEBONES_MAXENTS + 4 ) * MEBONES_GATEWORDS] __attribute__(( aligned( 64 ))); // whole cache lines
-#define MEBONES_GATE( i )	((volatile uint *)( 0x40000000 | (uintptr_t)&r_mebones_gates[( i ) * MEBONES_GATEWORDS] ))
+static uint r_mebones_gates[2][( MEBONES_MAXENTS + 4 ) * MEBONES_GATEWORDS] __attribute__(( aligned( 64 ))); // whole cache lines
 #define MEBONES_SOLIDGATE	MEBONES_MAXENTS
 static mebones_ent_t r_mebones_ents[MEBONES_MAXENTS * 2] __attribute__(( aligned( 64 )));
 
@@ -2710,19 +2710,24 @@ static void R_MeEarlyJob( void *arg )
 	R_MeEarlyBones( job, MECULL_MAXSOLID, numtrans, number );
 }
 
-static void R_MeGateClose( int i )
+static inline uint *R_MeGate( const mebones_job_t *job, int i )
 {
-	volatile uint *const gate = MEBONES_GATE( i );
-	const uintptr_t self = (uintptr_t)&r_mebones_gates[i * MEBONES_GATEWORDS + 1];
+	return &job->gates[i * MEBONES_GATEWORDS];
+}
+
+static void R_MeGateClose( const mebones_job_t *job, int i )
+{
+	volatile uint *const gate = (volatile uint *)( 0x40000000 | (uintptr_t)R_MeGate( job, i ));
+	const uintptr_t self = (uintptr_t)( R_MeGate( job, i ) + 1 );
 
 	gate[0] = 0x10000000 | (( self >> 8 ) & 0xf0000 ); // BASE
 	gate[1] = 0x08000000 | ( self & 0xffffff ); // JUMP
 }
 
 // to the commands, NULL: to nothing
-static void R_MeGateOpen( int i, uintptr_t cmds )
+static void R_MeGateOpen( const mebones_job_t *job, int i, uintptr_t cmds )
 {
-	volatile uint *const gate = MEBONES_GATE( i );
+	volatile uint *const gate = (volatile uint *)( 0x40000000 | (uintptr_t)R_MeGate( job, i ));
 
 	if( cmds )
 	{
@@ -2734,26 +2739,26 @@ static void R_MeGateOpen( int i, uintptr_t cmds )
 }
 
 // the GE may have the solid models
-static void R_MeSolidDone( void )
+static void R_MeSolidDone( const mebones_job_t *job )
 {
 	uint *p = r_mebones_me.p;
 
 	*p++ = 0x0B000000; // RET
 	PSP_MeWriteback( r_mebones_me.p, sizeof( *p ));
 	r_mebones_me.p = p;
-	R_MeGateOpen( MEBONES_SOLIDGATE, (uintptr_t)r_mebones_cmds );
+	R_MeGateOpen( job, MEBONES_SOLIDGATE, (uintptr_t)job->cmds );
 }
 
 static void R_MeBonesJob( void *arg )
 {
 	const mebones_job_t *job = arg;
 
-	r_mebones_me.p = r_mebones_cmds;
+	r_mebones_me.p = job->cmds;
 
 	for( int i = 0; i < job->count; i++ )
 	{
 		if( i == job->numsolid )
-			R_MeSolidDone();
+			R_MeSolidDone( job );
 
 		const mebones_item_t *it = &job->items[i];
 		const int slot = r_mebones_me.slot[it->index];
@@ -2817,12 +2822,12 @@ static void R_MeBonesJob( void *arg )
 
 		PSP_MeWriteback( res, sizeof( *res ));
 		if( i >= job->numsolid && it->draw )
-			R_MeGateOpen( i, res->cmds );
+			R_MeGateOpen( job, i, res->cmds );
 		MEBONES_SYNC[MESYNC_ITEMS] = i + 1;
 	}
 
 	if( job->numsolid == job->count )
-		R_MeSolidDone();
+		R_MeSolidDone( job );
 }
 
 static const struct medraw_s *R_StudioMeDrawGet( const studiohdr_t *hdr, cl_entity_t *e, int body, int skin, const mstudiotexture_t *remap );
@@ -3337,9 +3342,11 @@ static void R_StudioMePost( void )
 	VectorCopy( RI.vright, job->vright );
 	R_StudioMeElights( job );
 
-	R_MeGateClose( MEBONES_SOLIDGATE );
+	job->cmds = r_mebones_cmds[guRender.vert_frame & 1];
+	job->gates = r_mebones_gates[guRender.vert_frame & 1];
+	R_MeGateClose( job, MEBONES_SOLIDGATE );
 	for( int i = job->numsolid; i < job->count; i++ )
-		R_MeGateClose( i );
+		R_MeGateClose( job, i );
 
 	MEBONES_SYNC[MESYNC_ITEMS] = 0;
 	r_mebones.ticket = PSP_MeRunKeep( R_MeBonesJob, job );
@@ -6950,7 +6957,7 @@ static uint *R_MeModelCommands( const mebones_job_t *job, const mebones_item_t *
 {
 	uint *p = r_mebones_me.p;
 
-	if( p + it->draw->words + ( it->wdraw ? it->wdraw->words : 0 ) >= r_mebones_cmds + MEBONES_CMDS )
+	if( p + it->draw->words + ( it->wdraw ? it->wdraw->words : 0 ) >= job->cmds + MEBONES_CMDS )
 		return NULL;
 
 	// toward the light
@@ -8511,7 +8518,8 @@ static void R_StudioPropRecordCommands( propcache_t *pc, cl_entity_t *e )
 	int numitems = 0, polys = 0;
 
 	pc->rec_gen = 0;
-	if( !r_studio_proplist.value || !pc->valid || pc->rec_frame == guRender.vert_frame )
+	// not while the GE may be reading them
+	if( !r_studio_proplist.value || !pc->valid || pc->rec_frame + 1 >= guRender.vert_frame )
 		return;
 	if( m_fDoRemap || g_studio.rendermode != kRenderNormal || r_drawentities->value != 1 || e->player || !R_StudioPropPose( e, pc->rec_entorigin, pc->rec_entangles ))
 		return;
@@ -9380,7 +9388,7 @@ void R_StudioDrawMeModels( void )
 		return;
 
 	R_StudioMeOpen( MEMODE_SOLID );
-	extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)&r_mebones_gates[MEBONES_SOLIDGATE * MEBONES_GATEWORDS] ));
+	extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), R_MeGate( &r_mebones.job, MEBONES_SOLIDGATE )));
 	ge_last_skinblock = R_StudioMeLastSkin( last );
 	R_StudioMeClose();
 }
@@ -9394,7 +9402,7 @@ void R_StudioDrawMeModel( cl_entity_t *e )
 		return;
 
 	R_StudioMeOpen( r_mebones.job.items[i].mode );
-	extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), (const uint *)&r_mebones_gates[i * MEBONES_GATEWORDS] ));
+	extGuCmdEnd( R_StudioGECall( extGuCmdBegin(), R_MeGate( &r_mebones.job, i )));
 	ge_last_skinblock = R_StudioMeLastSkin( &r_mebones.job.items[i] );
 	R_StudioMeClose();
 }
@@ -9430,9 +9438,9 @@ void R_StudioFinishMeModels( void )
 
 	// it was given up on: the GE skips the others
 	if( MEBONES_SYNC[MESYNC_ITEMS] < r_mebones.job.numsolid )
-		R_MeGateOpen( MEBONES_SOLIDGATE, 0 );
+		R_MeGateOpen( &r_mebones.job, MEBONES_SOLIDGATE, 0 );
 	for( int i = Q_max( MEBONES_SYNC[MESYNC_ITEMS], r_mebones.job.numsolid ); i < r_mebones.count; i++ )
-		R_MeGateOpen( i, 0 );
+		R_MeGateOpen( &r_mebones.job, i, 0 );
 
 	RI.currententity = saveent;
 	RI.currentmodel = savemodel;

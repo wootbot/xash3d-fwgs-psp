@@ -1217,6 +1217,8 @@ void R_GammaChanged( qboolean do_reset_gamma )
 	}
 }
 
+static void R_NextFrame( void );
+
 /*
 ===============
 R_BeginFrame
@@ -1224,7 +1226,7 @@ R_BeginFrame
 */
 void R_BeginFrame( qboolean clearScene )
 {
-	R_WaitFrame();
+	R_NextFrame();
 	glConfig.softwareGammaUpdate = false;	// in case of possible fails
 
 
@@ -1302,42 +1304,77 @@ void R_EndFrame( void )
 	R_Set2DMode( false );
 	R_StudioFinishMeModels();
 
-	// finish rendering: the GE draws it while the next frame's game code runs,
-	// R_WaitFrame waits for it before anything touches what it reads
-	sceGuFinish();
+	// finish rendering: the GE draws it while the next frame's game code runs, and shows
+	// it when it's done (GU_Present). With vsync R_NextFrame does
+	guRender.list_used = extGuListUsed();
+	guRender.present[guRender.vert_frame & 1] = guRender.draw_buffer;
+	sceGuFinishId( gl_vsync->value ? 2 : guRender.vert_frame & 1 );
 	guRender.frame_pending = true;
+}
+
+static void R_SyncList( int id )
+{
+	if( id >= 0 )
+		sceGeListSync( id, 0 );
+}
+
+/*
+===============
+R_NextFrame
+
+open the next list. The GE may still be drawing the last one (guRender.prev_list), not
+the one before: everything it reads from memory that changes every frame is there twice
+===============
+*/
+static void R_NextFrame( void )
+{
+	const int last = extGuListId();
+	qboolean whole = !r_ge_async.value || gl_vsync->value != 0.0f;
+
+	if( !guRender.frame_pending )
+		return;
+	guRender.frame_pending = false;
+
+	// a long list: the next one may be too
+	if( guRender.list_used > PSP_GU_LIST_SIZE / 4 )
+		whole = true;
+
+	R_SyncList( guRender.prev_list );
+	guRender.prev_list = last;
+
+	if( whole || guRender.list_whole )
+	{
+		R_SyncList( last );
+		guRender.prev_list = -1;
+	}
+
+	gEngfuncs.GL_SwapBuffers(); // vsync
+	if( gl_vsync->value )
+		sceDisplaySetFrameBuf( guRender.draw_buffer, guRender.buffer_width, guRender.buffer_format, PSP_DISPLAY_SETBUF_IMMEDIATE );
+
+	guRender.vert_frame++;
+
+	// swap the buffers.
+	void* p_swap = guRender.disp_buffer;
+	guRender.disp_buffer = guRender.draw_buffer;
+	guRender.draw_buffer = p_swap;
+
+	// start a new render.
+	GU_OpenList( whole );
 }
 
 /*
 ===============
 R_WaitFrame
 
-wait for the GE to finish the last frame, show it and open the next list
+wait for the GE to finish the last frame, for what it reads to be changed or freed
 ===============
 */
 void R_WaitFrame( void )
 {
-	if( !guRender.frame_pending )
-		return;
-	guRender.frame_pending = false;
-
-	sceGuSync( GU_SYNC_FINISH, GU_SYNC_WAIT );
-
-	gEngfuncs.GL_SwapBuffers(); // vsync
-
-	// the GE is done with this frame's vertex memory
-	guRender.vert_vram_used = 0;
-	guRender.vert_frame++;
-
-	// swap the buffers.
-	sceGuSwapBuffers();
-
-	void* p_swap = guRender.disp_buffer;
-	guRender.disp_buffer = guRender.draw_buffer;
-	guRender.draw_buffer = p_swap;
-
-	// start a new render.
-	extGuStart( GU_DIRECT, guRender.context_list, guRender.context_list_size );
+	R_NextFrame();
+	R_SyncList( guRender.prev_list );
+	guRender.prev_list = -1;
 }
 
 /*

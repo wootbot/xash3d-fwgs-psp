@@ -48,6 +48,12 @@ unsigned int extGuListUsed( void )
 	return ( unsigned int )gu_list->current - ( unsigned int )gu_list->start;
 }
 
+/* GE id of the current display list */
+int extGuListId( void )
+{
+	return ge_list_executed[0];
+}
+
 /*
 In a GU_DIRECT list sceGuGetMemory and sceGuDrawArray update the GE's stall
 address after every call, which is a syscall. These don't: batch them and

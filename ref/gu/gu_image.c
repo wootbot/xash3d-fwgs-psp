@@ -1281,7 +1281,7 @@ GL_UpdateTexture
 */
 qboolean GU_UpdateTextureRect( int texnum, int xoff, int yoff, int width, int height, const void *buffer )
 {
-	R_WaitFrame(); // the GE may still be reading it
+	// the GE isn't reading it: only for tr.dlightTextures
 	gl_texture_t	*tex;
 	byte		*dst, *src;
 
@@ -1904,7 +1904,9 @@ void R_InitDlightTexture( void )
 	r_image.type = LIGHTMAP_FORMAT;
 	r_image.size = r_image.width * r_image.height * LIGHTMAP_BPP;
 
-	tr.dlightTexture = GL_LoadTextureInternal( "*dlight", &r_image, TF_NOMIPMAP|TF_CLAMP|TF_ATLAS_PAGE );
+	tr.dlightTextures[0] = GL_LoadTextureInternal( "*dlight", &r_image, TF_NOMIPMAP|TF_CLAMP|TF_ATLAS_PAGE );
+	tr.dlightTextures[1] = GL_LoadTextureInternal( "*dlight2", &r_image, TF_NOMIPMAP|TF_CLAMP|TF_ATLAS_PAGE );
+	tr.dlightTexture = tr.dlightTextures[0];
 }
 
 /*

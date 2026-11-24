@@ -593,6 +593,7 @@ static void LM_UploadBlock( qboolean dynamic )
 	if( dynamic )
 	{
 		// NOTE: the GE reads the texture when it executes the list, after this returns
+		tr.dlightTexture = tr.dlightTextures[guRender.vert_frame & 1];
 		GU_UpdateTextureRect( tr.dlightTexture, 0, 0, BLOCK_SIZE, gl_lms.atlas.max_height, gl_lms.lightmap_buffer );
 		glState.currentTexture = -1; // force rebind
 		GL_Bind( XASH_TEXTURE0, tr.dlightTexture );
@@ -1873,12 +1874,13 @@ typedef struct
 	} vis[MEWORLD_MAXVIS];
 	uint16_t		texhead[WS_TEXTURE + 1], textail[WS_TEXTURE + 1], textures[WS_TEXTURE + 1];
 	uint16_t		lmhead[MAX_LIGHTMAPS];
-	uint32_t		cmds[MEWORLD_CMDS] __attribute__(( aligned( 64 )));
+	uint32_t		cmds[2][MEWORLD_CMDS] __attribute__(( aligned( 64 )));	// the GE may still be reading the other ones
 } meworld_out_t;
 
 typedef struct
 {
 	meworld_out_t	*out;
+	uint32_t		*cmds;		// the frame's in out
 	uint16_t		*visframe;	// ws_visframe for the ME, after out in the same block
 	int		visfill;		// fill it with this value first, -1 don't
 	uint32_t		framecount;
@@ -2152,7 +2154,7 @@ static void R_MeBrush( meworld_job_t *job, const meworld_brush_t *m, float front
 
 static qboolean R_MeSpace( meworld_job_t *job, int words )
 {
-	if( job->p + words <= job->out->cmds + MEWORLD_CMDS )
+	if( job->p + words <= job->cmds + MEWORLD_CMDS )
 		return true;
 
 	job->full = true;
@@ -2196,7 +2198,7 @@ static uint32_t R_MeListBegin( meworld_job_t *job )
 
 	*job->p++ = 0; // NOP, so that no list starts at 0
 	*job->p++ = ( 18 << 24 ) | GU_TEXTURE_32BITF | GU_VERTEX_32BITF; // VTYPE
-	return job->p - 1 - job->out->cmds;
+	return job->p - 1 - job->cmds;
 }
 
 static void R_MeListEnd( meworld_job_t *job )
@@ -2304,7 +2306,7 @@ static void R_MeWorldJob( void *arg )
 	}
 
 	job->full = false;
-	job->p = job->out->cmds;
+	job->p = job->cmds;
 	job->who = 0;
 
 	R_MeResultBegin( job, MEWORLD_WORLD );
@@ -2374,7 +2376,7 @@ void R_MeWorldBegin( void )
 		|| FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW|RF_DRAW_OVERVIEW ) || !PSP_MeStart( ))
 		return;
 
-	// the GE reads the commands until R_WaitFrame: one view a frame
+	// the GE reads the commands: one view a frame
 	if( r_meworld.vert_frame == guRender.vert_frame )
 		return;
 
@@ -2403,6 +2405,7 @@ void R_MeWorldBegin( void )
 	}
 
 	r_meworld.vert_frame = guRender.vert_frame;
+	job->cmds = job->out->cmds[guRender.vert_frame & 1];
 
 	R_WorldSurfsBeginWalk();
 
@@ -2548,7 +2551,7 @@ void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped, const uint16_t 
 
 static uint R_MeListAddress( uint offset )
 {
-	return offset ? (uint)( r_meworld.job.out->cmds + offset ) : 0;
+	return offset ? (uint)( r_meworld.job.cmds + offset ) : 0;
 }
 
 static void R_MeCallList( uint *list )
