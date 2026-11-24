@@ -1052,8 +1052,8 @@ static const struct
 	float	px;	// part of r_studio_lod_px
 } ge_lodlevels[GE_LODS] =
 {
-	{ 14, 1.5f, 0.45f, 1.0f },
-	{ 9, 3.0f, 0.30f, 0.45f },
+	{ 14, 1.5f, 0.65f, 1.0f },
+	{ 9, 3.0f, 0.40f, 0.45f },
 };
 
 static CVAR_DEFINE_AUTO( r_studio_me, "1", FCVAR_ARCHIVE, "cull studio models and compute the bones of animated ones on the Media Engine" );
@@ -1067,7 +1067,8 @@ static CVAR_DEFINE_AUTO( r_studio_me_players, "1", FCVAR_ARCHIVE, "players too (
 #define MEBONES_ATTACHMENTS	4	// cl_entity_t.attachment
 #define MEBONES_CMDS	98304	// GE commands of all models, ~1000 each
 #define MEBONES_CMDSMIN	16384	// if there's no space for so many
-#define MEBONES_LODWORDS	16384	// more of them: simpler models
+#define MEBONES_LODWORDS	40960	// more of them: simpler models
+#define MELOD_MAXSCALE	1.35f	// their errors are a pixel or two at that
 #define MEBONES_MAXPLAYERS	32
 #define MEMERGE_CACHE	16
 #define MELIGHT_MAXPHYS	64	// brush models the floor light may come from
@@ -1167,6 +1168,8 @@ typedef struct mebones_ent_s
 	melight_t		light;
 	int		index;	// the entity's, and its origin
 	vec3_t		origin;
+	struct meprop_s	*prop;	// keeps the bones, and the light
+	const cl_entity_t	*propent;
 } __attribute__(( aligned( 64 ))) mebones_ent_t;
 
 // what both jobs need to know about this frame
@@ -1321,6 +1324,22 @@ typedef struct
 	int	sky;
 } melightcache_t;
 
+// a model of at most 2 bones that lies still, like a weapon on the floor
+#define MEPROP_CACHE	512	// a power of 2
+#define MEPROP_BONES	2
+
+typedef struct meprop_s
+{
+	const cl_entity_t	*ent;	// NULL: empty
+	const studiohdr_t	*hdr;
+	int	sequence, effects, renderfx;
+	vec3_t	origin, angles;
+	float	lighttime;	// the light is from, < 0: none
+	melight_t	light;
+	float	prevframe;
+	matrix3x4	rotation, out[MEPROP_BONES];
+} __attribute__(( aligned( 64 ))) meprop_t;
+
 typedef struct
 {
 	int	x, y, z;
@@ -1340,6 +1359,7 @@ typedef struct
 	uint16_t	seen[256];	// when an entity was last not culled, by a hash of its address: the low bits of tr.framecount
 	megait_t	gait[4];	// R_MeGaitBones
 	int	nextgait;
+	meprop_t	props[MEPROP_CACHE];
 	const void	*lightkey[6];	// the map and its sky the caches are for
 	melightcache_t	light[MELIGHT_CACHE];
 	meskycell_t	skycells[MELIGHT_CELLS];
@@ -1720,6 +1740,13 @@ static void R_MeBones( mebones_ent_t *m, matrix3x4 *parentbones )
 	m->done = true;
 	m->partial = false;
 
+	if( m->prop )
+	{
+		Matrix3x4_Copy( m->prop->rotation, m->rotation );
+		memcpy( m->prop->out, m->out, m->hdr->numbones * sizeof( matrix3x4 ));
+		m->prop->ent = m->propent;
+	}
+
 	if( m->weapon )
 		R_MeBones( m->weapon, m->out );
 }
@@ -2006,7 +2033,24 @@ static mebones_ent_t *R_MeEntNew( const studiohdr_t *hdr, int ofs, int usedofs )
 	m->weapon = NULL;
 	m->done = m->partial = false;
 	m->lit = false;
+	m->prop = NULL;
 	return m;
+}
+
+// where the bones of e are kept, NULL if they may change without it being moved
+static meprop_t *R_MePropGet( const cl_entity_t *e, const studiohdr_t *hdr, const mstudioseqdesc_t *pseqdesc, float time )
+{
+	if( hdr->numbones > MEPROP_BONES || hdr->numbonecontrollers || pseqdesc->numframes > 1 || pseqdesc->numblends > 1 || pseqdesc->numevents
+		|| e->curstate.movetype == MOVETYPE_STEP || ( e->latched.sequencetime && e->latched.sequencetime + 0.2f > time ))
+		return NULL;
+
+	return &r_mebones_me.props[(((uint)(uintptr_t)e * 2654435761u ) >> 16 ) & ( MEPROP_CACHE - 1 )];
+}
+
+static qboolean R_MePropValid( const meprop_t *p, const cl_entity_t *e, const studiohdr_t *hdr )
+{
+	return p->ent == e && p->hdr == hdr && p->sequence == e->curstate.sequence && p->effects == e->curstate.effects
+		&& p->renderfx == e->curstate.renderfx && VectorCompare( p->origin, e->origin ) && VectorCompare( p->angles, e->angles );
 }
 
 // R_StudioSetupBones up to the math
@@ -2021,10 +2065,38 @@ static mebones_ent_t *R_MeGather( const mebones_frame_t *frame, const cl_entity_
 	if( !m )
 		return NULL;
 
+	const mstudioseqdesc_t *pseqdesc = pseqdescs + e->curstate.sequence;
+	meprop_t *const prop = player ? NULL : R_MePropGet( e, hdr, pseqdesc, frame->time );
+
+	m->index = e->index;
+	VectorCopy( e->origin, m->origin );
+
+	if( prop && R_MePropValid( prop, e, hdr ))
+	{
+		m->prop = prop;
+		m->key.hdr = NULL; // not the main CPU's
+		m->seq[0].pseqdesc = pseqdesc;
+		m->seq[0].f = m->prevframe = prop->prevframe;
+		Matrix3x4_Copy( m->rotation, prop->rotation );
+		memcpy( m->out, prop->out, hdr->numbones * sizeof( matrix3x4 ));
+		m->done = true;
+
+		// the dynamic lights may be a bit late
+		if( prop->lighttime >= 0.0f && frame->time >= prop->lighttime && frame->time < prop->lighttime + 0.1f )
+		{
+			m->light = prop->light;
+			m->lit = true;
+		}
+
+		if( !r_mebones_me.scratch )
+			r_mebones_me.used += used;
+		r_mebones_me.count++;
+		return m;
+	}
+
 	R_MeTransform( frame, e, player, m->rotation );
 	R_StudioMeBonesKey( &m->key, e, hdr, frame->time, frame->interpolate );
 
-	const mstudioseqdesc_t *pseqdesc = pseqdescs + e->curstate.sequence;
 	const float f = R_MeEstimateFrame( frame, e, pseqdesc );
 	float dadt = 1.0f;
 
@@ -2098,8 +2170,21 @@ static mebones_ent_t *R_MeGather( const mebones_frame_t *frame, const cl_entity_
 		count++;
 	}
 
-	m->index = e->index;
-	VectorCopy( e->origin, m->origin );
+	if( prop && !m->blendprev )
+	{
+		// the bones are stored when there are any (R_MeBones)
+		prop->ent = NULL;
+		prop->hdr = hdr;
+		prop->sequence = e->curstate.sequence;
+		prop->effects = e->curstate.effects;
+		prop->renderfx = e->curstate.renderfx;
+		VectorCopy( e->origin, prop->origin );
+		VectorCopy( e->angles, prop->angles );
+		prop->lighttime = -1.0f;
+		prop->prevframe = m->prevframe;
+		m->prop = prop;
+		m->propent = e;
+	}
 
 	if( !r_mebones_me.scratch )
 		r_mebones_me.used += used;
@@ -2429,6 +2514,7 @@ static void R_MeLightCheck( const mebones_frame_t *frame )
 
 	memcpy( r_mebones_me.lightkey, key, sizeof( key ));
 	memset( r_mebones_me.light, 0, sizeof( r_mebones_me.light ));
+	memset( r_mebones_me.props, 0, sizeof( r_mebones_me.props ));
 	memset( r_mebones_me.skycells, 0, sizeof( r_mebones_me.skycells ));
 }
 
@@ -2537,6 +2623,19 @@ static void R_MeDynamicLight( const mebones_frame_t *frame, const cl_entity_t *e
 		l->ambient = 128.0f;
 	if( l->ambient + l->shade > 255.0f )
 		l->shade = 255.0f - l->ambient;
+}
+
+// of an entity that isn't lit yet
+static void R_MeEntLight( const mebones_frame_t *frame, const cl_entity_t *e, qboolean small, mebones_ent_t *m )
+{
+	R_MeDynamicLight( frame, e, small, &m->light );
+	m->lit = true;
+
+	if( m->prop )
+	{
+		m->prop->light = m->light;
+		m->prop->lighttime = frame->time;
+	}
 }
 
 // R_StudioEntityLight and R_StudioGEFoldElights
@@ -2824,12 +2923,10 @@ static void R_MeEarlyBones( const mebones_early_t *job, int first, int count, ui
 		if( !m )
 			continue;
 
-		R_MeBones( m, NULL );
-		if( frame->draw && c->type != MECULL_BONES )
-		{
-			R_MeDynamicLight( frame, e, c->small, &m->light );
-			m->lit = true;
-		}
+		if( !m->done )
+			R_MeBones( m, NULL );
+		if( frame->draw && c->type != MECULL_BONES && !m->lit )
+			R_MeEntLight( frame, e, c->small, m );
 		r_mebones_me.slot[i] = m - r_mebones_ents + 1;
 	}
 }
@@ -2988,8 +3085,7 @@ static void R_MeItemGather( const mebones_job_t *job, int i )
 		if( res->visible && it->draw )
 		{
 			if( !m->lit )
-				R_MeDynamicLight( job->frame, it->e, c->small, &m->light );
-			m->lit = true;
+				R_MeEntLight( job->frame, it->e, c->small, m );
 			res->floor = m->light.floor;
 			res->events = R_MeEvents( job->frame, it->e, m );
 
@@ -10922,7 +11018,7 @@ void R_StudioMePrepare( byte *solid_culled, byte *trans_culled, const uint16_t *
 	else if( r_mebones.job.words < MEBONES_LODWORDS * 3 / 4 )
 		r_mebones.lodscale *= 0.98f;
 	r_mebones.waited = 0;
-	r_mebones.lodscale = bound( 1.0f, r_mebones.lodscale, 4.0f );
+	r_mebones.lodscale = bound( 1.0f, r_mebones.lodscale, MELOD_MAXSCALE );
 }
 
 void R_StudioPreCullEnd( void )
