@@ -844,7 +844,17 @@ after the packets are read: starts the Media Engine on them
 */
 void CL_TempEntBegin( void )
 {
-	const double ft = cl.time - cl.oldtime;
+	double time = cl.time, oldtime = cl.oldtime;
+
+	// as CL_LerpPoint, in CL_EmitEntities
+	if( cl_serverframetime() == 0.0 || cls.timedemo )
+	{
+		time = cl.mtime[0];
+		if( cls.demoplayback )
+			oldtime = cl.mtime[0] - cl_clientframetime();
+	}
+
+	const double ft = time - oldtime;
 
 	CL_MeTentsWait();
 	cl_metent.posted = false;
@@ -859,12 +869,12 @@ void CL_TempEntBegin( void )
 	cl_metent_job.hull = &cl.worldmodel->hulls[0];
 	cl_metent_job.vis = ref.dllFuncs.Mod_GetCurrentVis();
 	cl_metent_job.ft = ft;
-	cl_metent_job.time = cl.time;
+	cl_metent_job.time = time;
 	cl_metent_job.gravity = clgame.movevars.gravity;
 
 	cl_metent.posted = true;
-	cl_metent.time = cl.time;
-	cl_metent.oldtime = cl.oldtime;
+	cl_metent.time = time;
+	cl_metent.oldtime = oldtime;
 	cl_metent.serial = cl_tents_serial;
 	cl_metent.ticket = PSP_MeRunKeep( CL_MeTentsJob, NULL );
 }
