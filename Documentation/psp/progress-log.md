@@ -844,7 +844,8 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     how little they move against their parent in 10 frames of the model's own sequences (root mean square,
     with a limit), triangles by edge collapse in the frame closest to the others. The first version merged
     bones by size in the default pose down to 8: legs welded to the pelvis, off by 40 units, the user saw
-    broken models at once. Now 0.3 units on average, 10 at worst (PC measurement over all frames).
+    broken models at once. Now 0.3 units on average,
+    ~15 at worst, 48 on the garg (PC measurement, 4 frames of each sequence in the model file).
     Commands of a grunt 1352 words -> 604 -> 484.
   - Poses are kept for 2-3 frames at those levels, longer and for all models (`frame->hold`, 0-4) while the
     main CPU waits for the ME; the light traces as well. 224 models instead of 96 in the ME's list: the
@@ -852,7 +853,7 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     the lists stay: the ME had no table then and the main CPU drew all 200.
   - The coprocessor 0 count register stands still on the ME: for a profile it stores what it's doing in an
     uncached word, the main CPU's sampling thread reads that.
-  - stress1: about 10 -> 22 fps. fight1 (recorded again, the old one was lost): 106 fps with levels of
+  - stress1: about 10 -> 20-21 fps (with probes). fight1 (recorded again, the old one was lost): 106 fps with levels of
     detail, 103 without, 5-9 of 1800 frames under 60.
   - Demo recording took ~40 ms a frame (dozens of 1-40 byte writes to the stick): buffered. `timedemo in
     game` counted server updates instead of frames; older numbers can't be compared with the new ones.

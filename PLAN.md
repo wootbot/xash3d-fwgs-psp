@@ -61,7 +61,7 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 **Plan, by expected gain:**
 - [~] Benchmark that measures what matters: `timedemo` now also prints the in-game frames only
       (no level load), the 1% low, the minimum and how many frames were under 60 / 100 fps.
-      The stress scene (31 bots, 32 monsters, crossfire) exists, demo `stress1`: ~22 fps (2026-11-24).
+      The stress scene (31 bots, 32 monsters, crossfire) exists, demo `stress1`: ~20 fps (2026-11-24).
 - [~] Batched studio renderer in the engine: run each phase (transform + cull, bones,
       lighting, GE output) for all models in a row instead of the whole pipeline per model.
       The first check (a whole model drawn twice in a row, 5.9 vs 6.6 ms) missed the point:
