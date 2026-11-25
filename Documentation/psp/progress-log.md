@@ -964,3 +964,5 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   new, still empty list: "everything here", no world model, CL_Disconnect. Not PSP code, slow downloads make it
   likely. A connection that ends or restarts cancels its downloads now (HTTP_CancelGameDownloads in
   CL_ClearState), and a file nobody needs doesn't register resources. Built, not tried on the PSP yet.
+- `deluge_beta_v3` doesn't fit: the 25 MB .bsp is loaded as a whole (`Not enough memory`, filesystem_engine.c:83; the
+  largest free block was 8.6 MB), after 12 minutes of downloads. The PSP is left at the console.
