@@ -1831,11 +1831,15 @@ void GU_WorldSurfDecals( const msurface_t *surf )
 =================
 GU_WorldSurfDlit
 
-R_MarkLights marked the surface for this frame
+R_MarkLights marked the surface for this frame. Prebuilt lightmaps don't
+change (R_CheckLightMap): it stays on the fast path then
 =================
 */
 void GU_WorldSurfDlit( const msurface_t *surf )
 {
+	if( lm_prebuilt && lm_prebuilt == WORLDMODEL )
+		return;
+
 	gu_wsurf_t *w = R_WorldSurf( surf );
 
 	if( !w || FBitSet( w->texflags, WS_DLIT ))
@@ -4961,6 +4965,42 @@ static qboolean R_SurfaceIsFloor( const msurface_t *surf )
 	return z > 0.0f && !FBitSet( surf->flags, SURF_DRAWTILED|SURF_DRAWTURB );
 }
 
+// the switchable lights (styles 32 and up) that the map starts dark: off
+static void R_PrebuildDarkStyles( const model_t *mod )
+{
+	char *p = mod->entities;
+	char token[256], key[64];
+
+	if( !p )
+		return;
+
+	while(( p = COM_ParseFile( p, token, sizeof( token ))) && token[0] == '{' )
+	{
+		qboolean light = false;
+		int style = 0, flags = 0;
+
+		while(( p = COM_ParseFile( p, key, sizeof( key ))) && key[0] != '}' )
+		{
+			if( !( p = COM_ParseFile( p, token, sizeof( token ))))
+				return;
+
+			if( !Q_strcmp( key, "classname" ))
+				light = !Q_strncmp( token, "light", 5 );
+			else if( !Q_strcmp( key, "style" ))
+				style = Q_atoi( token );
+			else if( !Q_strcmp( key, "spawnflags" ))
+				flags = Q_atoi( token );
+		}
+
+		if( !p )
+			return;
+
+		// SF_LIGHT_START_OFF
+		if( light && style >= 32 && style < MAX_LIGHTSTYLES && FBitSet( flags, 1 ))
+			g_lightstylevalue[style] = 0;
+	}
+}
+
 void R_PrebuildLightmaps( model_t *mod )
 {
 	int total = 0, kept = 0;
@@ -4988,9 +5028,12 @@ void R_PrebuildLightmaps( model_t *mod )
 	tr.block_size = BLOCK_SIZE_DEFAULT;
 	gl_lms.current_lightmap_texture = 0;
 
-	// the server's styles aren't here yet: all of them normal ('m')
+	// the server's styles aren't here yet: all of them normal ('m'), but the
+	// switchable lights as the map starts them (deluge_beta_v3's coloured
+	// lights of locked doors, off at first, lit their rooms)
 	for( int i = 0; i < MAX_LIGHTSTYLES; i++ )
 		g_lightstylevalue[i] = ( 'm' - 'a' ) * 22;
+	R_PrebuildDarkStyles( mod );
 
 	LM_InitBlock();
 	for( int i = 0; i < mod->numsurfaces; i++ )
