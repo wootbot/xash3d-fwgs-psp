@@ -11441,7 +11441,7 @@ void R_DrawViewModel( void )
 		return;
 
 	// adjust the depth range to prevent view model from poking into walls
-	sceGuDepthRange( (int)gldepthmin, (int)( gldepthmin + VIEWMODEL_DEPTH_RANGE * ( gldepthmax - gldepthmin )));
+	GU_DepthRange( (int)gldepthmin, (int)( gldepthmin + VIEWMODEL_DEPTH_RANGE * ( gldepthmax - gldepthmin )));
 	RI.currentmodel = RI.currententity->model;
 
 	switch( RI.currententity->model->type )
@@ -11456,7 +11456,7 @@ void R_DrawViewModel( void )
 	}
 
 	// restore depth range
-	sceGuDepthRange( (int)gldepthmin, (int)gldepthmax );
+	GU_DepthRange( (int)gldepthmin, (int)gldepthmax );
 }
 
 /*

@@ -130,6 +130,53 @@ void GL_LoadMatrix( const matrix4x4 source )
 
 /*
 =================
+GU_DepthRange, GU_DepthOffset, GU_LoadProjection
+
+The GE's divide isn't exact to the 16 bits of the depth buffer and nearly all of a scene
+is at 0.9 or more of the usual -1 (near) to 1 (far): vertices came out tens of steps wrong, so decals and entities on walls disappeared in them. With -1 (near) to
+0 (far) the same depth values are computed from small numbers.
+=================
+*/
+static int gu_depth_min = 0, gu_depth_max = 65535, gu_depth_offset;
+
+static void GU_UpdateDepthRange( void )
+{
+	const int min = gu_depth_min, max = gu_depth_max;
+
+	sceGuSendCommandf( 68, max - min ); // viewport Z scale
+	sceGuSendCommandf( 71, max + gu_depth_offset ); // viewport Z center
+	sceGuSendCommandi( 214, Q_min( min, max )); // Z clamp
+	sceGuSendCommandi( 215, Q_max( min, max ));
+}
+
+void GU_DepthRange( int min, int max )
+{
+	gu_depth_min = min;
+	gu_depth_max = max;
+	GU_UpdateDepthRange();
+}
+
+void GU_DepthOffset( int offset )
+{
+	gu_depth_offset = offset;
+	GU_UpdateDepthRange();
+}
+
+void GU_LoadProjection( const matrix4x4 source )
+{
+	matrix4x4 m;
+
+	Matrix4x4_Copy( m, source );
+
+	for( int i = 0; i < 4; i++ )
+		m[2][i] = ( m[2][i] - m[3][i] ) * 0.5f;
+
+	sceGumMatrixMode( GU_PROJECTION );
+	GL_LoadMatrix( m );
+}
+
+/*
+=================
 GL_LoadIdentityTexMatrix
 =================
 */
@@ -266,7 +313,7 @@ void GL_PushPolygonOffset( float factor, float units )
 	}
 
 	gu_polyoffsets[gu_num_polyoffsets] = (int)units;
-	sceGuDepthOffset( gu_polyoffsets[gu_num_polyoffsets] );
+	GU_DepthOffset( gu_polyoffsets[gu_num_polyoffsets] );
 	gu_num_polyoffsets++;
 }
 
@@ -288,8 +335,8 @@ void GL_PopPolygonOffset( void )
 	gu_num_polyoffsets--;
 
 	if( gu_num_polyoffsets == 0 )
-		sceGuDepthOffset( 0 );
-	else sceGuDepthOffset( gu_polyoffsets[gu_num_polyoffsets - 1] );
+		GU_DepthOffset( 0 );
+	else GU_DepthOffset( gu_polyoffsets[gu_num_polyoffsets - 1] );
 }
 
 /*

@@ -372,7 +372,7 @@ static void R_Clear( int bitMask )
 	}
 
 	sceGuDepthFunc( GU_LEQUAL );
-	sceGuDepthRange( ( int )gldepthmin, ( int )gldepthmax );
+	GU_DepthRange( ( int )gldepthmin, ( int )gldepthmax );
 }
 
 //=============================================================================
@@ -582,8 +582,7 @@ void R_SetupGL( qboolean set_gl_state )
 		sceGuScissor( vp[0], top, vp[0] + vp[2], top + vp[3] );
 	}
 
-	sceGumMatrixMode( GU_PROJECTION );
-	GL_LoadMatrix( RI.projectionMatrix );
+	GU_LoadProjection( RI.projectionMatrix );
 
 	sceGumMatrixMode( GU_VIEW );
 	GL_LoadMatrix( RI.worldviewMatrix );

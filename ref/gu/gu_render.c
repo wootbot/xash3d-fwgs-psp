@@ -187,8 +187,7 @@ static qboolean GU_Init( void )
 		sceGuStencilOp( GU_KEEP, GU_INCR, GU_INCR );
 	}
 
-	sceGuDepthRange( 0, 65535 );
-	sceGuDepthOffset( 0 );
+	GU_DepthRange( 0, 65535 );
 
 	sceGuDisable( GU_BLEND );
 	sceGuDisable( GU_ALPHA_TEST );

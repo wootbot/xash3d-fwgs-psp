@@ -144,8 +144,7 @@ void R_Set2DMode( qboolean enable )
 		sceGuScissor( 0, 0, gpGlobals->width, gpGlobals->height );
 
 		Matrix4x4_CreateOrtho( projection_matrix, 0, gpGlobals->width, gpGlobals->height, 0, -99999, 99999 );
-		sceGumMatrixMode( GU_PROJECTION );
-		GL_LoadMatrix( projection_matrix );
+		GU_LoadProjection( projection_matrix );
 
 		sceGumMatrixMode( GU_VIEW );
 		sceGumLoadIdentity();
@@ -174,8 +173,7 @@ void R_Set2DMode( qboolean enable )
 			sceGuEnable( GU_FOG );
 		glState.in2DMode = false;
 
-		sceGumMatrixMode( GU_PROJECTION );
-		GL_LoadMatrix( RI.projectionMatrix );
+		GU_LoadProjection( RI.projectionMatrix );
 
 		sceGumMatrixMode( GU_VIEW );
 		GL_LoadMatrix( RI.worldviewMatrix );

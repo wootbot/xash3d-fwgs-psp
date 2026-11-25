@@ -943,3 +943,13 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   polygon at load (GL_BuildPolygonFromSurface), free at runtime. Confirmed by the user; the guard band clip
   planes were not it, they stay at 1440 / 1632 pixels. Detail textures (off by default) can get seams.
 - Stress server plugin: `setpos <eye x y z> <pitch> <yaw>` takes what the client's `viewpos` prints.
+
+## 2026-11-24: depth precision
+
+- User report: a func_wall picture a unit in front of a wall vanishes at some view angles, decals flicker
+  (`blastcorpse1`, viewpos -3460.6 3407.4 -99.9 / 4.7 112). It took ~32 steps of depth offset to see it from 100
+  units where it should win by 25. Not oversized polygons (tighter clip planes changed nothing), not the GE's
+  24 bit floats in the view transform (simulated: 1 step). The divide: with depths of -1 to 1 nearly everything is
+  at 0.9 or more, and it isn't exact to 16 bits there. The projection gives -1 (near) to 0 (far) now and the
+  viewport's Z scale and center make the same depth values of it (GU_LoadProjection, GU_DepthRange): complete
+  without any offset. Confirmed by the user, decals too (with gl_polyoffset 0.1, 12 steps).
