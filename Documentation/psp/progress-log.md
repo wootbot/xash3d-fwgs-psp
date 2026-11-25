@@ -959,3 +959,8 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   menu. `resetkeys` sets them, and the first start without a config.cfg (the game's default.cfg binds a PC
   keyboard). No suggested gamepad preset anymore: Joy_AutoPreset takes default binds for not customized and
   would load the PC pad's over them. "Use defaults" in the Controls menu still reads kb_def.lst (PC keys).
+- Level change during HTTP downloads (user report: left at the console): the server changed the map again while the
+  PSP still downloaded ~155 files, the client reconnected, and the next file of the old list to finish found the
+  new, still empty list: "everything here", no world model, CL_Disconnect. Not PSP code, slow downloads make it
+  likely. A connection that ends or restarts cancels its downloads now (HTTP_CancelGameDownloads in
+  CL_ClearState), and a file nobody needs doesn't register resources. Built, not tried on the PSP yet.

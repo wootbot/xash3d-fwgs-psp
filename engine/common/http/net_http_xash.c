@@ -812,6 +812,58 @@ void HTTP_ClearCustomServers( void )
 
 /*
 ===================
+HTTP_CancelGameDownloads
+
+Drop the downloads of a connection that ended. The next one queues what it
+still needs, and these must not finish in its name (CL_ProcessFile). Only marks
+them, as it can be called from HTTP_AutoClean: that removes them.
+===================
+*/
+void HTTP_CancelGameDownloads( void )
+{
+	int count = 0;
+
+	for( httpfile_t *file = http.first_file; file; file = file->next )
+	{
+		if( !file->process || file->to_memory || file->pfn_process == HTTP_FileFree )
+			continue;
+
+		if( file->file )
+			FS_Close( file->file );
+		file->file = NULL;
+
+		if( file->tls )
+			HTTP_TlsFree( file->tls );
+		file->tls = NULL;
+
+		if( file->socket != -1 )
+		{
+			HTTP_CloseSocket( file->socket );
+			http.active_count--;
+		}
+		file->socket = -1;
+
+		if( file->buf )
+			Mem_Free( file->buf );
+		file->buf = NULL;
+
+		if( file->own_server && file->server )
+			Mem_Free( file->server );
+		file->own_server = false;
+		file->server = NULL;
+
+		file->resource = NULL;
+		file->process = file->success = false;
+		file->pfn_process = HTTP_FileFree;
+		count++;
+	}
+
+	if( count )
+		Con_Reportf( "%s: %d downloads\n", __func__, count );
+}
+
+/*
+===================
 HTTP_AutoClean
 
 remove files with HTTP_FREE state from list

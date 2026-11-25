@@ -1634,6 +1634,7 @@ void CL_ClearState( void )
 	PSP_MeWait(); // it reads what is freed here
 #endif
 	CL_ClearResourceLists();
+	HTTP_CancelGameDownloads();
 
 	for( int i = 0; i < MAX_CLIENTS; i++ )
 		COM_ClearCustomizationList( &cl.players[i].customdata, false );
@@ -1959,6 +1960,7 @@ static void CL_Reconnect_f( void )
 
 	if( cls.state == ca_connected )
 	{
+		HTTP_CancelGameDownloads();
 		CL_Reconnect( false );
 		return;
 	}
@@ -3310,6 +3312,11 @@ void CL_ProcessFile( qboolean successfully_received, const char *filename )
 
 		// moving to 'onhandle' list even if file was missed
 		CL_MoveToOnHandList( p );
+	}
+	else if( filename && filename[0] != '!' )
+	{
+		// not needed here: nothing to register for it
+		return;
 	}
 
 	if( cls.state != ca_disconnected )

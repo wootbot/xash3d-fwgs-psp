@@ -95,6 +95,7 @@ qboolean CL_HasActiveNetRequest( netadr_t from );
 void HTTP_AddCustomServer( const char *url );
 void HTTP_AddDownload( const char *path, int size, qboolean process, resource_t *res );
 void HTTP_ClearCustomServers( void );
+void HTTP_CancelGameDownloads( void );
 void HTTP_Shutdown( void );
 void HTTP_ResetProcessState( void );
 void HTTP_Init( void );
