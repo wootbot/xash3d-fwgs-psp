@@ -387,7 +387,12 @@ void CL_GenericShot_f( void )
 			if( type == scrshot_snapshot )
 				ret = Q_snprintf( checkname, sizeof( checkname ), "../%s_%04d.png", clgame.mapname, i );
 			else
+#if XASH_PSP
+				// no zlib: deflateInit needs ~256 KB in one piece, big maps leave the heap in smaller ones
+				ret = Q_snprintf( checkname, sizeof( checkname ), "scrshots/%s_shot%04d.tga", clgame.mapname, i );
+#else
 				ret = Q_snprintf( checkname, sizeof( checkname ), "scrshots/%s_shot%04d.png", clgame.mapname, i );
+#endif
 
 			if( ret <= 0 )
 			{
