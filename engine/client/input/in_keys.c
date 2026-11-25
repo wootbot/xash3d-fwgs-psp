@@ -839,6 +839,11 @@ void GAME_EXPORT Key_Event( int key, int down )
 
 	if( cls.key_dest == key_menu )
 	{
+#if XASH_PSP
+		// opens the menu, so it goes back to the game as well
+		if( key == K_START_BUTTON && cls.state == ca_active && !cl.background )
+			key = K_ESCAPE;
+#endif
 		// classic Xash3D menus don't have an extension that tells engine
 		// to enable text input
 		if( !gameui.use_extended_api )

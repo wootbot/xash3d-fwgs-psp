@@ -953,3 +953,4 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   at 0.9 or more, and it isn't exact to 16 bits there. The projection gives -1 (near) to 0 (far) now and the
   viewport's Z scale and center make the same depth values of it (GU_LoadProjection, GU_DepthRange): complete
   without any offset. Confirmed by the user, decals too (with gl_polyoffset 0.1, 12 steps).
+- START is Escape in the menu while a game is active (closes the main menu it opened, one level back in submenus).
