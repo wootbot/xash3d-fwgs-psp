@@ -17,9 +17,6 @@ GNU General Public License for more details.
 #include "gu_local.h"
 #include "xash3d_mathlib.h"
 
-// GL polygon offset units to GU depth offset (the old port used 256 for decals, gl_polyoffset is 2)
-#define GU_DEPTH_OFFSET_SCALE 128.0f
-
 static char r_speeds_msg[MAX_SYSPATH];
 ref_speeds_t r_stats; // r_speeds counters
 
@@ -252,7 +249,9 @@ void GL_SetRenderMode( int mode )
 GL_PushPolygonOffset
 
 enable polygon offset and push it onto the stack
-GU only has a constant depth offset, factor is ignored
+GU only has a constant depth offset, factor is ignored. The units are steps of the 16-bit
+depth buffer: n of them show a surface through anything less than about
+n * z * z / 262140 units in front of it (zNear is 4)
 ==============
 */
 static int gu_polyoffsets[2];
@@ -266,7 +265,7 @@ void GL_PushPolygonOffset( float factor, float units )
 		return;
 	}
 
-	gu_polyoffsets[gu_num_polyoffsets] = (int)( units * GU_DEPTH_OFFSET_SCALE );
+	gu_polyoffsets[gu_num_polyoffsets] = (int)units;
 	sceGuDepthOffset( gu_polyoffsets[gu_num_polyoffsets] );
 	gu_num_polyoffsets++;
 }

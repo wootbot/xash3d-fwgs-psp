@@ -929,3 +929,12 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   positive `joy_yaw`/`joy_pitch`) are right. Configs that worked around it (`sfyprl`, negative
   `joy_yaw`/`joy_pitch`) have to go back to the defaults. The workaround was tried live
   by cvar, the new build isn't on the PSP yet.
+
+## 2026-11-24: brush entities seen through walls
+
+- User report: water and gates show through the world at a distance, not close up. The depth offset
+  of brush models was `gl_polyoffset_bmodels` 2 * 128 = 256 steps of the 16-bit depth buffer, about z*z/1024
+  units (the old port had none). The scale is for decals only now, 2 is 2 steps: 8 units at z = 1000.
+  Tried live with 0.016 (2 steps) and confirmed by the user.
+- The analog axes' workaround was confirmed by the user too.
+- The FPS meter stuck at 71 was `fps_max 72`, the PSP never dropped under it. 200 shows 95-116 there.

@@ -27,6 +27,8 @@ GNU General Public License for more details.
 #define DECAL_OVERLAP_DIST		8
 #define MIN_DECAL_SCALE		0.01f
 #define MAX_DECAL_SCALE		16.0f
+// gl_polyoffset to steps of the depth buffer (the old port used 256)
+#define DECAL_DEPTH_OFFSET_SCALE	128.0f
 
 // clip edges
 #define LEFT_EDGE			0
@@ -947,7 +949,7 @@ void DrawSurfaceDecals( msurface_t *fa, qboolean single, qboolean reverse )
 			GL_Cull( GL_NONE );
 
 		if( gl_polyoffset.value )
-			GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value );
+			GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value * DECAL_DEPTH_OFFSET_SCALE );
 	}
 
 	if( FBitSet( fa->flags, SURF_TRANSPARENT ) && glState.stencilEnabled )
@@ -1055,7 +1057,7 @@ void DrawDecalsBatch( void )
 		GL_Cull( GL_NONE );
 
 	if( gl_polyoffset.value )
-		GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value );
+		GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value * DECAL_DEPTH_OFFSET_SCALE );
 
 	for( int i = 0; i < tr.num_draw_decals; i++ )
 	{
