@@ -1209,9 +1209,8 @@ and a box of floats, ~1 us a node and ~600 nodes a frame, mostly cache misses
 typedef struct
 {
 	short		mins[3], maxs[3];	// rounded outwards
-	uint16_t	pad0;
 	byte		type;		// the plane type, WN_LEAF or WN_SOLID
-	byte		pad;
+	int8_t		qnormal[3];	// the plane's normal * WN_QNORMAL, rounded (R_MeNodesWalk)
 	union
 	{
 		float		dist;		// of the plane
@@ -1224,6 +1223,8 @@ typedef struct
 } gu_wnode_t;
 
 typedef char wn_size_check[sizeof( gu_wnode_t ) == 32 ? 1 : -1];
+
+#define WN_QNORMAL	127.0f
 
 static void		*wn_alloc;
 static gu_wnode_t	*wn_nodes;		// NULL without
@@ -1305,6 +1306,8 @@ static int R_WorldNodeAdd( const model_t *world, const mnode_t *node, int parent
 	w->type = node->plane->type;
 	w->dist = node->plane->dist;
 	w->plane = node->plane - world->planes;
+	for( int j = 0; j < 3; j++ )
+		w->qnormal[j] = (int)roundf( node->plane->normal[j] * WN_QNORMAL );
 	w->firstsurf = first;
 	w->numsurf = num;
 
@@ -2108,7 +2111,8 @@ static CVAR_DEFINE_AUTO( r_brushes_me, "1", FCVAR_ARCHIVE, "the same for the sta
 #define MEWORLD_MAXVIS	4096	// visible plain surfaces
 #define MEWORLD_MAXLIST	1024	// surfaces for the main CPU, of each kind
 #define MEWORLD_MAXLEAFS	256	// leaves with efrags
-#define MEWORLD_CMDS	24576	// GE commands of all lists of a frame
+#define MEWORLD_CMDS	16384	// GE commands of all lists of a frame (deluge_beta_v3: up to ~13600)
+#define MEWORLD_BUFFERS	3	// the GE may still read the lists of two frames (R_NextFrame), R_MeWorldEarly writes the next one's
 #define MEWORLD_MAXBIND	48	// GE commands of one bind
 #define MEWORLD_MAXBRUSHES	128	// static brush models
 #define MEWORLD_BACKSIDE	BIT( 15 )	// meworld_res_t.who: CULL_BACKSIDE
@@ -2149,7 +2153,7 @@ typedef struct
 	uint16_t		texhead[WS_TEXTURE + 1], textail[WS_TEXTURE + 1], textures[WS_TEXTURE + 1];
 	uint16_t		lmhead[MAX_LIGHTMAPS];
 	uint32_t		texused[( MAX_TEXTURES + 31 ) >> 5];
-	uint32_t		cmds[2][MEWORLD_CMDS] __attribute__(( aligned( 64 )));	// the GE may still be reading the other ones
+	uint32_t		cmds[MEWORLD_BUFFERS][MEWORLD_CMDS] __attribute__(( aligned( 64 )));
 } meworld_out_t;
 
 typedef struct
@@ -2160,12 +2164,14 @@ typedef struct
 	int		visfill;		// fill it with this value first, -1 don't
 	uint32_t		framecount;
 	uint16_t		visframecount;
+	uint16_t		stamp;		// marks the surfaces of this walk in visframe
 	byte		allslow, skybox;
 	uint		clipflags;
 	vec3_t		org;
 	int		time10, time20;	// animated textures: frames at 10 and 20 fps
 	float		planes[12][4];	// normal, -dist; the clip planes from 8 on, as in the clip flags
 	float		absplanes[12][4];
+	float		qerror;		// how far R_MeNodesWalk's dot product with a rounded normal can be off
 
 	// the ME's own
 	uint		*p;		// end of the commands
@@ -2197,7 +2203,35 @@ static struct
 	qboolean		brushes;		// and the brush models', not drawn yet
 	uint		texlist, lmlist;	// addresses, for the next R_DrawTextureChains and R_BlendLightmaps
 	cl_entity_t	*ents[MEWORLD_MAXBRUSHES];
+	uint16_t		stamp;		// the last job's
+
+	// R_MeWorldEarly: the next frame's walk, from this one's view with margins
+	struct
+	{
+		qboolean		ready;		// this frame's view is in here
+		uint32_t		ticket;
+		uint		vert_frame;	// the frame it's for, and what it must find there
+		int		framecount, visframecount;
+		const model_t	*world;
+		vec3_t		org, forward, right, up;
+		vec3_t		lastorg;		// the view of the last capture
+		const model_t	*lastworld;
+		float		fov_x, fov_y, farclip;
+		int		flags;
+		byte		allslow, skybox;
+		uint		clipflags;
+		float		qerror;
+		float		planes[12][4];
+		int		time10, time20;
+	} early;
 } r_meworld __attribute__(( aligned( 64 )));
+
+static CVAR_DEFINE_AUTO( r_world_me_early, "1", FCVAR_ARCHIVE, "walk the world for the next frame on the Media Engine at the end of a frame, used if the view stays close" );
+
+// how far the next view may be from this one, for R_MeWorldEarly
+#define MEWORLD_EARLY_MOVE	8.0f	// units
+#define MEWORLD_EARLY_TURN	8.0f	// degrees the planes are widened by
+#define MEWORLD_EARLY_COS	0.99619f	// cos( 5 degrees ): what is accepted of each axis
 
 // uncached view
 #define MEWORLD_OUT	((volatile meworld_out_t *)( 0x40000000 | (uintptr_t)r_meworld.job.out ))
@@ -2302,7 +2336,7 @@ static void R_MeSurf( meworld_job_t *job, int i, const gu_wsurf_t *w, uint left 
 // R_WorldSurfsCull
 static void R_MeSurfsCull( meworld_job_t *job, int first, int count, uint clipflags )
 {
-	const uint16_t visframe = job->framecount;
+	const uint16_t visframe = job->stamp;
 	const gu_wsurf_t *w = &ws_surfs[first];
 
 	for( int i = first; i < first + count; i++, w++ )
@@ -2350,7 +2384,7 @@ static void R_MeNodesWalk( meworld_job_t *job, int n, uint clipflags )
 		if( w->type == WN_LEAF )
 		{
 			const uint16_t *mark = &wn_marks[w->firstmark];
-			const uint16_t framecount = job->framecount;
+			const uint16_t framecount = job->stamp;
 
 			for( int i = 0; i < w->child[0]; i++ )
 				job->visframe[mark[i]] = framecount;
@@ -2366,8 +2400,34 @@ static void R_MeNodesWalk( meworld_job_t *job, int n, uint clipflags )
 			return;
 		}
 
-		const float dot = ( w->type < 3 ? job->org[w->type] : DotProduct( job->org, WORLDMODEL->planes[w->plane].normal )) - w->dist;
-		const int side = ( dot >= 0.0f ) ? 0 : 1;
+		// The leaves on the view's side are marked before the node's surfaces: the ones
+		// that face away aren't drawn. The plane is a cache miss, the node has its normal
+		// rounded: when that could pick the wrong side, both sides are marked first
+		// (some surfaces that face away are drawn).
+		int side;
+
+		if( w->type < 3 )
+			side = job->org[w->type] - w->dist >= 0.0f ? 0 : 1;
+		else
+		{
+			const float dot = ( job->org[0] * w->qnormal[0] + job->org[1] * w->qnormal[1] + job->org[2] * w->qnormal[2] ) * ( 1.0f / WN_QNORMAL ) - w->dist;
+
+			if( dot >= job->qerror )
+				side = 0;
+			else if( dot <= -job->qerror )
+				side = 1;
+			else
+			{
+				for( int c = 0; c < 2; c++ )
+				{
+					if( wn_visframe[w->child[c]] == visframe )
+						R_MeNodesWalk( job, w->child[c], clipflags );
+				}
+				if( w->numsurf )
+					R_MeSurfsCull( job, w->firstsurf, w->numsurf, clipflags );
+				return;
+			}
+		}
 
 		if( wn_visframe[w->child[side]] == visframe )
 			R_MeNodesWalk( job, w->child[side], clipflags );
@@ -2622,9 +2682,10 @@ static void R_MeBrushesJob( void *arg )
 
 void R_MeWorldWait( void )
 {
+	PSP_MeWaitFor( r_meworld.early.ticket );
 	PSP_MeWaitFor( r_meworld.ticket );
 	PSP_MeWaitFor( r_meworld.brush_ticket );
-	r_meworld.ticket = r_meworld.brush_ticket = 0;
+	r_meworld.early.ticket = r_meworld.ticket = r_meworld.brush_ticket = 0;
 	r_meworld.brushes = false;
 	r_meworld.texlist = r_meworld.lmlist = 0;
 	r_meworld.begun = false;
@@ -2642,6 +2703,190 @@ void R_MeWorldRegister( void )
 {
 	gEngfuncs.Cvar_RegisterVariable( &r_world_me );
 	gEngfuncs.Cvar_RegisterVariable( &r_brushes_me );
+	gEngfuncs.Cvar_RegisterVariable( &r_world_me_early );
+}
+
+// the stamp of the next walk, and whether its visframe needs a fill first
+static void R_MeWorldStamp( meworld_job_t *job )
+{
+	job->stamp = ++r_meworld.stamp;
+	job->visfill = -1;
+
+	// a value no walk stamps before the next fill
+	if(( job->stamp >> 15 ) != r_meworld.visfill )
+	{
+		r_meworld.visfill = job->stamp >> 15;
+		job->visfill = ( job->stamp & 0x8000 ) ^ 0x8000;
+	}
+}
+
+// the view of the walk: RI's
+static void R_MeWorldView( meworld_job_t *job )
+{
+	// each component of the rounded normal is off by half a step at most, and the float math a little
+	job->qerror = ( fabsf( RI.cullorigin[0] ) + fabsf( RI.cullorigin[1] ) + fabsf( RI.cullorigin[2] )) * ( 0.5f / WN_QNORMAL ) + 1.0f;
+	job->clipflags = ( r_nocull.value ? 0 : RI.frustum.clipFlags )|WB_GUARD;
+	VectorCopy( RI.cullorigin, job->org );
+
+	for( int i = 0; i < FRUSTUM_PLANES; i++ )
+	{
+		VectorCopy( RI.frustum.planes[i].normal, job->planes[i] );
+		job->planes[i][3] = -RI.frustum.planes[i].dist;
+	}
+	GU_ClipGetWorldPlanes( job->planes + 8 );
+
+	for( int i = 0; i < 12; i++ )
+	{
+		for( int j = 0; j < 3; j++ )
+			job->absplanes[i][j] = fabsf( job->planes[i][j] );
+	}
+}
+
+/*
+=================
+R_MeWorldCapture
+
+this frame's view, for a walk of the next one that covers any view up to
+MEWORLD_EARLY_MOVE away and turned by up to MEWORLD_EARLY_TURN: the frustum
+wider and further out, the guard band narrower and further in (a polygon it
+lets through may need clipping in the next view), the side of a plane can be
+off by the move
+=================
+*/
+static void R_MeWorldCapture( void )
+{
+	const float turn = DEG2RAD( MEWORLD_EARLY_TURN );
+	gl_frustum_t frustum;
+
+	r_meworld.early.ready = false;
+
+	// the dlights of the next frame are marked while the walk may run
+	if( !r_world_me_early.value || ( ws_numdlit && WORLDMODEL != lm_prebuilt ) || r_nocull.value
+		|| RI.rvp.fov_x + 2.0f * MEWORLD_EARLY_TURN >= 170.0f || RI.rvp.fov_y + 2.0f * MEWORLD_EARLY_TURN >= 170.0f )
+		return;
+
+	// where the view goes if it keeps moving as it did since the last frame
+	vec3_t move = { 0.0f, 0.0f, 0.0f };
+
+	if( r_meworld.early.lastworld == WORLDMODEL )
+	{
+		VectorSubtract( RI.cullorigin, r_meworld.early.lastorg, move );
+		if( DotProduct( move, move ) > 32.0f * 32.0f )
+			VectorClear( move ); // teleported
+	}
+	VectorCopy( RI.cullorigin, r_meworld.early.lastorg );
+	r_meworld.early.lastworld = WORLDMODEL;
+
+	r_meworld.early.world = WORLDMODEL;
+	r_meworld.early.framecount = tr.framecount + 1;
+	r_meworld.early.visframecount = tr.visframecount;
+	VectorAdd( RI.cullorigin, move, r_meworld.early.org );
+	VectorCopy( RI.cull_vforward, r_meworld.early.forward );
+	VectorCopy( RI.cull_vright, r_meworld.early.right );
+	VectorCopy( RI.cull_vup, r_meworld.early.up );
+	r_meworld.early.fov_x = RI.rvp.fov_x;
+	r_meworld.early.fov_y = RI.rvp.fov_y;
+	r_meworld.early.farclip = R_GetFarClip();
+	r_meworld.early.flags = RI.rvp.flags;
+	r_meworld.early.allslow = ws_allslow;
+	r_meworld.early.skybox = ws_skybox;
+	r_meworld.early.clipflags = RI.frustum.clipFlags|WB_GUARD;
+	r_meworld.early.qerror = ( fabsf( RI.cullorigin[0] ) + fabsf( RI.cullorigin[1] ) + fabsf( RI.cullorigin[2] )) * ( 0.5f / WN_QNORMAL ) + 1.0f + MEWORLD_EARLY_MOVE;
+	r_meworld.early.time10 = (int)(( 2.0 * gp_cl->time - gp_cl->oldtime ) * 10 );
+	r_meworld.early.time20 = (int)(( 2.0 * gp_cl->time - gp_cl->oldtime ) * 20 );
+
+	GL_FrustumInitProj( &frustum, 0.0f, r_meworld.early.farclip, RI.rvp.fov_x + 2.0f * MEWORLD_EARLY_TURN, RI.rvp.fov_y + 2.0f * MEWORLD_EARLY_TURN );
+	// the planes are through RI.cullorigin: moved with the view
+	for( int i = 0; i < FRUSTUM_PLANES; i++ )
+	{
+		VectorCopy( frustum.planes[i].normal, r_meworld.early.planes[i] );
+		r_meworld.early.planes[i][3] = -frustum.planes[i].dist - DotProduct( frustum.planes[i].normal, move ) + MEWORLD_EARLY_MOVE;
+	}
+
+	// the guard band's edges at the angle from the view's axis less the turn
+	const float tx = tanf( DEG2RAD( RI.rvp.fov_x ) * 0.5f ), ty = tanf( DEG2RAD( RI.rvp.fov_y ) * 0.5f );
+	const float gx = tanf( atanf( GU_GUARD_X * tx ) - turn ) / tx;
+	const float gy = tanf( atanf( GU_GUARD_Y * ty ) - turn ) / ty;
+
+	GU_ClipGetWorldPlanesGuard( r_meworld.early.planes + 8, gx, gy );
+	for( int i = 8; i < 12; i++ )
+		r_meworld.early.planes[i][3] -= DotProduct( r_meworld.early.planes[i], move ) + MEWORLD_EARLY_MOVE;
+
+	r_meworld.early.ready = true;
+}
+
+// whether the walk R_MeWorldEarly posted covers this frame's view
+static qboolean R_MeWorldEarlyMatches( void )
+{
+	int why = 0;
+	vec3_t d;
+
+	VectorSubtract( RI.cullorigin, r_meworld.early.org, d );
+
+	if( r_meworld.early.vert_frame != guRender.vert_frame || r_meworld.early.framecount != tr.framecount || r_meworld.early.world != WORLDMODEL )
+		why = 1;
+	else if( r_meworld.early.visframecount != tr.visframecount )
+		why = 2; // another leaf: R_MarkLeaves marked others
+	else if( DotProduct( d, d ) > MEWORLD_EARLY_MOVE * MEWORLD_EARLY_MOVE )
+		why = 3;
+	else if( DotProduct( RI.cull_vforward, r_meworld.early.forward ) < MEWORLD_EARLY_COS || DotProduct( RI.cull_vright, r_meworld.early.right ) < MEWORLD_EARLY_COS
+		|| DotProduct( RI.cull_vup, r_meworld.early.up ) < MEWORLD_EARLY_COS )
+		why = 4;
+	else if( RI.rvp.fov_x != r_meworld.early.fov_x || RI.rvp.fov_y != r_meworld.early.fov_y || R_GetFarClip() != r_meworld.early.farclip
+		|| RI.rvp.flags != r_meworld.early.flags || ( RI.frustum.clipFlags|WB_GUARD ) != r_meworld.early.clipflags || r_nocull.value )
+		why = 5;
+	else if( ws_allslow != r_meworld.early.allslow || ws_skybox != r_meworld.early.skybox || ( ws_numdlit && WORLDMODEL != lm_prebuilt ))
+		why = 6;
+
+	return why == 0;
+}
+
+/*
+=================
+R_MeWorldEarly
+
+at the end of a frame: the walk of the next one starts on the ME, from this
+frame's view with margins (R_MeWorldCapture). R_MeWorldBegin uses it if the next
+view is that close, the main CPU doesn't wait for the walk then (~2 ms a frame
+on deluge_beta_v3). Its lists go to the third buffer: the GE may be drawing this
+frame and the last one.
+=================
+*/
+void R_MeWorldEarly( void )
+{
+	meworld_job_t *job = &r_meworld.job;
+
+	if( !r_meworld.early.ready )
+		return;
+	r_meworld.early.ready = false;
+
+	if( !r_world_me_early.value || !r_meworld.alloc || r_meworld.early.world != WORLDMODEL || !PSP_MeStart( ))
+		return;
+
+	// this frame's jobs are done with the job
+	R_MeWorldWait();
+
+	r_meworld.early.vert_frame = guRender.vert_frame + 1;
+	job->cmds = job->out->cmds[r_meworld.early.vert_frame % MEWORLD_BUFFERS];
+	R_MeWorldStamp( job );
+	job->framecount = r_meworld.early.framecount;
+	job->visframecount = r_meworld.early.visframecount;
+	job->allslow = r_meworld.early.allslow;
+	job->skybox = r_meworld.early.skybox;
+	job->clipflags = r_meworld.early.clipflags;
+	job->qerror = r_meworld.early.qerror;
+	VectorCopy( r_meworld.early.org, job->org );
+	job->time10 = r_meworld.early.time10;
+	job->time20 = r_meworld.early.time20;
+	memcpy( job->planes, r_meworld.early.planes, sizeof( job->planes ));
+
+	for( int i = 0; i < 12; i++ )
+	{
+		for( int j = 0; j < 3; j++ )
+			job->absplanes[i][j] = fabsf( job->planes[i][j] );
+	}
+
+	r_meworld.early.ticket = PSP_MeRunKeep( R_MeWorldJob, job );
 }
 
 /*
@@ -2654,7 +2899,9 @@ the view, the dlights, the PVS and the fog are set up: the walk starts on the ME
 void R_MeWorldBegin( void )
 {
 	meworld_job_t *job = &r_meworld.job;
+	const qboolean early = r_meworld.early.ticket != 0;
 
+	r_meworld.early.ready = false;
 	R_MeWorldWait();
 
 	// what it drew in the last frame
@@ -2706,42 +2953,35 @@ void R_MeWorldBegin( void )
 	}
 
 	r_meworld.vert_frame = guRender.vert_frame;
-	job->cmds = job->out->cmds[guRender.vert_frame & 1];
 
 	R_WorldSurfsBeginWalk();
 
-	job->visfill = -1;
-	if(( tr.framecount >> 15 ) != r_meworld.visfill )
+	// the walk R_MeWorldEarly started (and R_MeWorldWait finished) is good for this view:
+	// the brush models' job takes the view from the job
+	if( early && R_MeWorldEarlyMatches( ))
 	{
-		r_meworld.visfill = tr.framecount >> 15;
-		job->visfill = ( tr.framecount & 0x8000 ) ^ 0x8000;
+		R_MeWorldView( job );
+		R_StudioMeYield( 2 );
+		r_meworld.begun = true;
+		R_MeWorldCapture();
+		return;
 	}
 
+	job->cmds = job->out->cmds[guRender.vert_frame % MEWORLD_BUFFERS];
+	R_MeWorldStamp( job );
 	job->framecount = tr.framecount;
 	job->visframecount = tr.visframecount;
 	job->allslow = ws_allslow;
 	job->skybox = ws_skybox;
-	job->clipflags = ( r_nocull.value ? 0 : RI.frustum.clipFlags )|WB_GUARD;
-	VectorCopy( RI.cullorigin, job->org );
 	job->time10 = (int)( gp_cl->time * 10 );
 	job->time20 = (int)( gp_cl->time * 20 );
-
-	for( int i = 0; i < FRUSTUM_PLANES; i++ )
-	{
-		VectorCopy( RI.frustum.planes[i].normal, job->planes[i] );
-		job->planes[i][3] = -RI.frustum.planes[i].dist;
-	}
-	GU_ClipGetWorldPlanes( job->planes + 8 );
-
-	for( int i = 0; i < 12; i++ )
-	{
-		for( int j = 0; j < 3; j++ )
-			job->absplanes[i][j] = fabsf( job->planes[i][j] );
-	}
+	R_MeWorldView( job );
 
 	R_StudioMeYield( 2 );
 	r_meworld.ticket = PSP_MeRunKeep( R_MeWorldJob, job );
 	r_meworld.begun = r_meworld.ticket != 0;
+	if( r_meworld.begun )
+		R_MeWorldCapture();
 }
 
 // the job isn't done yet (R_MeWorldEnd)
@@ -2904,7 +3144,8 @@ the rest of the walk for the main CPU; false if it has to walk the world itself
 */
 static qboolean R_MeWorldEnd( void )
 {
-	if( !r_meworld.ticket )
+	// R_MeWorldBegin may have taken a finished walk (R_MeWorldEarly)
+	if( !r_meworld.begun )
 		return false;
 
 	if( R_MeWorldBusy( ))
@@ -4838,6 +5079,37 @@ void R_DrawWorld( void )
 	gEngfuncs.R_DrawWorldHull();
 }
 
+#if XASH_PSP
+static byte *mark_lastvis; // the PVS R_MarkLeaves marked last, of mark_world
+static const model_t *mark_world;
+
+// true if RI.visbytes is what was marked last
+static qboolean R_MarkLeavesSame( qboolean novis )
+{
+	const size_t size = ( WORLDMODEL->numleafs + 7 ) >> 3;
+
+	if( novis || !wn_nodes )
+	{
+		mark_world = NULL;
+		return false;
+	}
+
+	if( mark_world == WORLDMODEL && mark_lastvis && !memcmp( mark_lastvis, RI.visbytes, size ))
+		return true;
+
+	if( mark_world != WORLDMODEL )
+	{
+		free( mark_lastvis );
+		mark_lastvis = malloc( size );
+		mark_world = mark_lastvis ? WORLDMODEL : NULL;
+	}
+
+	if( mark_lastvis )
+		memcpy( mark_lastvis, RI.visbytes, size );
+	return false;
+}
+#endif
+
 /*
 ===============
 R_MarkLeaves
@@ -4885,15 +5157,25 @@ void R_MarkLeaves( void )
 	// and see exactly where the pvs ends
 	if( r_lockpvs.value ) return;
 
-	RI.oldviewleaf = RI.viewleaf;
-	tr.visframecount++;
-
 	if( r_novis.value || FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ) || !RI.viewleaf || !WORLDMODEL->visdata )
 		novis = true;
 
 	gEngfuncs.R_FatPVS( RI.rvp.vieworigin, r_pvs_radius->value, RI.visbytes, false, novis );
 	if( force && !novis )
 		gEngfuncs.R_FatPVS( test, r_pvs_radius->value, RI.visbytes, true, novis );
+
+#if XASH_PSP
+	// the same leaves are visible from the new one (often, in a room): the marks
+	// hold, and so does the walk R_MeWorldEarly started for this frame
+	if( R_MarkLeavesSame( novis ))
+	{
+		RI.oldviewleaf = RI.viewleaf;
+		return;
+	}
+#endif
+
+	RI.oldviewleaf = RI.viewleaf;
+	tr.visframecount++;
 
 #if XASH_PSP
 	if( wn_nodes && ( tr.visframecount & 0xffff ) == 0 )
@@ -5130,6 +5412,10 @@ void R_WorldFree( void )
 	R_MeWorldFree();
 	R_PolysFree();
 	R_StaticWaterClear();
+
+	free( mark_lastvis );
+	mark_lastvis = NULL;
+	mark_world = NULL;
 
 	if( ws_alloc )
 		Mem_Free( ws_alloc );

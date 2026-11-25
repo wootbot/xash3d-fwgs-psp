@@ -50,8 +50,7 @@ The margin covers views not centered at 2048 (a viewport offset by up to
 its own width or height).
 =================
 */
-#define GU_GUARD_X	6.0f	// |x| <= 6 w: 1440 pixels from the center of a 480 pixel wide view
-#define GU_GUARD_Y	12.0f	// |y| <= 12 w: 1632 pixels for 272 lines
+// GU_GUARD_X, GU_GUARD_Y: gu_local.h
 
 // the planes in C as well, for GU_ClipBoxInside: distances in world units
 static float clip_planes[4][4] __attribute__(( aligned( 16 )));
@@ -175,6 +174,29 @@ void GU_ClipSetWorldFrustum( const matrix4x4 in )
 void GU_ClipGetWorldPlanes( float planes[4][4] )
 {
 	memcpy( planes, clip_planes_world, sizeof( clip_planes_world ));
+}
+
+// the same for a guard band of other sizes (in w, as GU_GUARD_X and GU_GUARD_Y)
+void GU_ClipGetWorldPlanesGuard( float planes[4][4], float gx, float gy )
+{
+	const float *m = (const float *)&projection_view_matrix;
+	static const int axis[4] = { 1, 0, 0, 1 };
+	static const float sign[4] = { 1.0f, 1.0f, -1.0f, -1.0f };
+	const float guard[4] = { gy, gx, gx, gy };
+
+	for( int i = 0; i < 4; i++ )
+	{
+		float p[4];
+
+		for( int c = 0; c < 4; c++ )
+			p[c] = guard[i] * m[c * 4 + 3] + sign[i] * m[c * 4 + axis[i]];
+
+		const float len = sqrtf( p[0] * p[0] + p[1] * p[1] + p[2] * p[2] );
+		const float scale = len > 0.0f ? 1.0f / len : 0.0f;
+
+		for( int c = 0; c < 4; c++ )
+			planes[i][c] = p[c] * scale;
+	}
 }
 
 /*

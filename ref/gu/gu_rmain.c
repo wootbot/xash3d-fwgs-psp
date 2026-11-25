@@ -381,7 +381,7 @@ static void R_Clear( int bitMask )
 R_GetFarClip
 ===============
 */
-static float R_GetFarClip( void )
+float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
 		return gp_movevars->zmax * 1.73f;
@@ -1303,6 +1303,7 @@ void R_EndFrame( void )
 	// flush any remaining 2D bits
 	R_Set2DMode( false );
 	R_StudioFinishMeModels();
+	R_MeWorldEarly();
 
 	// finish rendering: the GE draws it while the next frame's game code runs, and shows
 	// it when it's done (GU_Present). With vsync R_NextFrame does

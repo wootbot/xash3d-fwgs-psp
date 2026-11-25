@@ -621,9 +621,14 @@ void GU_WorldSurfDecals( const msurface_t *surf );
 void GU_WorldSurfDlit( const msurface_t *surf );
 void GU_WorldSurfsNewFrame( void );
 void GU_ClipGetWorldPlanes( float planes[4][4] );
+void GU_ClipGetWorldPlanesGuard( float planes[4][4], float gx, float gy );
+#define GU_GUARD_X	6.0f	// |x| <= 6 w: 1440 pixels from the center of a 480 pixel wide view
+#define GU_GUARD_Y	12.0f	// |y| <= 12 w: 1632 pixels for 272 lines
 void R_MeWorldRegister( void );
 void R_MeWorldBegin( void );
 void R_MeWorldWait( void );
+void R_MeWorldEarly( void );
+float R_GetFarClip( void );
 qboolean R_MeWorldBusy( void );
 #define R_GROUPED_ME	2	// in the flags of the draw lists: drawn by R_MeBrushesDraw
 void R_MeBrushesBegin( byte *solid_grouped, byte *trans_grouped, const uint16_t *trans_order );
