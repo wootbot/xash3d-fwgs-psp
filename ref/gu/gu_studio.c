@@ -5425,6 +5425,12 @@ static void R_StudioBuildAtlas( model_t *mod, studiohdr_t *phdr, const int *pixo
 	if( !r_studio_atlas.value || phdr->numtextures < 2 )
 		return;
 
+	// not view models: a part of v_gundor's skin (deluge_beta_v3) flickered to wrong
+	// colors while it animated, on every draw path, only with its atlas pages (cause
+	// not found). One model on the screen, the atlas saves little there
+	if( !Q_strncmp( COM_FileWithoutPath( mod->name ), "v_", 2 ))
+		return;
+
 	items = malloc( phdr->numtextures * sizeof( *items ));
 	order = malloc( phdr->numtextures * sizeof( *order ));
 	if( !items || !order )
