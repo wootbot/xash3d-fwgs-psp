@@ -920,3 +920,12 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   - What's left in stress3 is flat: shots ~16% (sounds, traces, shells, decals), packets 14%, prediction 9%,
     entities 11%, drawing ~30%, the network sleep 4%. The ME is busy for 81% of the frame, 29% for full
     skeletons: at 25 ms it would be the limit.
+
+## 2026-11-24: analog stick axes
+
+- The stick was swapped and inverted with the default joystick settings: the backend sent X as axis 2
+  (pitch) and Y as axis 3 (yaw), both negated, like the old port, which expects its config to remap
+  them. Now X is yaw and Y is pitch, not negated, so the defaults (`joy_axis_binding sfpyrl`,
+  positive `joy_yaw`/`joy_pitch`) are right. Configs that worked around it (`sfyprl`, negative
+  `joy_yaw`/`joy_pitch`) have to go back to the defaults. The workaround was tried live
+  by cvar, the new build isn't on the PSP yet.

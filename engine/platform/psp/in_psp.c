@@ -192,12 +192,12 @@ void Platform_RunEvents( void )
 	x = psp_joymap[buf.Lx];
 	y = psp_joymap[buf.Ly];
 
-	// hardware axes 2 and 3, like the old port, remapped by joy_axis_binding in its configs
+	// the only stick turns the view, right and down are positive
 	if( psp_last_x != x )
-		Joy_AxisMotionEvent( 2, -x );
+		Joy_AxisMotionEvent( JOY_AXIS_YAW, x );
 
 	if( psp_last_y != y )
-		Joy_AxisMotionEvent( 3, -y );
+		Joy_AxisMotionEvent( JOY_AXIS_PITCH, y );
 
 	psp_last_x = x;
 	psp_last_y = y;
