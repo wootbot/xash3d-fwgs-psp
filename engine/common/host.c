@@ -1304,6 +1304,15 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 			Cbuf_Execute();
 		}
 
+#if XASH_PSP
+		// first start: the game's default.cfg binds a PC keyboard (config_executed is set without the file too)
+		if( !FS_FileExists( "config.cfg", false ))
+		{
+			Cbuf_AddText( "resetkeys\n" );
+			Cbuf_Execute();
+		}
+#endif
+
 		// exec all files from userconfig.d
 		Cbuf_AddText( "userconfigd\n" );
 		Cbuf_Execute();

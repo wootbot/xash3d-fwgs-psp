@@ -218,7 +218,8 @@ int Platform_JoyInit( void )
 
 	PSP_BuildJoyMap();
 
-	Joy_SetCapabilities( false, 0, "playstation" );
+	// no preset: those are for pads with more sticks and buttons
+	Joy_SetCapabilities( false, 0, "" );
 
 	psp_joy_init = true;
 

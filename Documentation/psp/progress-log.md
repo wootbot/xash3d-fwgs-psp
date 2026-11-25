@@ -954,3 +954,8 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   viewport's Z scale and center make the same depth values of it (GU_LoadProjection, GU_DepthRange): complete
   without any offset. Confirmed by the user, decals too (with gl_polyoffset 0.1, 12 steps).
 - START is Escape in the menu while a game is active (closes the main menu it opened, one level back in submenus).
+- Default binds for the PSP, chosen by the user (`psp_binds` in in_keys.c): Triangle/Cross forward/back, Square jump,
+  Circle duck, L/R secondary/primary fire, d-pad up use, down reload, left/right weapons, Select flashlight, Start
+  menu. `resetkeys` sets them, and the first start without a config.cfg (the game's default.cfg binds a PC
+  keyboard). No suggested gamepad preset anymore: Joy_AutoPreset takes default binds for not customized and
+  would load the PC pad's over them. "Use defaults" in the Controls menu still reads kb_def.lst (PC keys).

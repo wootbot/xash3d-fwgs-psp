@@ -297,6 +297,25 @@ const char *Key_GetBinding( int keynum )
 	return keys[keynum].binding;
 }
 
+#if XASH_PSP
+// instead of those of keynames, the d-pad sends the arrow keys
+static const keyname_t psp_binds[] =
+{
+{ "UPARROW",        K_UPARROW,             "+use"            },
+{ "DOWNARROW",      K_DOWNARROW,           "+reload"         },
+{ "LEFTARROW",      K_LEFTARROW,           "invprev"         },
+{ "RIGHTARROW",     K_RIGHTARROW,          "invnext"         },
+{ "A_BUTTON",       K_A_BUTTON,            "+back"           }, // Cross
+{ "B_BUTTON",       K_B_BUTTON,            "+duck"           }, // Circle
+{ "X_BUTTON",       K_X_BUTTON,            "+jump"           }, // Square
+{ "Y_BUTTON",       K_Y_BUTTON,            "+forward"        }, // Triangle
+{ "L1_BUTTON",      K_L1_BUTTON,           "+attack2"        },
+{ "R1_BUTTON",      K_R1_BUTTON,           "+attack"         },
+{ "MODE",           K_MODE_BUTTON,         "impulse 100"     }, // Select
+{ "START",          K_START_BUTTON,        "escape"          },
+};
+#endif // XASH_PSP
+
 /*
 ===================
 Key_GetDefaultBinding
@@ -305,6 +324,13 @@ Key_GetDefaultBinding
 */
 const char *Key_GetDefaultBinding( int keynum )
 {
+#if XASH_PSP
+	for( int i = 0; i < ARRAYSIZE( psp_binds ); i++ )
+	{
+		if( psp_binds[i].keynum == keynum )
+			return psp_binds[i].binding;
+	}
+#endif
 	for( int i = 0; i < ARRAYSIZE( keynames ); i++ )
 	{
 		if( keynames[i].keynum == keynum )
@@ -422,7 +448,7 @@ static void Key_Reset_f( void )
 
 	// apply default values
 	for( int i = 0; i < ARRAYSIZE( keynames ); i++ )
-		Key_SetBinding( keynames[i].keynum, keynames[i].binding );
+		Key_SetBinding( keynames[i].keynum, Key_GetDefaultBinding( keynames[i].keynum ) );
 }
 
 /*
@@ -591,7 +617,7 @@ void Key_Init( void )
 
 	// setup default binding. "unbindall" from config.cfg will be reset it
 	for( int i = 0; i < ARRAYSIZE( keynames ); i++ )
-		Key_SetBinding( keynames[i].keynum, keynames[i].binding );
+		Key_SetBinding( keynames[i].keynum, Key_GetDefaultBinding( keynames[i].keynum ) );
 
 	Cvar_RegisterVariable( &key_rotate );
 
