@@ -7963,7 +7963,24 @@ typedef struct
 	int			bindtex;		// an atlas page, 0: the skin's texture
 	qboolean		flat;
 	qboolean		chrome;
+	qboolean		masked;		// alpha tested: R_StudioGEMasked around its batches
 } geplanitem_t;
+
+// GE commands: alpha test on for a masked mesh (as R_StudioDrawPoints) or back off
+static uint *R_StudioGEMasked( uint *p, qboolean on )
+{
+	if( on )
+	{
+		*p++ = ( 0x22 << 24 ) | 1; // alpha test on
+		*p++ = ( 0xDB << 24 ) | ( 0xff << 16 ) | ( 0x7f << 8 ) | GU_GREATER; // alpha func
+	}
+	else
+	{
+		*p++ = ( 0xDB << 24 ) | ( 0xff << 16 ) | ( DEFAULT_ALPHATEST << 8 ) | GU_GREATER;
+		*p++ = ( 0x22 << 24 ) | 0; // alpha test off
+	}
+	return p;
+}
 
 typedef struct geplan_s
 {
@@ -8081,8 +8098,9 @@ static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotext
 		const mstudiotexture_t *ptex = &ptexture[pskinref[pmesh[j].skinref]];
 		R_StudioGEMeshBatches( gm, j );
 
-		// masked and additive meshes change the state around them, sorted by R_StudioMeshCompare
-		if( !gm->meshes[j].numbatches || FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
+		// additive meshes change the state around them, sorted by R_StudioMeshCompare;
+		// masked ones only need the alpha test (the order doesn't matter for them)
+		if( !gm->meshes[j].numbatches || FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_ADDITIVE ))
 		{
 			pl->usable = false;
 			continue;
@@ -8095,6 +8113,7 @@ static geplan_t *R_StudioGEBuildPlan( gemodel_t *gm, int skin, const mstudiotext
 		it->skinindex = pskinref[pmesh[j].skinref];
 		it->flat = FBitSet( ptex->flags, STUDIO_NF_FLATSHADE ) ? true : false;
 		it->chrome = FBitSet( ptex->flags, STUDIO_NF_CHROME ) ? true : false;
+		it->masked = FBitSet( ptex->flags, STUDIO_NF_MASKED ) ? true : false;
 	}
 	return pl;
 }
@@ -8219,7 +8238,7 @@ static geplan_t *R_StudioLodBuildPlan( gemodel_t *gm, int skin, const mstudiotex
 		if( merge && merge->merged[j] )
 			continue;
 
-		if( FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_MASKED|STUDIO_NF_ADDITIVE ))
+		if( FBitSet( ptex->flags, GE_UNSUPPORTED_FLAGS|STUDIO_NF_ADDITIVE ))
 			pl->usable = false;
 
 		if( !R_StudioLodBatches( gm, l, &j, 1, ptexture, pskinref, false, it ))
@@ -8232,6 +8251,7 @@ static geplan_t *R_StudioLodBuildPlan( gemodel_t *gm, int skin, const mstudiotex
 		it->skinindex = pskinref[pmesh[j].skinref];
 		it->flat = FBitSet( ptex->flags, STUDIO_NF_FLATSHADE ) ? true : false;
 		it->chrome = FBitSet( ptex->flags, STUDIO_NF_CHROME ) ? true : false;
+		it->masked = FBitSet( ptex->flags, STUDIO_NF_MASKED ) ? true : false;
 		pl->numitems++;
 	}
 
@@ -8259,6 +8279,16 @@ static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotextur
 
 	if( !pl || !pl->usable )
 		return false;
+
+	// the two pass lighting below doesn't do masked meshes
+	if( !r_studio_ge_hwlight.value )
+	{
+		for( int i = 0; i < pl->numitems; i++ )
+		{
+			if( pl->items[i].masked )
+				return false;
+		}
+	}
 
 	if( glState.faceCull != GL_NONE )
 	{
@@ -8306,6 +8336,9 @@ static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotextur
 			skinblock = R_StudioGESkinBlock( it->ptex, it->skinindex, it->bindtex );
 			uint *p = R_StudioGECall( extGuCmdBegin(), skinblock );
 
+			if( it->masked )
+				p = R_StudioGEMasked( p, true );
+
 			for( int k = 0; k < it->numbatches; k++ )
 			{
 				const gebatch_t *b = &it->batches[k];
@@ -8315,6 +8348,9 @@ static qboolean R_StudioGEDrawPlan( gemodel_t *gm, int skin, const mstudiotextur
 					p = R_StudioGEChromeMatrix( p, b, it->ptex );
 				p = R_StudioGECall( p, b->cmds );
 			}
+
+			if( it->masked )
+				p = R_StudioGEMasked( p, false );
 			extGuCmdEnd( p );
 		}
 
@@ -8503,7 +8539,7 @@ static void R_StudioMeDrawBuild( medraw_t *d, int body, int skinnum, const mstud
 	{
 		const geplanitem_t *it = d->items[i];
 
-		d->words += 4; // skin, blending
+		d->words += 4 + ( it->masked ? 4 : 0 ); // skin, blending, alpha test
 		for( int k = 0; k < it->numbatches; k++ )
 		{
 			const gebatch_t *b = &it->batches[k];
@@ -8743,6 +8779,8 @@ static uint *R_MeDrawCommands( const mebones_job_t *job, uint *p, const mebones_
 			if( mode == MEMODE_ADD )
 				*p++ = GE_CMD( 0xE7, 1 ); // no depth writes
 		}
+		if( it->masked )
+			p = R_StudioGEMasked( p, true );
 
 		for( int k = 0; k < it->numbatches; k++ )
 		{
@@ -8774,6 +8812,9 @@ static uint *R_MeDrawCommands( const mebones_job_t *job, uint *p, const mebones_
 				p = R_MeChromeMatrix( job, m, p, b, it->ptex );
 			p = R_StudioGECall( p, b->cmds );
 		}
+
+		if( it->masked )
+			p = R_StudioGEMasked( p, false );
 	}
 
 	return p;
