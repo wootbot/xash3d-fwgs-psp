@@ -32,6 +32,14 @@ FRAME INTERPOLATION
 
 =========================================================================
 */
+#if XASH_PSP
+// updates in a row that left the entity where it was: once they cover more than the
+// interpolation looks back, CL_InterpolateModel has nothing to do (its search through
+// the history compares doubles, ~10 us an entity on the PSP)
+#define CL_STILL_UPDATES	16
+static byte cl_still[MAX_EDICTS];
+#endif
+
 /*
 ==================
 CL_UpdatePositions
@@ -61,6 +69,16 @@ static void CL_UpdatePositions( cl_entity_t *ent )
 
 		ph->animtime = prev->animtime + diff;
 	}
+
+#if XASH_PSP
+	if( ent->index >= 0 && ent->index < MAX_EDICTS )
+	{
+		if( !VectorCompare( ph->origin, prev->origin ) || !VectorCompare( ph->angles, prev->angles ))
+			cl_still[ent->index] = 0;
+		else if( cl_still[ent->index] < 255 )
+			cl_still[ent->index]++;
+	}
+#endif
 }
 
 /*
@@ -77,6 +95,10 @@ static void CL_ResetPositions( cl_entity_t *ent )
 
 	position_history_t store = ent->ph[ent->current_position & HISTORY_MASK];
 	ent->current_position = 1;
+#if XASH_PSP
+	if( ent->index >= 0 && ent->index < MAX_EDICTS )
+		cl_still[ent->index] = 0;
+#endif
 
 	memset( ent->ph, 0, sizeof( position_history_t ) * HISTORY_MAX );
 	ent->ph[1] = ent->ph[0] = store;
@@ -479,6 +501,12 @@ static int CL_InterpolateModel( cl_entity_t *e )
 
 	if( cl.local.moving && cl.local.onground == e->index )
 		return 1;
+
+#if XASH_PSP
+	// the history has only where it is now (set above)
+	if( e->index >= 0 && e->index < MAX_EDICTS && cl_still[e->index] >= CL_STILL_UPDATES && cl_interp.value <= 0.25f )
+		return 1;
+#endif
 
 	cl_lerp_t t = cl.time - cl_interp.value;
 	CL_FindInterpolationUpdates( e, t, &ph0, &ph1 );
