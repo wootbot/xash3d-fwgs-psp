@@ -1015,3 +1015,27 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     unchanged in memory (checked with checksums of the uploads). Not found yet.
   - Two power-offs today: after a second `screenshot` (the first failed in `deflateInit`, memory in pieces) and
     20 s after `r_fullbright 1` (20 fps, `GU_WorldListFull`). Don't take screenshots or use r_fullbright there.
+- 2026-11-25 (later): **the red tint found: the GE's CLUT goes stale in long runs of draws.**
+  - How it was found: screenshots now work on big maps (TGA instead of PNG: `deflateInit` needs ~256 KB in one
+    piece), so A/B runs could be measured by counting reddish pixels instead of asking the user. The red came only
+    after a while of play and moved with the view; it came from the lightmap pass (`gu_dbg_nolm`), first from the
+    main CPU's clipped near-floor polygons (skipping just those removed it), later also from the ME's lists (a
+    door, gone when close because then it's clipped on the main CPU). Everything was as it should be: the pages and
+    the 332 palette in memory, the page fields, every bind word in the lists, the GE registers read back after the
+    pass, the vertices (every polygon checked against what it's built from), the clipper's output. Binding the page
+    again right before each polygon removed it; then bits of the bind one at a time: **only CLOAD matters** (CMODE,
+    the texture registers, TFLUSH/TSYNC don't). Why the loaded CLUT stops being used isn't known.
+  - Fix: a CLOAD word before every lightmap draw, in the ME's lists and on the main CPU (the 332 palette is in VRAM,
+    so no main bus time). Not measured for speed yet. Things ruled out on the way: the guard band, the texture LOD,
+    fog, leftover colour/lighting/texture-coordinate state, the clip planes in the VFPU (checked before every test).
+  - The flashlight on prebuilt maps: dlit surfaces get their lightmap from the page's 332 pixels plus the dynamic
+    lights. All dynamic blocks of a frame went into one texture that the GE reads later: black or distorted
+    lightmaps with more than one block. Each block is copied into the display list now.
+  - The weapon's skin (v_gundor) flickered to wrong colours on one part while it animated, on the GE, ME and CPU
+    paths alike, only with its atlas pages; reloading the CLUT per batch didn't help. View models get no atlas.
+    Cause not found.
+  - Also: skin blocks are replaced instead of rewritten while the GE may call them, recorded props re-record after a
+    texture move and touch their textures, `GU_ClipIsRequired`'s result was an output-only asm operand (worked by
+    luck of register allocation), `psp_update` wrote a truncated EBOOT on a full stick (both today's updates).
+  - Known limitation: prebuilt lightmaps keep switchable lights as the map starts them; when the game switches
+    one later (deluge's key lights go off when a key is used) the baked light stays.

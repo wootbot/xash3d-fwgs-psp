@@ -77,8 +77,8 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [x] Memory in the stress scene: 7 MB left (2026-11-24).
 - [~] Big maps: `deluge_beta_v3` (25 MB) loads and runs, 56-61 fps at its main start depending on the
       monsters about (38 before 2026-11-25), the other 7 tested places 63-188. Left: that start always over
-      60, 192 -1728 (~70), a red tint on some floors (not the lightmap data, see the progress log), loading
-      time, fragmented memory.
+      60, 192 -1728 (~70), switchable lights in prebuilt lightmaps don't switch, loading time, fragmented memory.
+      The red tint was a stale GE CLUT in long runs of lightmap draws (CLOAD per draw now, see the progress log).
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
 - [~] World: compact copies of the world surfaces for the walk and both passes (done, world
       3.7 -> 2.0 ms in fight1), and a compact BSP tree for the walk (walk ~1.2 -> 0.92 ms).
