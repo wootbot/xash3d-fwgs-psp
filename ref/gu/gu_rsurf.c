@@ -965,6 +965,61 @@ static void GU_DrawPolyVertsCopy( gu_vert_t *verts, int numverts )
 DrawGLPoly
 ================
 */
+// the texture offset of a conveyor surface of RI.currententity with the bound texture
+static void R_ConveyorOffset( float *s, float *t )
+{
+	const cl_entity_t *e = RI.currententity;
+	float sOffset, tOffset;
+#if XASH_PSP
+	// the same for all surfaces of an entity and texture in a frame: double math and a
+	// sine, ~10 us a surface (deluge_beta_v3: 94 of them in view)
+	static struct { const cl_entity_t *e; int texture; double time; float s, t; } conveyor;
+
+	if( conveyor.e == e && e && conveyor.texture == glState.currentTexture && conveyor.time == gp_cl->time )
+	{
+		*s = conveyor.s;
+		*t = conveyor.t;
+		return;
+	}
+#endif
+	float flConveyorSpeed;
+	float sy, cy;
+
+	if( e == CL_GetEntityByIndex( 0 ) && FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
+	{
+		// same as doom speed
+		flConveyorSpeed = -35.0f;
+	}
+	else
+	{
+		flConveyorSpeed = (e->curstate.rendercolor.g<<8|e->curstate.rendercolor.b) / 16.0f;
+		if( e->curstate.rendercolor.r ) flConveyorSpeed = -flConveyorSpeed;
+	}
+	gl_texture_t *texture = R_GetTexture( glState.currentTexture );
+
+	float flRate = fabs( flConveyorSpeed ) / (float)texture->srcWidth;
+	float flAngle = ( flConveyorSpeed >= 0 ) ? 180 : 0;
+
+	SinCos( flAngle * ( M_PI_F / 180.0f ), &sy, &cy );
+	sOffset = gp_cl->time * cy * flRate;
+	tOffset = gp_cl->time * sy * flRate;
+
+	// make sure that we are positive
+	if( sOffset < 0.0f ) sOffset += 1.0f + -(int)sOffset;
+	if( tOffset < 0.0f ) tOffset += 1.0f + -(int)tOffset;
+
+	// make sure that we are in a [0,1] range
+	*s = sOffset - (int)sOffset;
+	*t = tOffset - (int)tOffset;
+#if XASH_PSP
+	conveyor.e = e;
+	conveyor.texture = glState.currentTexture;
+	conveyor.time = gp_cl->time;
+	conveyor.s = *s;
+	conveyor.t = *t;
+#endif
+}
+
 static void DrawGLPoly( gu_poly_t *p, float xScale, float yScale )
 {
 	float sOffset, tOffset;
@@ -976,42 +1031,8 @@ static void DrawGLPoly( gu_poly_t *p, float xScale, float yScale )
 		GL_ResetFogColor();
 
 	if( FBitSet( p->flags, SURF_CONVEYOR ))
-	{
-		const cl_entity_t *e = RI.currententity;
-		float flConveyorSpeed;
-		float sy, cy;
-
-		if( e == CL_GetEntityByIndex( 0 ) && FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
-		{
-			// same as doom speed
-			flConveyorSpeed = -35.0f;
-		}
-		else
-		{
-			flConveyorSpeed = (e->curstate.rendercolor.g<<8|e->curstate.rendercolor.b) / 16.0f;
-			if( e->curstate.rendercolor.r ) flConveyorSpeed = -flConveyorSpeed;
-		}
-		gl_texture_t *texture = R_GetTexture( glState.currentTexture );
-
-		float flRate = fabs( flConveyorSpeed ) / (float)texture->srcWidth;
-		float flAngle = ( flConveyorSpeed >= 0 ) ? 180 : 0;
-
-		SinCos( flAngle * ( M_PI_F / 180.0f ), &sy, &cy );
-		sOffset = gp_cl->time * cy * flRate;
-		tOffset = gp_cl->time * sy * flRate;
-
-		// make sure that we are positive
-		if( sOffset < 0.0f ) sOffset += 1.0f + -(int)sOffset;
-		if( tOffset < 0.0f ) tOffset += 1.0f + -(int)tOffset;
-
-		// make sure that we are in a [0,1] range
-		sOffset = sOffset - (int)sOffset;
-		tOffset = tOffset - (int)tOffset;
-	}
-	else
-	{
-		sOffset = tOffset = 0.0f;
-	}
+		R_ConveyorOffset( &sOffset, &tOffset );
+	else sOffset = tOffset = 0.0f;
 
 	const qboolean hasScale = xScale != 0.0f && yScale != 0.0f;
 	const qboolean hasOffset = sOffset != 0.0f || tOffset != 0.0f;
@@ -3974,6 +3995,53 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
 	R_RenderLightmapForSurface( fa );
 }
 
+#if XASH_PSP
+/*
+================
+R_DrawConveyors
+
+R_RenderBrushPoly for plain conveyor surfaces of RI.currententity, in their order:
+the offset is set once per texture, the lightmaps are only chained when
+R_BlendLightmaps draws them (~17 us a surface before, deluge_beta_v3 has 94 in view)
+================
+*/
+static void R_DrawConveyors( msurface_t **surfs, int count )
+{
+	const qboolean lightmap = R_HasLightmap();
+	int texture = -1;
+
+	for( int i = 0; i < count; i++ )
+	{
+		msurface_t *fa = surfs[i];
+		texture_t *t = R_TextureAnimation( fa );
+		gu_poly_t *p = GU_POLYS( fa );
+
+		r_stats.c_world_polys++;
+		if( t->gl_texturenum != texture )
+		{
+			float s, tc;
+
+			texture = t->gl_texturenum;
+			GL_Bind( XASH_TEXTURE0, texture );
+			R_ConveyorOffset( &s, &tc );
+			sceGuTexOffset( s, tc );
+		}
+
+		if( GU_ClipBoxInside( fa->info->mins, fa->info->maxs ))
+			SetBits( p->flags, GU_POLY_NOCLIP );
+		else ClearBits( p->flags, GU_POLY_NOCLIP );
+
+		R_RenderFullbrightForSurface( fa, t );
+		R_RenderDetailsForSurface( fa, t );
+		GU_DrawPoly( p, p->verts );
+		if( lightmap )
+			R_RenderLightmapForSurface( fa );
+	}
+
+	sceGuTexOffset( 0.0f, 0.0f );
+}
+#endif
+
 static void R_DrawTextureChain( int i )
 {
 	texture_t *t = WORLDMODEL->textures[i];
@@ -4498,9 +4566,45 @@ void R_DrawBrushModel( cl_entity_t *e )
 	if( gl_polyoffset_bmodels.value )
 		GL_PushPolygonOffset( -0.5f, -gl_polyoffset_bmodels.value );
 
+#if XASH_PSP
+	// the plain surfaces through the world's chains, as R_DrawStaticBrushModels: ~10 us
+	// a surface less. A translucent model's own surfaces aren't drawn back to front then.
+	const qboolean chains = ws_surfs && !r_fullbright->value && WORLDMODEL->lightdata && clmodel->surfaces == WORLDMODEL->surfaces
+		&& !FBitSet( e->curstate.effects, EF_FULLBRIGHT ) && !e->curstate.frame;
+
+	// the world's lightmap pass emptied them; not after a frame without one
+	if( chains )
+		memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+
+	static msurface_t *conveyors[512];
+	int numconveyors = 0;
+#endif
+
 	// draw sorted translucent surfaces
 	for( int i = 0; i < num_sorted; i++ )
-		R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
+	{
+		msurface_t *ps = gpGlobals->draw_surfaces[i].surf;
+#if XASH_PSP
+		if( chains && gpGlobals->draw_surfaces[i].cull == CULL_VISIBLE && !FBitSet( ps->flags, SURF_DRAWTURB ))
+		{
+			if( FBitSet( ps->flags, SURF_CONVEYOR ) && !FBitSet( ps->flags, SURF_DRAWTILED|SURF_DRAWSKY ) && !ps->pdecals
+				&& GU_POLYS( ps ) && numconveyors < ARRAYSIZE( conveyors ))
+			{
+				conveyors[numconveyors++] = ps;
+				continue;
+			}
+			if( R_WorldSurfChainBrush( ps ))
+				continue;
+		}
+#endif
+		R_RenderBrushPoly( ps, gpGlobals->draw_surfaces[i].cull );
+	}
+#if XASH_PSP
+	if( numconveyors )
+		R_DrawConveyors( conveyors, numconveyors );
+	if( chains )
+		R_WorldSurfsDrawTextures();
+#endif
 
 	if( e->curstate.rendermode == kRenderTransColor )
 		sceGuEnable( GU_TEXTURE_2D );
@@ -4511,6 +4615,11 @@ void R_DrawBrushModel( cl_entity_t *e )
 	R_BlendLightmaps();
 	R_RenderFullbrights();
 	R_RenderDetails();
+#if XASH_PSP
+	// without a lightmap pass (R_HasLightmap) they're still chained
+	if( chains )
+		memset( ws_lmhead, 0xff, sizeof( ws_lmhead ));
+#endif
 
 	if( gl_polyoffset_bmodels.value )
 		GL_PopPolygonOffset();
