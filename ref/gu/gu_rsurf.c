@@ -761,6 +761,33 @@ static void LM_UploadBlock( qboolean dynamic )
 	}
 }
 
+#if XASH_PSP && LIGHTMAP_BPP == 1
+/*
+the light of a world surface whose light data R_PrebuildLightmaps dropped: its
+page, the dynamic lights go on top of that (their own light in a 332 pixel)
+*/
+static const gl_texture_t *R_PrebuiltPage( const msurface_t *surf )
+{
+	const model_t *world = WORLDMODEL;
+
+	if( !lm_prebuilt || lm_prebuilt != world || surf < world->surfaces || surf >= world->surfaces + world->numsurfaces
+		|| surf->lightmaptexturenum < 0 || surf->lightmaptexturenum >= MAX_LIGHTMAPS || !tr.lightmapTextures[surf->lightmaptexturenum] )
+		return NULL;
+
+	const gl_texture_t *page = R_GetTexture( tr.lightmapTextures[surf->lightmaptexturenum] );
+
+	return page->dstTexture && page->format == GU_PSM_T8 ? page : NULL;
+}
+
+static byte R_PrebuiltLuxel( const gl_texture_t *page, int x, int y )
+{
+	// swizzled: blocks of 16 bytes x 8 rows, a row of blocks after another
+	if( FBitSet( page->flags, TF_IMG_SWIZZLED ))
+		return page->dstTexture[(( y >> 3 ) * ( page->width >> 4 ) + ( x >> 4 )) * 128 + ( y & 7 ) * 16 + ( x & 15 )];
+	return page->dstTexture[y * page->width + x];
+}
+#endif
+
 /*
 =================
 R_BuildLightmap
@@ -784,9 +811,15 @@ static void R_BuildLightMap( const msurface_t *surf, byte *restrict dest, int st
 
 	int map;
 	qboolean init = false;
+#if XASH_PSP && LIGHTMAP_BPP == 1
+	const gl_texture_t *page = dynamic ? R_PrebuiltPage( surf ) : NULL;
+	const int nolight = linear_gamma ? 0 : lightgammatable[0] >> 2;
+#else
+	const void *page = NULL;
+#endif
 
 	// init the lightmap
-	for( map = 0; map < MAXLIGHTMAPS && surf->samples; map++ )
+	for( map = 0; map < MAXLIGHTMAPS && surf->samples && !page; map++ )
 	{
 		if( surf->styles[map] >= 255 )
 			break;
@@ -848,6 +881,17 @@ static void R_BuildLightMap( const msurface_t *surf, byte *restrict dest, int st
 				else
 					color[i] = lightgammatable[c] >> 2;
 			}
+
+#if XASH_PSP && LIGHTMAP_BPP == 1
+			if( page )
+			{
+				const int lm = R_PrebuiltLuxel( page, surf->light_s + s, surf->light_t + t );
+				const int base[3] = { ( lm & 7 ) * 255 / 7, (( lm >> 3 ) & 7 ) * 255 / 7, ( lm >> 6 ) * 255 / 3 };
+
+				for( int i = 0; i < 3; i++ )
+					color[i] = Q_min( 255, base[i] + Q_max( 0, color[i] - nolight ));
+			}
+#endif
 
 #if LIGHTMAP_BPP == 1
 			dst[0]  = ( color[0] >> 5 ) & 0x07;
@@ -1855,15 +1899,11 @@ void GU_WorldSurfDecals( const msurface_t *surf )
 =================
 GU_WorldSurfDlit
 
-R_MarkLights marked the surface for this frame. Prebuilt lightmaps don't
-change (R_CheckLightMap): it stays on the fast path then
+R_MarkLights marked the surface for this frame
 =================
 */
 void GU_WorldSurfDlit( const msurface_t *surf )
 {
-	if( lm_prebuilt && lm_prebuilt == WORLDMODEL )
-		return;
-
 	gu_wsurf_t *w = R_WorldSurf( surf );
 
 	if( !w || FBitSet( w->texflags, WS_DLIT ))
@@ -2795,7 +2835,7 @@ static void R_MeWorldCapture( void )
 	r_meworld.early.ready = false;
 
 	// the dlights of the next frame are marked while the walk may run
-	if( !r_world_me_early.value || ( ws_numdlit && WORLDMODEL != lm_prebuilt ) || r_nocull.value
+	if( !r_world_me_early.value || ws_numdlit || r_nocull.value
 		|| RI.rvp.fov_x + 2.0f * MEWORLD_EARLY_TURN >= 170.0f || RI.rvp.fov_y + 2.0f * MEWORLD_EARLY_TURN >= 170.0f )
 		return;
 
@@ -2869,7 +2909,7 @@ static qboolean R_MeWorldEarlyMatches( void )
 	else if( RI.rvp.fov_x != r_meworld.early.fov_x || RI.rvp.fov_y != r_meworld.early.fov_y || R_GetFarClip() != r_meworld.early.farclip
 		|| RI.rvp.flags != r_meworld.early.flags || ( RI.frustum.clipFlags|WB_GUARD ) != r_meworld.early.clipflags || r_nocull.value )
 		why = 5;
-	else if( ws_allslow != r_meworld.early.allslow || ws_skybox != r_meworld.early.skybox || ( ws_numdlit && WORLDMODEL != lm_prebuilt ))
+	else if( ws_allslow != r_meworld.early.allslow || ws_skybox != r_meworld.early.skybox || ws_numdlit )
 		why = 6;
 
 	return why == 0;
@@ -3910,13 +3950,13 @@ static qboolean R_CheckLightMap( msurface_t *fa )
 	if( unlikely( !r_dynamic->value ))
 		return false;
 
-#if XASH_PSP
-	if( lm_prebuilt && lm_prebuilt == WORLDMODEL )
-		return false; // static, see R_PrebuildLightmaps
-#endif
-
 	if( fa->dlightframe == tr.framecount )
 		return true; // dlighted surfaces are always dynamic
+
+#if XASH_PSP
+	if( lm_prebuilt && lm_prebuilt == WORLDMODEL )
+		return false; // the styles don't change, see R_PrebuildLightmaps
+#endif
 
 	// check for light styles
 	for( int maps = 0; maps < MAXLIGHTMAPS && fa->styles[maps] != 255; maps++ )
@@ -5392,7 +5432,8 @@ R_PrebuildLightmaps
 
 the light of a big map takes megabytes. Its lightmaps are built as soon as it's
 loaded, after that only the light of the floors is kept, for the models on them. The
-light styles and dynamic lights don't change its lightmaps then (as with r_dynamic 0).
+light styles don't change its lightmaps then; the dynamic lights go on top of the
+pages (R_PrebuiltPage).
 ==================
 */
 #define LM_PREBUILD_SIZE	( 1024 * 1024 )
