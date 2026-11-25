@@ -491,6 +491,7 @@ client library. Loading and freeing is only done between two frames (Mod_LoadCol
 #define MOD_IDLE_TIME	2.0f	// not used for that long: may be freed
 #define MOD_RETRY_TIME	1.0f
 #define MOD_MARGIN		( 2 * 1024 * 1024 )	// left for everything else
+#define MOD_WARM_BLOCK	( 384 * 1024 )	// in one piece for Mod_Warm
 
 // studio models don't use numleafs (here: when it was last used) and numplanes
 // (here: not loaded before this time, -1 never)
@@ -729,7 +730,9 @@ static void Mod_Warm( model_t *mod )
 	// what stays of the file in one piece, the file itself goes into P5 RAM
 	const size_t data = hdr.texturedataindex > 0 && hdr.texturedataindex < filesize ? hdr.texturedataindex : filesize;
 
-	if( !Mod_MakeRoom( Mod_StudioCost( &hdr, filesize ) + MOD_MARGIN, data + 64 * 1024 ))
+	// a block for the texture conversions too (up to 256 KB): when one fails here it's a
+	// Host_Error (Mod_LoadOutOfMemory), with 2.4 MB free in pieces of < 300 KB
+	if( !Mod_MakeRoom( Mod_StudioCost( &hdr, filesize ) + MOD_MARGIN, Q_max( data + 64 * 1024, MOD_WARM_BLOCK )))
 	{
 		// try again later
 		mod->numplanes = host.realtime + MOD_RETRY_TIME + 1.0f;
