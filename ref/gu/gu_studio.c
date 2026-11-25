@@ -7107,7 +7107,12 @@ enum { LOD_COSTS = 0, LOD_COLLAPSE, LOD_OUT };
 
 static void R_StudioLodThink( void )
 {
+	static uint32_t last;
 	const uint32_t t0 = sceKernelGetSystemTimeLow();
+	// what the frames leave: little while they're slower than 60 fps
+	const uint32_t budget = t0 - last < 16000 ? 700 : 200;
+
+	last = t0;
 
 	if( !ge_lod.gm )
 	{
@@ -7186,7 +7191,7 @@ static void R_StudioLodThink( void )
 			break;
 		}
 	}
-	while( sceKernelGetSystemTimeLow() - t0 < 700 );
+	while( sceKernelGetSystemTimeLow() - t0 < budget );
 }
 
 // is it there? If it isn't it will be
