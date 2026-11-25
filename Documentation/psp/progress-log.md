@@ -987,3 +987,31 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     and sounds, and blastcorpse1 with the final version, aren't tested on the PSP.
   - Open: the main start at 60 fps (SCR_UpdateScreen 20 ms: world 6.5, models 3.4, ~10 not explained), light styles on
     big maps, loading (~35 s in one call), memory in pieces after a while.
+- 2026-11-25: **`deluge_beta_v3` main start 38 -> 56-61 fps** (it varies with the monsters about; the PSP measures
+  itself with `PROF` lines every 5 s over the Wi-Fi console).
+  - `907ad360`: the world's ME job had been off on every map since an old allocation failure archived `r_world_me 0`
+    (38 -> 51). Then the brush models' plain surfaces through the world's chains, conveyor offsets once per texture,
+    masked studio meshes (trees) in GE plans and the ME's draws (51 -> ~55).
+  - The main CPU waited ~2 ms a frame for the ME's world walk (~4.7 ms for 1900 surfaces; as slow on the main CPU,
+    memory bound: the plane fetch, the far plane, the leaf marks and the box math aren't it, measured one by one).
+    The walk of the next frame now starts at the end of a frame from this frame's view moved on, with 8 degrees and
+    8 units of margin, and is taken if the view stays that close (`R_MeWorldEarly`): 57 -> 61. ~85% of the frames
+    take it while walking and turning, all standing. The user saw no holes or flicker. The ME's walk now slows the
+    main CPU's work that runs beside it by ~0.6 ms (memory bus).
+  - Entities: CL_InterpolateModel's history search compares doubles, ~10 us an entity; entities that haven't moved
+    for 16 updates skip it. CL_EmitEntities 3.7 -> 2.4 ms with 170 packet entities.
+  - Smaller: a sort key per translucent brush surface (0.56 -> 0.46 ms), LOD building at 200 us a frame while frames
+    are slower than 60 fps (~1 ms a frame for seconds after a join before), dlights don't put prebuilt lightmaps'
+    surfaces on the slow path.
+  - The network threads use ~0.8 ms a frame (WLAN driver, ~1 ms a packet) during the main thread's sleep for them
+    (`PSP_NetFrame`): giving the main thread a lower priority than theirs instead made it slower. `cl_updaterate 15`
+    would give +2.5 fps; the user keeps 20. `cl_cmdrate 20` changes nothing measurable.
+  - Fixed on the way: textures past MAX_TEXTURES end the join no more (default texture), a cold model warms only
+    with a 384 KB block (a texture conversion failed in a game with 2.4 MB free in small pieces: Host_Error).
+  - Prebuilt lightmaps had the switchable lights that start off baked in on (styles from the map's light
+    entities now). Not the cause of the red tint the user sees on some floors and on the spawn door's lips,
+    which changes as you move and turn: it stays with the old world path, the old brush path, without the ME's
+    brushes, without entities, without dynamic lights, at mip 0 only. The lightmap pages and the 332 palette are
+    unchanged in memory (checked with checksums of the uploads). Not found yet.
+  - Two power-offs today: after a second `screenshot` (the first failed in `deflateInit`, memory in pieces) and
+    20 s after `r_fullbright 1` (20 fps, `GU_WorldListFull`). Don't take screenshots or use r_fullbright there.
