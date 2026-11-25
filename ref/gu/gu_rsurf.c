@@ -2096,7 +2096,20 @@ the lightmap pass of a page, in R_BlendLightmaps
 static void R_WorldSurfsDrawLightmaps( int page )
 {
 	for( int s = ws_lmhead[page]; s != WS_NONE; s = ws_surfs[s].lmnext )
-		R_WorldSurfDraw( &ws_surfs[s], ws_surfs[s].verts + ws_surfs[s].numverts );
+	{
+		const gu_wsurf_t *w = &ws_surfs[s];
+
+		// the page again before a polygon that may need clipping: the GE drew some
+		// of those with another palette than the page's (whole floor polygons red in
+		// deluge_beta_v3 after a while of play), although the commands between the
+		// page's bind and these draws are only clipped vertices and draws
+		if( !FBitSet( w->texflags, WS_NOCLIP ))
+		{
+			glState.currentTexture = -1;
+			GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[page] );
+		}
+		R_WorldSurfDraw( w, w->verts + w->numverts );
+	}
 
 	ws_lmhead[page] = WS_NONE;
 }
