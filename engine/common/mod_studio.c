@@ -909,6 +909,15 @@ static void Mod_StudioComputeBounds( void *buffer, vec3_t mins, vec3_t maxs, qbo
 	VectorCopy( bone_maxs, maxs );
 }
 
+#if XASH_PSP
+// what Mod_LoadStudioModel computes for models without bounds
+void Mod_StudioHullBounds( void *buffer, vec3_t mins, vec3_t maxs )
+{
+	Mod_StudioComputeBounds( buffer, mins, maxs, true );
+	RoundUpHullSize( mins, maxs );
+}
+#endif
+
 /*
 ====================
 Mod_GetStudioBounds
@@ -1204,6 +1213,33 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 	}
 #endif
 
+#if XASH_PSP
+	// the model without its pixels: both at once don't fit
+	if( !textures_loaded && !Host_IsDedicated() && phdr->numtextures > 0 && phdr->textureindex >= (int32_t)sizeof( *phdr )
+		&& phdr->texturedataindex >= phdr->textureindex + phdr->numtextures * (int32_t)sizeof( mstudiotexture_t )
+		&& phdr->texturedataindex <= phdr->length && !( phdr->texturedataindex & 3 ))
+	{
+		const size_t size = phdr->numtextures * sizeof( mstudiotexture_t );
+		mstudiotexture_t *ptexture = (mstudiotexture_t *)((byte *)phdr + phdr->textureindex );
+		byte *save = Mem_Malloc( mod->mempool, size );
+
+		// the buffer is used for CRC computing
+		memcpy( save, ptexture, size );
+		mod->cache.data = phdr; // Mod_StudioUnloadTextures if it's abandoned
+		ref.dllFuncs.Mod_StudioLoadTextures( mod, phdr );
+
+		byte *data = Mem_Malloc( mod->mempool, phdr->texturedataindex );
+		memcpy( data, phdr, phdr->texturedataindex );
+		memcpy( ptexture, save, size );
+		Mem_Free( save );
+
+		mod->cache.data = data;
+		phdr = mod->cache.data;
+		phdr->length = phdr->texturedataindex;
+		textures_loaded = true;
+	}
+	else
+#endif
 	if( !textures_loaded )
 	{
 		// NOTE: don't modify source buffer because it's used for CRC computing
@@ -1218,7 +1254,8 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 	}
 
 	// NOTE: we may not want to keep raw textures in memory. just cutoff model pointer above texture base
-	phdr = Mod_MaybeTruncateStudioTextureData( mod );
+	if( phdr->length != phdr->texturedataindex )
+		phdr = Mod_MaybeTruncateStudioTextureData( mod );
 
 	// setup bounding box
 	if( !VectorCompare( vec3_origin, phdr->bbmin ))

@@ -376,6 +376,15 @@ void *_Mem_Alloc( poolhandle_t poolptr, size_t size, qboolean clear, const char 
 		size_t blocksize = sizeof( memheader_t ) + size + sizeof( byte );
 		memheader_t *mem = Mem_RawAllocBig( pool->flags, blocksize );
 
+#if XASH_PSP
+		// models and sounds that aren't used make room
+		if( mem == NULL && sceKernelGetThreadId() == mem_main_thread && Mod_MakeRoomFor( blocksize ))
+		{
+			pool = Mem_FindPool( poolptr ); // it may have moved
+			mem = Mem_RawAllocBig( pool->flags, blocksize );
+		}
+#endif
+
 		if( mem == NULL )
 		{
 			Mem_OutOfMemory( __func__, size, filename, fileline );

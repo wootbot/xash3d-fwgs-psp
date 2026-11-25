@@ -2260,24 +2260,7 @@ start:
 
 	for( int i = 0; i < numsurfaces; i++, surf++ )
 	{
-		const mfacebevel_t *fb = surf->info->bevel;
-		vec3_t delta;
-		int j;
-
-		if( !fb )
-			continue;
-
-		VectorSubtract( mid, fb->origin, delta );
-		if( DotProduct( delta, delta ) >= fb->radius )
-			continue;
-
-		for( j = 0; j < fb->numedges; j++ )
-		{
-			if( PlaneDiff( mid, &fb->edges[j] ) > eps )
-				break;
-		}
-
-		if( j == fb->numedges )
+		if( Mod_PointInFace( mod, surf, mid, eps ))
 			return FBitSet( surf->flags, SURF_DRAWSKY ) ? 2 : 1;
 	}
 
@@ -3193,9 +3176,21 @@ static qboolean R_StudioMeDrawAllowed( void )
 		&& r_drawentities->value == 1.0f;
 }
 
+static memerge_t r_memerge[MEMERGE_CACHE];
+
+// the model goes, another one may be loaded at its address
+static void R_StudioMeMergeForget( const studiohdr_t *hdr )
+{
+	for( int i = 0; i < MEMERGE_CACHE; i++ )
+	{
+		if( r_memerge[i].hdr == hdr || r_memerge[i].phdr == hdr )
+			memset( &r_memerge[i], 0, sizeof( r_memerge[i] ));
+	}
+}
+
 static const memerge_t *R_StudioMeMergeGet( const studiohdr_t *hdr, const studiohdr_t *phdr )
 {
-	static memerge_t cache[MEMERGE_CACHE];
+	memerge_t *const cache = r_memerge;
 	memerge_t *c = &cache[0];
 
 	for( int i = 0; i < MEMERGE_CACHE; i++ )
@@ -5675,6 +5670,8 @@ static void R_StudioGEFreeModel( gemodel_t *gm )
 }
 
 // Mod_StudioUnloadTextures: the header memory can be reused by another model
+static void R_StudioViewModelBonesForget( void );
+
 static void R_StudioGEUnload( const studiohdr_t *hdr )
 {
 	ge_rec_gen++; // the batches go
@@ -5690,6 +5687,10 @@ static void R_StudioGEUnload( const studiohdr_t *hdr )
 	}
 
 	R_StudioLodForgetBones( hdr );
+	R_StudioMeMergeForget( hdr );
+	R_StudioViewModelBonesForget();
+	if( m_pStudioHeader == hdr )
+		m_pStudioHeader = NULL;
 
 	// reinsert what came after a freed slot, open addressing
 	for( int i = 0; i < GE_CACHE_SIZE; i++ )
@@ -10075,6 +10076,11 @@ static struct
 	matrix3x4		bones[MAXSTUDIOBONES];
 } r_vmbones;
 
+static void R_StudioViewModelBonesForget( void )
+{
+	r_vmbones.valid = false;
+}
+
 static qboolean R_StudioViewModelBonesMatch( const cl_entity_t *e )
 {
 	return r_vmbones.valid && r_vmbones.hdr == m_pStudioHeader && r_vmbones.time == g_studio.time
@@ -11571,6 +11577,37 @@ static int studio_loaded_textures;
 
 /*
 =================
+R_StudioLimitTextures
+
+maps that don't fit with all of their textures (gu_texture_mapsize) don't fit with
+all of the models' either: a size that keeps a model's under 128 KB
+=================
+*/
+#define STUDIO_TEXTURE_BUDGET	( 128 * 1024 )
+
+static void R_StudioLimitTextures( const studiohdr_t *phdr )
+{
+	const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)phdr + phdr->textureindex);
+	int size = 0;
+
+	if( gu_texture_mapsize.value < 256.0f )
+	{
+		for( size = 256; size > 32; size >>= 1 )
+		{
+			int total = 0;
+
+			for( int i = 0; i < phdr->numtextures; i++ )
+				total += Q_min( ptexture[i].width, size ) * Q_min( ptexture[i].height, size ) * 4 / 3;
+			if( total <= STUDIO_TEXTURE_BUDGET )
+				break;
+		}
+	}
+
+	gl_modelTextureSize = size;
+}
+
+/*
+=================
 Mod_StudioLoadTextures
 =================
 */
@@ -11593,11 +11630,13 @@ void Mod_StudioLoadTextures( model_t *mod, void *data )
 			pixofs[i] = ptexture[i].index;
 
 		studio_loading_hdr = phdr;
+		R_StudioLimitTextures( phdr );
 
 		for( studio_loaded_textures = 0; studio_loaded_textures < phdr->numtextures; studio_loaded_textures++ )
 			R_StudioLoadTexture( mod, phdr, &ptexture[studio_loaded_textures] );
 
 		studio_loading_hdr = NULL;
+		gl_modelTextureSize = 0;
 
 		if( pixofs )
 			R_StudioBuildAtlas( mod, phdr, pixofs );

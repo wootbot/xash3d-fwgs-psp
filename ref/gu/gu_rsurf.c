@@ -66,6 +66,9 @@ static separate_pass_t draw_fullbrights = { 0, -1 };
 static separate_pass_t draw_details = { 0, -1 };
 static msurface_t		*skychain = NULL;
 static gllightmapstate_t	gl_lms;
+#if XASH_PSP
+static const model_t	*lm_prebuilt; // see R_PrebuildLightmaps
+#endif
 
 static void LM_UploadBlock( qboolean dynamic );
 
@@ -326,11 +329,108 @@ void GL_SubdivideSurface( model_t *loadmodel, msurface_t *fa )
 	SubdividePolygon_r( loadmodel, fa, fa->numedges, verts[0] );
 }
 
+#if XASH_PSP
+/*
+=============================================================
+
+POLYGONS ON DEMAND
+
+A polygon takes 40 bytes a vertex: 6 MB in a map of 30000 surfaces, but a place
+in it only sees 1000 - 5000 of them. The world's polygons of such a map are built
+when they get into the PVS (R_PolysForPVS), in chunks that are all dropped when
+there are too many of them.
+
+=============================================================
+*/
+#define LP_CHUNK		( 256 * 1024 )
+#define LP_MAXCHUNKS	14		// what doesn't fit in them isn't drawn (out of the map everything is visible)
+#define LP_KEEP		6		// dropped at the next change of the PVS with more than this
+#define LP_MINSIZE		( 2 * 1024 * 1024 )	// maps with less keep all of them
+
+static struct
+{
+	const model_t	*world;		// NULL: all polygons are there
+	byte		*chunks[LP_MAXCHUNKS];
+	int		numchunks;		// allocated
+	int		chunk, used;	// the one being filled
+	int		numsurfs;		// of the world itself
+} lp;
+
+static qboolean R_PolyIsLazy( const model_t *mod, const msurface_t *surf )
+{
+	return lp.world == mod && mod && surf - mod->surfaces < lp.numsurfs && !FBitSet( surf->flags, SURF_DRAWTURB );
+}
+
+static void *R_PolyAlloc( size_t size )
+{
+	if( size > LP_CHUNK )
+		return NULL;
+
+	if( lp.numchunks && lp.used + size <= LP_CHUNK )
+	{
+		lp.used += size;
+		return lp.chunks[lp.chunk] + lp.used - size;
+	}
+
+	if( lp.numchunks && lp.chunk + 1 < lp.numchunks )
+		lp.chunk++;
+	else
+	{
+		byte *chunk = lp.numchunks < LP_MAXCHUNKS ? memalign( 64, LP_CHUNK ) : NULL;
+
+		if( !chunk )
+			return NULL;
+
+		lp.chunk = lp.numchunks;
+		lp.chunks[lp.numchunks++] = chunk;
+	}
+
+	lp.used = size;
+	return lp.chunks[lp.chunk];
+}
+
+/*
+=================
+R_PolysBegin
+
+before the polygons of a new map are built
+=================
+*/
+static void R_PolysFree( void )
+{
+	for( int i = 0; i < lp.numchunks; i++ )
+		free( lp.chunks[i] );
+	memset( &lp, 0, sizeof( lp ));
+}
+
+static void R_PolysBegin( const model_t *world )
+{
+	size_t size = 0;
+
+	R_PolysFree();
+
+	if( !world || world->type != mod_brush )
+		return;
+
+	const int numsurfs = world->firstmodelsurface + world->nummodelsurfaces;
+
+	for( int i = 0; i < numsurfs; i++ )
+		size += GU_POLY_SIZE( world->surfaces[i].numedges );
+
+	if( size < LP_MINSIZE )
+		return;
+
+	lp.world = world;
+	lp.numsurfs = numsurfs;
+	gEngfuncs.Con_Reportf( "%s: %d polygons on demand, %d KB\n", __func__, numsurfs, (int)( size >> 10 ));
+}
+
 /*
 ================
 GL_BuildPolygonFromSurface
 ================
 */
+#endif
 static int GL_BuildPolygonFromSurface( model_t *mod, msurface_t *fa )
 {
 	int		nColinElim = 0;
@@ -360,8 +460,17 @@ static int GL_BuildPolygonFromSurface( model_t *mod, msurface_t *fa )
 
 	// quake simple models (healthkits etc) need to be reconstructed their polys because LM coords has changed after the map change
 	// PSP GU-friendly format s1t1 xyz, then s2t2 xyz (idea from PSP Quake)
+#if XASH_PSP
+	if( R_PolyIsLazy( mod, fa ))
+	{
+		if( !poly && !( poly = R_PolyAlloc( GU_POLY_SIZE( lnumverts ))))
+			return nColinElim;
+	}
+	else
+#endif
 	poly = Mem_Realloc( mod->mempool, poly, GU_POLY_SIZE( lnumverts ));
 	poly->next = GU_POLYS( fa );
+	poly->chain = NULL; // R_PolyAlloc doesn't clear it
 	poly->flags = fa->flags;
 	fa->polys = (glpoly2_t *)poly;
 	poly->numverts = lnumverts;
@@ -607,6 +716,18 @@ static qboolean LM_AllocBlock( int w, int h, int *x, int *y )
 	return Atlas_AllocBlock( &gl_lms.atlas, w, h, x, y );
 }
 
+static qboolean LM_AllocDynamic( int w, int h, mextrasurf_t *info )
+{
+	int s, t;
+
+	if( !LM_AllocBlock( w, h, &s, &t ))
+		return false;
+
+	info->dlight_s = s;
+	info->dlight_t = t;
+	return true;
+}
+
 static void LM_UploadBlock( qboolean dynamic )
 {
 	if( dynamic )
@@ -751,6 +872,24 @@ static void R_BuildLightMap( const msurface_t *surf, byte *restrict dest, int st
 	}
 }
 
+// the GE list has a fixed size, past its end the GE runs whatever is there: what
+// doesn't fit isn't drawn. The rest is for what is drawn after the world
+static qboolean GU_WorldListFull( void )
+{
+	static uint last;
+
+	if( extGuListUsed() <= guRender.context_list_size - 192 * 1024 )
+		return false;
+
+	if( guRender.vert_frame - last > 300 || !last )
+	{
+		last = guRender.vert_frame;
+		gEngfuncs.Con_Reportf( "%s: %u KB used\n", __func__, extGuListUsed() >> 10 );
+	}
+
+	return true;
+}
+
 /*
 ================
 GU_DrawPolyVerts
@@ -760,6 +899,9 @@ draws a triangle fan straight from memory, clipping it if it crosses the guard b
 */
 static void GU_DrawPolyVerts( gu_vert_t *verts, int numverts )
 {
+	if( GU_WorldListFull( ))
+		return;
+
 	if( GU_ClipIsRequired( verts, numverts ))
 	{
 		gu_vert_t *cv;
@@ -792,7 +934,7 @@ R_RenderBrushPoly found the surface's box inside the clip planes
 */
 static void GU_DrawPoly( gu_poly_t *p, gu_vert_t *verts )
 {
-	if( FBitSet( p->flags, GU_POLY_NOCLIP ))
+	if( FBitSet( p->flags, GU_POLY_NOCLIP ) && !GU_WorldListFull( ))
 		extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, p->numverts, verts );
 	else GU_DrawPolyVerts( verts, p->numverts );
 }
@@ -1027,7 +1169,13 @@ static qboolean R_WorldSurfIsSlow( const model_t *world, const msurface_t *surf 
 	const texture_t *t = surf->texinfo ? surf->texinfo->texture : NULL;
 	const gu_poly_t *p = GU_POLYS( surf );
 
-	if( !t || !p || p->next || p->numverts < 3 || p->numverts > 255 )
+	if( R_PolyIsLazy( world, surf ))
+	{
+		// not more vertices than that when it's built
+		if( !t || surf->numedges < 3 || surf->numedges > 255 )
+			return true;
+	}
+	else if( !t || !p || p->next || p->numverts < 3 || p->numverts > 255 )
 		return true;
 
 	if( FBitSet( surf->flags, SURF_DRAWSKY|SURF_DRAWTURB|SURF_DRAWTILED|SURF_CONVEYOR ))
@@ -1042,7 +1190,7 @@ static qboolean R_WorldSurfIsSlow( const model_t *world, const msurface_t *surf 
 
 	// R_CheckLightMap: styles other than the normal one change
 	if( !world->lightdata || surf->lightmaptexturenum < 0 || surf->lightmaptexturenum >= MAX_LIGHTMAPS
-		|| surf->styles[0] != 0 || ( MAXLIGHTMAPS > 1 && surf->styles[1] != 255 ))
+		|| ( world != lm_prebuilt && ( surf->styles[0] != 0 || ( MAXLIGHTMAPS > 1 && surf->styles[1] != 255 ))))
 		return true;
 
 	return false;
@@ -1542,8 +1690,11 @@ static void R_WorldSurfsBuild( void )
 
 		const gu_poly_t *p = GU_POLYS( surf );
 		w->texflags = tex;
-		w->verts = (gu_vert_t *)p->verts;
-		w->numverts = p->numverts;
+		if( p ) // on demand
+		{
+			w->verts = (gu_vert_t *)p->verts;
+			w->numverts = p->numverts;
+		}
 		w->lightmap = surf->lightmaptexturenum;
 		if( surf->pdecals )
 			SetBits( w->texflags, WS_DECALS );
@@ -1561,6 +1712,100 @@ static gu_wsurf_t *R_WorldSurf( const msurface_t *surf )
 	if( !ws_surfs || surf < WORLDMODEL->surfaces || surf >= WORLDMODEL->surfaces + ws_numsurfs )
 		return NULL;
 	return &ws_surfs[surf - WORLDMODEL->surfaces];
+}
+
+/*
+=================
+R_SurfPoly
+
+the polygon of a surface, built now if it's on demand. NULL without memory
+=================
+*/
+gu_poly_t *R_SurfPoly( msurface_t *surf )
+{
+	if( surf->polys || !lp.world || lp.world != WORLDMODEL || !R_PolyIsLazy( lp.world, surf ))
+		return GU_POLYS( surf );
+
+	GL_BuildPolygonFromSurface( (model_t *)lp.world, surf );
+
+	gu_poly_t *p = GU_POLYS( surf );
+	gu_wsurf_t *w = R_WorldSurf( surf );
+
+	if( p && w && !FBitSet( w->texflags, WS_SLOW ) && p->numverts >= 3 && p->numverts <= 255 )
+	{
+		w->verts = p->verts;
+		w->numverts = p->numverts;
+	}
+
+	return p;
+}
+
+static void R_PolysDrop( void )
+{
+	// the GE and the ME read them
+	R_WaitFrame();
+	R_MeWorldWait();
+
+	for( int i = 0; i < lp.numsurfs; i++ )
+	{
+		msurface_t *surf = &lp.world->surfaces[i];
+
+		if( !surf->polys || FBitSet( surf->flags, SURF_DRAWTURB ))
+			continue;
+
+		gu_wsurf_t *w = R_WorldSurf( surf );
+
+		surf->polys = NULL;
+		if( w )
+			w->verts = NULL;
+	}
+
+	while( lp.numchunks > LP_KEEP )
+		free( lp.chunks[--lp.numchunks] );
+	lp.chunk = lp.used = 0;
+}
+
+/*
+=================
+R_PolysForPVS
+
+the PVS changed (R_MarkLeaves)
+=================
+*/
+static void R_PolysForPVS( void )
+{
+	qboolean dropped = lp.numchunks <= LP_KEEP;
+
+	// the first frame has no view leaf, everything is in its PVS
+	if( !lp.world || lp.world != WORLDMODEL || !RI.viewleaf )
+		return;
+
+restart:
+	for( int i = 0; i < WORLDMODEL->numleafs; i++ )
+	{
+		if( !CHECKVISBIT( RI.visbytes, i ))
+			continue;
+
+		const mleaf_t *leaf = &WORLDMODEL->leafs[i + 1];
+
+		for( int j = 0; j < leaf->nummarksurfaces; j++ )
+		{
+			msurface_t *surf = leaf->firstmarksurface[j];
+
+			if( surf->polys )
+				continue;
+
+			if( !dropped )
+			{
+				R_PolysDrop();
+				dropped = true;
+				goto restart;
+			}
+
+			if( !R_SurfPoly( surf ) && R_PolyIsLazy( lp.world, surf ))
+				return; // out of memory
+		}
+	}
 }
 
 /*
@@ -1632,7 +1877,7 @@ static void R_WorldSurfsBeginWalk( void )
 	// light style 0 changed (it does once after loading, the lightstyles come
 	// from the server): R_CheckLightMap updates each lightmap when its surface
 	// is drawn by R_RenderBrushPoly
-	if( g_lightstylevalue[0] != ws_style0 )
+	if( g_lightstylevalue[0] != ws_style0 && WORLDMODEL != lm_prebuilt )
 	{
 		for( int i = 0; i < ws_numsurfs; i++ )
 		{
@@ -1754,6 +1999,9 @@ static void R_WorldSurfsCull( int first, int count, uint clipflags )
 				continue;
 		}
 
+		if( !slow && !w->verts )
+			continue;
+
 		if( slow )
 		{
 			// R_AddSkyBoxSurface cuts each sky polygon at the box edges to find the
@@ -1775,6 +2023,9 @@ static void R_WorldSurfsCull( int first, int count, uint clipflags )
 
 static void R_WorldSurfDraw( const gu_wsurf_t *w, gu_vert_t *verts )
 {
+	if( GU_WorldListFull( ))
+		return;
+
 	if( FBitSet( w->texflags, WS_NOCLIP ))
 		extGuDrawArrayBatched( GU_TRIANGLE_FAN, GU_TEXTURE_32BITF | GU_VERTEX_32BITF, w->numverts, verts );
 	else GU_DrawPolyVerts( verts, w->numverts );
@@ -2007,6 +2258,9 @@ static void R_MeSurf( meworld_job_t *job, int i, const gu_wsurf_t *w, uint left 
 		else job->full = true;
 		return;
 	}
+
+	if( !w->verts )
+		return;
 
 	if( FBitSet( left, WB_GUARD ) && R_MeClipIsRequired( job, w->verts, w->numverts ))
 	{
@@ -2980,7 +3234,7 @@ static void EmitWaterPolys( msurface_t *warp, qboolean reverse )
 {
 	float	waveHeight;
 
-	if( !warp->polys ) return;
+	if( !warp->polys || GU_WorldListFull( )) return;
 
 #if XASH_PSP
 	const byte *drawn;
@@ -3157,7 +3411,7 @@ static void R_BlendLightmaps( void )
 			int smax = ( info->lightextents[0] / sample_size ) + 1;
 			int tmax = ( info->lightextents[1] / sample_size ) + 1;
 
-			if( LM_AllocBlock( smax, tmax, &surf->info->dlight_s, &surf->info->dlight_t ))
+			if( LM_AllocDynamic( smax, tmax, surf->info ))
 			{
 				base = gl_lms.lightmap_buffer;
 				base += ( surf->info->dlight_t * BLOCK_SIZE + surf->info->dlight_s ) * LIGHTMAP_BPP;
@@ -3184,7 +3438,7 @@ static void R_BlendLightmaps( void )
 				LM_InitBlock();
 
 				// try uploading the block now
-				if( !LM_AllocBlock( smax, tmax, &surf->info->dlight_s, &surf->info->dlight_t ))
+				if( !LM_AllocDynamic( smax, tmax, surf->info ))
 					gEngfuncs.Host_Error( "AllocBlock: full\n" );
 
 				base = gl_lms.lightmap_buffer;
@@ -3358,6 +3612,11 @@ static qboolean R_CheckLightMap( msurface_t *fa )
 {
 	if( unlikely( !r_dynamic->value ))
 		return false;
+
+#if XASH_PSP
+	if( lm_prebuilt && lm_prebuilt == WORLDMODEL )
+		return false; // static, see R_PrebuildLightmaps
+#endif
 
 	if( fa->dlightframe == tr.framecount )
 		return true; // dlighted surfaces are always dynamic
@@ -3667,8 +3926,10 @@ static int R_SurfaceCompare( const void *a, const void *b )
 	msurface_t *surf1 = (msurface_t *)((sortedface_t *)a)->surf;
 	msurface_t *surf2 = (msurface_t *)((sortedface_t *)b)->surf;
 
-	VectorAdd( RI.currententity->origin, surf1->info->origin, org1 );
-	VectorAdd( RI.currententity->origin, surf2->info->origin, org2 );
+	VectorAverage( surf1->info->mins, surf1->info->maxs, org1 );
+	VectorAverage( surf2->info->mins, surf2->info->maxs, org2 );
+	VectorAdd( RI.currententity->origin, org1, org1 );
+	VectorAdd( RI.currententity->origin, org2, org2 );
 
 	// compare by plane dists
 	float len1 = DotProduct( org1, RI.vforward ) - RI.viewplanedist;
@@ -4597,7 +4858,15 @@ void R_MarkLeaves( void )
 #endif
 		}
 	}
+
+#if XASH_PSP
+	R_PolysForPVS();
+#endif
 }
+
+#if XASH_PSP
+static int lm_prebuiltpages;
+#endif
 
 /*
 ========================
@@ -4610,6 +4879,11 @@ static void GL_CreateSurfaceLightmap( msurface_t *surf, model_t *loadmodel )
 
 	if( !loadmodel->lightdata )
 		return;
+
+#if XASH_PSP
+	if( loadmodel == lm_prebuilt )
+		return;
+#endif
 
 	if( FBitSet( surf->flags, SURF_DRAWTILED|SURF_DRAWTURB ))
 		return;
@@ -4636,6 +4910,142 @@ static void GL_CreateSurfaceLightmap( msurface_t *surf, model_t *loadmodel )
 	R_BuildLightMap( surf, base, BLOCK_SIZE * LIGHTMAP_BPP, false );
 }
 
+#if XASH_PSP
+/*
+==================
+R_PrebuildLightmaps
+
+the light of a big map takes megabytes. Its lightmaps are built as soon as it's
+loaded, after that only the light of the floors is kept, for the models on them. The
+light styles and dynamic lights don't change its lightmaps then (as with r_dynamic 0).
+==================
+*/
+#define LM_PREBUILD_SIZE	( 1024 * 1024 )
+
+static int R_SurfaceLightSize( const msurface_t *surf )
+{
+	const int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
+	int styles = 0;
+
+	while( styles < MAXLIGHTMAPS && surf->styles[styles] != 255 )
+		styles++;
+
+	return ( surf->info->lightextents[0] / sample_size + 1 ) * ( surf->info->lightextents[1] / sample_size + 1 ) * styles;
+}
+
+static qboolean R_SurfaceIsFloor( const msurface_t *surf )
+{
+	if( !surf->plane )
+		return false;
+
+	const float z = FBitSet( surf->flags, SURF_PLANEBACK ) ? -surf->plane->normal[2] : surf->plane->normal[2];
+
+	return z > 0.0f && !FBitSet( surf->flags, SURF_DRAWTILED|SURF_DRAWTURB );
+}
+
+void R_PrebuildLightmaps( model_t *mod )
+{
+	int total = 0, kept = 0;
+
+	lm_prebuilt = NULL;
+
+	if( !mod->lightdata )
+		return;
+
+	for( int i = 0; i < mod->numsurfaces; i++ )
+	{
+		const msurface_t *surf = &mod->surfaces[i];
+
+		if( !surf->samples )
+			continue;
+
+		total += R_SurfaceLightSize( surf );
+		if( R_SurfaceIsFloor( surf ))
+			kept += R_SurfaceLightSize( surf );
+	}
+
+	if( total * sizeof( color24 ) < LM_PREBUILD_SIZE || !kept )
+		return;
+
+	tr.block_size = BLOCK_SIZE_DEFAULT;
+	gl_lms.current_lightmap_texture = 0;
+
+	// the server's styles aren't here yet: all of them normal ('m')
+	for( int i = 0; i < MAX_LIGHTSTYLES; i++ )
+		g_lightstylevalue[i] = ( 'm' - 'a' ) * 22;
+
+	LM_InitBlock();
+	for( int i = 0; i < mod->numsurfaces; i++ )
+		GL_CreateSurfaceLightmap( &mod->surfaces[i], mod );
+	LM_UploadBlock( false );
+
+	color24 *out = Mem_Malloc( mod->mempool, kept * sizeof( *out ));
+	int ofs = 0;
+
+	for( int i = 0; i < mod->numsurfaces; i++ )
+	{
+		msurface_t *surf = &mod->surfaces[i];
+
+		if( !surf->samples )
+			continue;
+
+		if( R_SurfaceIsFloor( surf ))
+		{
+			const int size = R_SurfaceLightSize( surf );
+
+			memcpy( out + ofs, surf->samples, size * sizeof( *out ));
+			surf->samples = out + ofs;
+			ofs += size;
+		}
+		else surf->samples = NULL;
+	}
+
+	Mem_Free( mod->lightdata );
+	mod->lightdata = out;
+	lm_prebuilt = mod;
+	lm_prebuiltpages = gl_lms.current_lightmap_texture;
+
+	gEngfuncs.Con_Reportf( "%s: %d KB of %d KB light data kept\n", __func__, (int)( kept * sizeof( *out )) >> 10, (int)( total * sizeof( *out )) >> 10 );
+}
+
+/*
+==================
+R_WorldFree
+
+the world is unloaded: what was made of it goes too, the next one needs the memory
+==================
+*/
+void R_WorldFree( void )
+{
+	R_MeWorldFree();
+	R_PolysFree();
+	R_StaticWaterClear();
+
+	if( ws_alloc )
+		Mem_Free( ws_alloc );
+	ws_alloc = NULL;
+	ws_surfs = NULL;
+	ws_numsurfs = 0;
+
+	if( wn_alloc )
+		Mem_Free( wn_alloc );
+	wn_alloc = NULL;
+	wn_nodes = NULL;
+	wn_numnodes = wn_nummarks = 0;
+
+	if( bs_alloc )
+		Mem_Free( bs_alloc );
+	bs_alloc = NULL;
+	bs_surfs = NULL;
+	bs_first = bs_numsurfs = 0;
+
+	for( int i = 0; i < MAX_LIGHTMAPS && tr.lightmapTextures[i]; i++ )
+		GL_FreeTexture( tr.lightmapTextures[i] );
+	memset( tr.lightmapTextures, 0, sizeof( tr.lightmapTextures ));
+	lm_prebuilt = NULL;
+}
+#endif
+
 /*
 ==================
 GL_RebuildLightmaps
@@ -4648,6 +5058,11 @@ void GL_RebuildLightmaps( void )
 {
 	if( !ENGINE_GET_PARM( PARM_CLIENT_ACTIVE ) )
 		return; // wait for worldmodel
+
+#if XASH_PSP
+	if( lm_prebuilt && lm_prebuilt == WORLDMODEL )
+		return; // the light is gone
+#endif
 
 	// release old lightmaps
 	for( int i = 0; i < MAX_LIGHTMAPS; i++ )
@@ -4700,14 +5115,21 @@ void GL_BuildLightmaps( void )
 {
 	int	nColinElim = 0;
 
+#if XASH_PSP
+	// the first ones are the world's
+	const int prebuilt = lm_prebuilt && lm_prebuilt == WORLDMODEL ? lm_prebuiltpages : 0;
+#else
+	const int prebuilt = 0;
+#endif
+
 	// release old lightmaps
-	for( int i = 0; i < MAX_LIGHTMAPS; i++ )
+	for( int i = prebuilt; i < MAX_LIGHTMAPS; i++ )
 	{
 		if( !tr.lightmapTextures[i] ) break;
 		GL_FreeTexture( tr.lightmapTextures[i] );
+		tr.lightmapTextures[i] = 0;
 	}
 
-	memset( tr.lightmapTextures, 0, sizeof( tr.lightmapTextures ));
 	memset( &RI, 0, sizeof( RI ));
 
 	if( guRender.lightmap_vram )
@@ -4722,7 +5144,7 @@ void GL_BuildLightmaps( void )
 	skychain = NULL;
 
 	tr.framecount = tr.visframecount = 1;	// no dlight cache
-	gl_lms.current_lightmap_texture = 0;
+	gl_lms.current_lightmap_texture = prebuilt;
 	tr.modelviewIdentity = false;
 	tr.realframecount = 1;
 
@@ -4733,6 +5155,10 @@ void GL_BuildLightmaps( void )
 	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
 
 	LM_InitBlock();
+
+#if XASH_PSP
+	R_PolysBegin( WORLDMODEL );
+#endif
 
 	for( int i = 0; i < gp_cl->nummodels; i++ )
 	{
@@ -4753,6 +5179,14 @@ void GL_BuildLightmaps( void )
 
 			if( m->surfaces[j].flags & SURF_DRAWTURB )
 				continue;
+
+#if XASH_PSP
+			if( R_PolyIsLazy( m, m->surfaces + j ))
+			{
+				m->surfaces[j].polys = NULL;
+				continue;
+			}
+#endif
 
 			nColinElim += GL_BuildPolygonFromSurface( m, m->surfaces + j );
 		}

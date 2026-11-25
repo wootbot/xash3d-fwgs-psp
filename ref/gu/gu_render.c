@@ -24,6 +24,7 @@ CVAR_DEFINE_AUTO( gl_lightmap_nearest, "0", FCVAR_GLCONFIG, "disable lightmap fi
 CVAR_DEFINE_AUTO( gl_keeptjunctions, "1", FCVAR_GLCONFIG, "removing tjuncs causes blinking pixels" );
 CVAR_DEFINE_AUTO( gl_round_down, "1", FCVAR_GLCONFIG|FCVAR_READ_ONLY, "round texture sizes to nearest POT value" );
 CVAR_DEFINE_AUTO( gu_texture_maxsize, "256", FCVAR_ARCHIVE, "largest world, model and sprite texture (8 to 256), smaller ones fit in VRAM; applies to textures loaded afterwards" );
+CVAR_DEFINE_AUTO( gu_texture_mapsize, "256", 0, "largest texture of the map, set when it is loaded" );
 CVAR_DEFINE_AUTO( gu_texture_vram, "1", FCVAR_ARCHIVE, "0 keeps all textures in RAM (for comparisons); applies to textures loaded afterwards" );
 CVAR_DEFINE_AUTO( gl_wireframe, "0", FCVAR_GLCONFIG|FCVAR_SPONLY, "show wireframe overlay" );
 CVAR_DEFINE_AUTO( gl_depthoffset, "256.0", FCVAR_GLCONFIG, "depth offset for decals" );
@@ -368,6 +369,7 @@ static void GL_InitCommands( void )
 	gEngfuncs.Cvar_RegisterVariable( &gl_keeptjunctions );
 	gEngfuncs.Cvar_RegisterVariable( &gl_round_down );
 	gEngfuncs.Cvar_RegisterVariable( &gu_texture_maxsize );
+	gEngfuncs.Cvar_RegisterVariable( &gu_texture_mapsize );
 	gEngfuncs.Cvar_RegisterVariable( &gu_texture_vram );
 	gEngfuncs.Cvar_RegisterVariable( &gl_wireframe );
 	gEngfuncs.Cvar_RegisterVariable( &gl_depthoffset );

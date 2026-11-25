@@ -393,11 +393,18 @@ qboolean CL_RequestMissingResources( void )
 
 void CL_BatchResourceRequest( qboolean initialize )
 {
+#if XASH_PSP
+	// not on the stack: the map loads from here. Kept if it ends in a Host_Error
+	static byte *data;
+	if( !data )
+		data = Mem_Malloc( cls.mempool, MAX_INIT_MSG );
+#else
 	byte data[MAX_INIT_MSG];
+#endif
 	sizebuf_t msg;
 	qboolean done_downloading = true;
 
-	MSG_Init( &msg, "Resource Batch", data, sizeof( data ));
+	MSG_Init( &msg, "Resource Batch", data, MAX_INIT_MSG );
 
 	// client resources is not precached by server
 	if( initialize ) CL_AddClientResources();
@@ -475,6 +482,10 @@ void CL_BatchResourceRequest( qboolean initialize )
 		Netchan_CreateFragments( &cls.netchan, &msg );
 		Netchan_FragSend( &cls.netchan );
 	}
+#if XASH_PSP
+	Mem_Free( data );
+	data = NULL;
+#endif
 }
 
 int CL_EstimateNeededResources( void )

@@ -130,6 +130,78 @@ typedef struct world_static_s
 	int          litwater_minlight;
 } world_static_t;
 
+#if XASH_PSP
+/*
+=================
+Mod_PointInFace
+
+is the point on the face's plane inside its edges, as with the edge planes
+of mfacebevel_t
+=================
+*/
+static inline const float *Mod_FaceVertex( const model_t *mod, int surfedge )
+{
+	const int e = mod->surfedges[surfedge];
+
+	if( FBitSet( mod->flags, MODEL_QBSP2 ))
+		return mod->vertexes[e > 0 ? mod->edges32[e].v[0] : mod->edges32[-e].v[1]].position;
+	return mod->vertexes[e > 0 ? mod->edges16[e].v[0] : mod->edges16[-e].v[1]].position;
+}
+
+static inline qboolean Mod_PointInFace( const model_t *mod, const msurface_t *surf, const vec3_t p, float epsilon )
+{
+	const mextrasurf_t *info = surf->info;
+	vec3_t normal;
+
+	if( !surf->plane || surf->numedges < 3 )
+		return false; // bad surface
+
+	// what is outside the box grown by epsilon times sqrt( 3 ) is outside an edge plane too
+	// or so far behind a corner that it doesn't matter
+	const float grow = epsilon * 2.0f + 0.1f;
+	for( int i = 0; i < 3; i++ )
+	{
+		if( p[i] < info->mins[i] - grow || p[i] > info->maxs[i] + grow )
+			return false;
+	}
+
+	if( FBitSet( surf->flags, SURF_PLANEBACK ))
+		VectorNegate( surf->plane->normal, normal );
+	else VectorCopy( surf->plane->normal, normal );
+
+	const float *v0 = Mod_FaceVertex( mod, surf->firstedge );
+	const float *first = v0;
+
+	for( int i = 1; i <= surf->numedges; i++ )
+	{
+		const float *v1 = i == surf->numedges ? first : Mod_FaceVertex( mod, surf->firstedge + i );
+		vec3_t edge, out, delta;
+
+		VectorSubtract( v1, v0, edge );
+		CrossProduct( normal, edge, out );
+		VectorSubtract( p, v0, delta );
+
+		// the length of out isn't 1
+		const float d = DotProduct( out, delta );
+		if( d > 0.0f && d * d > epsilon * epsilon * DotProduct( out, out ))
+			return false;
+
+		v0 = v1;
+	}
+
+	return true;
+}
+#endif
+
+// read maps lump by lump instead of the whole file into memory
+#ifndef MOD_STREAM_BSP
+#if XASH_PSP
+#define MOD_STREAM_BSP 1
+#else
+#define MOD_STREAM_BSP 0
+#endif
+#endif
+
 #ifndef REF_DLL
 extern world_static_t world;
 extern poolhandle_t   com_studiocache;
@@ -160,6 +232,13 @@ qboolean Mod_ValidateCRC( const char *name, uint32_t crc );
 void Mod_NeedCRC( const char *name, qboolean needCRC );
 void Mod_FreeUnused( void );
 void Mod_LoadDetailTextures( model_t *mod );
+#if XASH_PSP
+void Mod_BeginPrecache( void );
+void Mod_EndPrecache( void );
+void Mod_LoadCold( void );
+qboolean Mod_Use( model_t *mod );
+void Mod_FreeUnlisted( qboolean (*listed)( const char *name ));
+#endif
 
 //
 // mod_alias.c
@@ -170,6 +249,9 @@ void Mod_LoadAliasModel( model_t *mod, const void *buffer, qboolean *loaded );
 // mod_bmodel.c
 //
 void Mod_LoadBrushModel( model_t *mod, void *buffer, size_t buffersize, qboolean *loaded );
+#if MOD_STREAM_BSP
+void Mod_LoadBrushModelFile( model_t *mod, file_t *f, size_t filesize, qboolean *loaded );
+#endif
 qboolean Mod_TestBmodelLumps( file_t *f, const char *name, byte *mod_base, size_t buffersize, qboolean silent, dlump_t *entities );
 int Mod_FatPVS( const vec3_t org, float radius, byte *visbuffer, int visbytes, qboolean merge, qboolean fullvis, qboolean phs );
 qboolean Mod_BoxVisible( const vec3_t mins, const vec3_t maxs, const byte *visbits );
@@ -181,6 +263,7 @@ int Mod_ReadLump( const char *filename, const int lump, void **lumpdata, int *lu
 int Mod_SaveLump( const char *filename, const int lump, void *lumpdata, int lumpsize );
 mleaf_t *Mod_PointInLeaf( const vec3_t p, mnode_t *node, model_t *mod );
 int Mod_SampleSizeForFace( const msurface_t *surf );
+int Mod_GetFaceContents( const char *name );
 byte *Mod_GetPVSForPoint( const vec3_t p );
 void Mod_PrintWorldStats_f( void );
 
@@ -200,6 +283,9 @@ void *R_StudioGetAnim( studiohdr_t *m_pStudioHeader, model_t *m_pSubModel, mstud
 void Mod_SwapStudioSeqGroupAnims( studiohdr_t *phdr, mstudioseqdesc_t *pseq, byte *buf );
 int Mod_HitgroupForStudioHull( int index );
 void Mod_ClearStudioCache( void );
+#if XASH_PSP
+void Mod_StudioHullBounds( void *buffer, vec3_t mins, vec3_t maxs );
+#endif
 
 //
 // mod_sprite.c

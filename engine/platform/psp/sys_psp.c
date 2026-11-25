@@ -553,6 +553,30 @@ static size_t PSP_LargestFreeBlock( void )
 
 /*
 ===========
+PSP_HeapFree
+
+all free blocks together, the part the arena hasn't grown to included
+===========
+*/
+static size_t psp_heap_size; // at startup
+
+size_t PSP_HeapFree( void )
+{
+	const size_t used = mallinfo().uordblks;
+
+	return psp_heap_size > used ? psp_heap_size - used : 0;
+}
+
+qboolean PSP_HeapHasBlock( size_t size )
+{
+	void *volatile p = malloc( size );
+
+	free( p );
+	return p != NULL;
+}
+
+/*
+===========
 PSP_PlayerModelFits
 
 players bring their own models: not over the memory the map needs
@@ -589,6 +613,7 @@ void PSP_PrintMemInfo( void )
 	PSP_VolatileInfo( &vused, &vblocks, &vtotal );
 	Con_Printf( "P5 RAM: %u KB in use in %d blocks (of %u KB)\n", (uint)( vused >> 10 ), vblocks, (uint)( vtotal >> 10 ));
 	Con_Printf( "VRAM: %s\n", psp_vram_status );
+	Con_Printf( "battery: %d%%, %d mV, %s\n", scePowerGetBatteryLifePercent(), scePowerGetBatteryVolt(), scePowerIsPowerOnline() ? "plugged in" : "not plugged in" );
 }
 
 void PSP_RegisterCommands( void )
@@ -609,6 +634,8 @@ void PSP_Init( void )
 		freopen( "stdout.log", "w", stdout );
 
 	PSP_SetupCallbacks();
+
+	psp_heap_size = mallinfo().uordblks + PSP_LargestFreeBlock();
 
 	// compare XMB and PSPLink launches, they don't get the same memory
 	PSP_WatchdogLog( true, "start: heap %u KB free (largest malloc), kernel %u KB free (largest block %u KB)\n",

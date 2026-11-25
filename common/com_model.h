@@ -74,7 +74,9 @@ typedef struct medge32_s
 typedef struct medge16_s
 {
 	unsigned short	v[2];
+#if !XASH_PSP
 	unsigned int	cachededgeoffset;
+#endif
 } medge16_t;
 
 typedef struct texture_s
@@ -220,6 +222,27 @@ typedef struct mleaf_s
 } mleaf_t;
 
 // surface extradata
+#if XASH_PSP
+// only what the engine and ref_gu use: big maps have 30000 of them
+typedef struct mextrasurf_s
+{
+	vec3_t		mins, maxs;
+	struct msurface_s	*surf;		// upcast to surface
+
+	short		dlight_s, dlight_t;	// gl lightmap coordinates for dynamic lightmaps
+
+	short		lightmapmins[2];	// lightmatrix
+	short		lightextents[2];
+	float		(*lmvecs)[4];	// texinfo->vecs, or its own for TEX_WORLD_LUXELS
+
+	color24		*deluxemap;	// note: this is the actual deluxemap data for this surface
+	byte		*shadowmap;	// note: occlusion map for this surface
+
+	struct msurface_s	*lightmapchain;	// lightmapped polys
+	struct mextrasurf_s	*detailchain;	// for detail textures drawing
+	struct mextrasurf_s	*lumachain;	// draw fullbrights
+} mextrasurf_t;
+#else
 typedef struct mextrasurf_s
 {
 	vec3_t		mins, maxs;
@@ -252,6 +275,7 @@ typedef struct mextrasurf_s
 
 	intptr_t	reserved[32];	// just for future expansions or mod-makers
 } mextrasurf_t;
+#endif
 
 #ifdef SUPPORT_HL25_EXTENDED_STRUCTS
 // additional struct at the end of msurface_t for HL25 compatibility
@@ -583,7 +607,11 @@ typedef struct
 #define MAX_REQUESTS	64
 
 STATIC_CHECK_SIZEOF( mnode_t, 52, 72 );
+#if XASH_PSP
+STATIC_CHECK_SIZEOF( mextrasurf_t, 64, 64 );
+#else
 STATIC_CHECK_SIZEOF( mextrasurf_t, 324, 496 );
+#endif
 STATIC_CHECK_SIZEOF( decal_t, 60, 88 );
 STATIC_CHECK_SIZEOF( mfaceinfo_t, 176, 304 );
 

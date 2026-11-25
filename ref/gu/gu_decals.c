@@ -438,6 +438,15 @@ static float *R_DecalVertsClip( decal_t *pDecal, msurface_t *surf, int texture, 
 	float	decalWorldScale[2];
 	vec3_t	textureSpaceBasis[3];
 
+#if XASH_PSP
+	// it's built on demand, see R_PolysForPVS
+	if( !R_SurfPoly( surf ))
+	{
+		*pVertCount = 0;
+		return g_DecalClipVerts[0];
+	}
+#endif
+
 	// figure out where the decal maps onto the surface.
 	R_SetupDecalClip( pDecal, surf, texture, textureSpaceBasis, decalWorldScale );
 

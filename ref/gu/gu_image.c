@@ -154,7 +154,10 @@ uint *GL_BindCommands( const gl_texture_t *texture, uint *p )
 	// Set mip textures
 	if( texture->numMips > 1 )
 	{
-		int offset = texture->width * GL_TextureRows( texture, 0 ) * texture->bpp;
+		const qboolean dxt = texture->format == GU_PSM_DXT1; // half a byte a pixel
+		int offset = texture->width * GL_TextureRows( texture, 0 );
+
+		offset = dxt ? offset >> 1 : offset * texture->bpp;
 
 		for( int i = 1; i < texture->numMips; i++ )
 		{
@@ -162,7 +165,9 @@ uint *GL_BindCommands( const gl_texture_t *texture, uint *p )
 			const int height = Q_max( TEXTURE_SIZE_MIN, ( texture->height >> i ));
 
 			p = GL_TexImageCommands( p, i, width, height, width, &texture->dstTexture[offset] );
-			offset += width * GL_TextureRows( texture, i ) * texture->bpp;
+
+			const int pixels = width * GL_TextureRows( texture, i );
+			offset += dxt ? pixels >> 1 : pixels * texture->bpp;
 		}
 	}
 
@@ -408,6 +413,8 @@ static byte *GL_AllocTextureData( gl_texture_t *tex, size_t size )
 	return data;
 }
 
+int gl_modelTextureSize; // largest texture of the model being loaded, 0: no limit of its own
+
 /*
 ================
 GL_SetTextureDimensions
@@ -439,7 +446,17 @@ static void GL_SetTextureDimensions( gl_texture_t *tex, int width, int height )
 	height = scaled_height;
 
 	if( GL_IsSceneTexture( tex ))
+	{
 		maxTextureSize = bound( TEXTURE_SIZE_MIN, (int)gu_texture_maxsize.value, maxTextureSize );
+
+		// the world's, see Mod_LimitTextureSize
+		if( Q_stristr( tex->name, ".mip" ))
+			maxTextureSize = Q_min( maxTextureSize, Q_max( TEXTURE_SIZE_MIN, (int)gu_texture_mapsize.value ));
+		else if( gu_texture_mapsize.value < 256.0f && Q_stristr( tex->name, ".spr" ))
+			maxTextureSize = Q_min( maxTextureSize, 64 ); // the frames of big sprites take megabytes
+		else if( gl_modelTextureSize > 0 && Q_stristr( tex->name, ".mdl" ))
+			maxTextureSize = Q_min( maxTextureSize, gl_modelTextureSize );
+	}
 	else if( !Q_strncmp( tex->name, "#atlas/", 7 ))
 		maxTextureSize = 512; // studio texture atlases (R_StudioBuildAtlas), the GE's limit
 
@@ -1010,6 +1027,194 @@ static qboolean GL_QuantizeTexture( gl_texture_t *tex, int type, const byte *src
 }
 
 /*
+=============================================================
+
+DXT1
+
+The textures of a map that has too many (gu_texture_mapsize) are compressed to 4
+bits a pixel, without a palette, if they have no alpha. The GE's blocks have the
+indices first.
+
+=============================================================
+*/
+static qboolean GL_ShouldCompress( const gl_texture_t *tex, const rgbdata_t *pic )
+{
+	return gu_texture_mapsize.value < 256.0f && ImageIND( pic->type ) && pic->buffer && pic->palette
+		&& !FBitSet( pic->flags, IMAGE_HAS_ALPHA ) && !FBitSet( tex->flags, TF_KEEP_SOURCE|TF_EXPAND_SOURCE|TF_NOMIPMAP )
+		&& tex->width >= 16 && tex->height >= 16 && Q_stristr( tex->name, ".mip" );
+}
+
+static uint GL_Pack565( const int c[3] )
+{
+	return ( c[0] >> 3 ) << 11 | ( c[1] >> 2 ) << 5 | c[2] >> 3;
+}
+
+// one 4x4 block of RGB, the extremes of its bounding box as end points
+static void GL_CompressBlock( const byte *rgb, int stride, byte *out )
+{
+	int lo[3] = { 255, 255, 255 }, hi[3] = { 0, 0, 0 }, mean[3] = { 8, 8, 8 };
+	int covr = 0, covb = 0;
+
+	for( int y = 0; y < 4; y++ )
+	{
+		for( int x = 0; x < 4; x++ )
+		{
+			const byte *p = rgb + y * stride + x * 3;
+
+			for( int i = 0; i < 3; i++ )
+			{
+				lo[i] = Q_min( lo[i], p[i] );
+				hi[i] = Q_max( hi[i], p[i] );
+				mean[i] += p[i];
+			}
+		}
+	}
+
+	// which diagonal of the box
+	for( int y = 0; y < 4; y++ )
+	{
+		for( int x = 0; x < 4; x++ )
+		{
+			const byte *p = rgb + y * stride + x * 3;
+			const int g = p[1] - ( mean[1] >> 4 );
+
+			covr += ( p[0] - ( mean[0] >> 4 )) * g;
+			covb += ( p[2] - ( mean[2] >> 4 )) * g;
+		}
+	}
+
+	for( int i = 0; i < 3; i++ )
+	{
+		const int inset = ( hi[i] - lo[i] ) >> 4;
+
+		lo[i] += inset;
+		hi[i] -= inset;
+	}
+	if( covr < 0 ) { const int t = lo[0]; lo[0] = hi[0]; hi[0] = t; }
+	if( covb < 0 ) { const int t = lo[2]; lo[2] = hi[2]; hi[2] = t; }
+
+	uint c0 = GL_Pack565( hi ), c1 = GL_Pack565( lo );
+	uint bits = 0;
+
+	// the first one is the larger, or index 3 is transparent
+	if( c0 < c1 )
+	{
+		const uint t = c0;
+
+		c0 = c1;
+		c1 = t;
+		for( int i = 0; i < 3; i++ )
+		{
+			const int k = lo[i];
+			lo[i] = hi[i];
+			hi[i] = k;
+		}
+	}
+
+	if( c0 != c1 )
+	{
+		const int d[3] = { hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2] };
+		const int len = DotProduct( d, d );
+		const float scale = len > 0 ? 3.0f / len : 0.0f;
+
+		for( int i = 15; i >= 0; i-- )
+		{
+			static const byte index[4] = { 1, 3, 2, 0 }; // lo to hi
+			const byte *p = rgb + ( i >> 2 ) * stride + ( i & 3 ) * 3;
+			const int t = (( p[0] - lo[0] ) * d[0] + ( p[1] - lo[1] ) * d[1] + ( p[2] - lo[2] ) * d[2] ) * scale + 0.5f;
+
+			bits = bits << 2 | index[bound( 0, t, 3 )];
+		}
+	}
+
+	out[0] = bits;
+	out[1] = bits >> 8;
+	out[2] = bits >> 16;
+	out[3] = bits >> 24;
+	out[4] = c0;
+	out[5] = c0 >> 8;
+	out[6] = c1;
+	out[7] = c1 >> 8;
+}
+
+static qboolean GL_CompressTexture( gl_texture_t *tex, const rgbdata_t *pic )
+{
+	byte rgba[256 * 4];
+	int w = tex->width, h = tex->height;
+	byte *rgb = GL_TempAlloc( w * h * 3 );
+	byte *out = tex->dstTexture;
+
+	if( !rgb )
+		return false;
+
+	GL_PixelConverter( rgba, pic->palette, 256, PC_SWF( pic->type ), PC_SWF( PF_RGBA_32 ));
+
+	// the average of the pixels it covers, at most 4x4 of them
+	for( int y = 0; y < h; y++ )
+	{
+		const int y0 = y * pic->height / h, y1 = Q_max( y0 + 1, ( y + 1 ) * pic->height / h );
+
+		for( int x = 0; x < w; x++ )
+		{
+			const int x0 = x * pic->width / w, x1 = Q_max( x0 + 1, ( x + 1 ) * pic->width / w );
+			const int sy = ( y1 - y0 + 3 ) >> 2, sx = ( x1 - x0 + 3 ) >> 2;
+			int sum[3] = { 0, 0, 0 }, n = 0;
+
+			for( int v = y0; v < y1; v += sy )
+			{
+				for( int u = x0; u < x1; u += sx, n++ )
+				{
+					const byte *c = &rgba[pic->buffer[v * pic->width + u] * 4];
+
+					sum[0] += c[0];
+					sum[1] += c[1];
+					sum[2] += c[2];
+				}
+			}
+
+			byte *p = rgb + ( y * w + x ) * 3;
+			p[0] = sum[0] / n;
+			p[1] = sum[1] / n;
+			p[2] = sum[2] / n;
+		}
+	}
+
+	for( int i = 0; i < tex->numMips; i++ )
+	{
+		for( int y = 0; y < h; y += 4 )
+		{
+			for( int x = 0; x < w; x += 4, out += 8 )
+				GL_CompressBlock( rgb + ( y * w + x ) * 3, w * 3, out );
+		}
+
+		// the next level, in place
+		const int nw = Q_max( TEXTURE_SIZE_MIN, tex->width >> ( i + 1 )), nh = Q_max( TEXTURE_SIZE_MIN, tex->height >> ( i + 1 ));
+		const int sx = w / nw, sy = h / nh;
+
+		for( int y = 0; y < nh; y++ )
+		{
+			for( int x = 0; x < nw; x++ )
+			{
+				const byte *a = rgb + ( y * sy * w + x * sx ) * 3;
+				const byte *b = a + ( sx - 1 ) * 3, *c = a + ( sy - 1 ) * w * 3, *d = c + ( sx - 1 ) * 3;
+				byte *p = rgb + ( y * nw + x ) * 3;
+				const int r = ( a[0] + b[0] + c[0] + d[0] + 2 ) >> 2;
+				const int g = ( a[1] + b[1] + c[1] + d[1] + 2 ) >> 2;
+
+				p[2] = ( a[2] + b[2] + c[2] + d[2] + 2 ) >> 2;
+				p[0] = r;
+				p[1] = g;
+			}
+		}
+		w = nw;
+		h = nh;
+	}
+
+	GL_TempFree( rgb );
+	return true;
+}
+
+/*
 ===============
 GL_UploadTexture
 
@@ -1041,6 +1246,9 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	if( tex->format == GU_PSM_4444 && pic->buffer && !IsLightMap( tex ) && GL_SingleColorAlpha( pic, alphaColor ))
 		tex->format = GU_PSM_T4;
 
+	if( GL_ShouldCompress( tex, pic ))
+		tex->format = GU_PSM_DXT1;
+
 	tex->fogParams[0] = pic->fogParams[0];
 	tex->fogParams[1] = pic->fogParams[1];
 	tex->fogParams[2] = pic->fogParams[2];
@@ -1061,7 +1269,7 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	normalMap = FBitSet( tex->flags, TF_NORMALMAP ) ? true : false;
 	tex->numMips = ImageIND( pic->type ) ? GL_CalcMipmapCount( tex, ( pic->buffer != NULL ), &texSize ) : 1;
 	// swizzling works on 16 byte x 8 row blocks
-	swizzle = !IsLightMap( tex ) && ( GL_CalcTextureSize( tex->format, tex->width, 1, NULL ) % 16 ) == 0 && ( tex->height % 8 ) == 0;
+	swizzle = !IsLightMap( tex ) && tex->format != GU_PSM_DXT1 && ( GL_CalcTextureSize( tex->format, tex->width, 1, NULL ) % 16 ) == 0 && ( tex->height % 8 ) == 0;
 	mipOffset = 0;
 
 	// a part of an atlas page (GL_AliasTexture) gets its own memory again
@@ -1100,6 +1308,11 @@ static qboolean GL_UploadTexture( gl_texture_t *tex, rgbdata_t *pic )
 	if( ImageCompressed( pic->type ) )
 	{
 		memcpy( tex->dstTexture, pic->buffer, texSize );
+	}
+	else if( tex->format == GU_PSM_DXT1 )
+	{
+		if( !GL_CompressTexture( tex, pic ))
+			gEngfuncs.Host_Error( "GL_UploadTexture: temporary memory error\n" );
 	}
 	else if( ImageIND( pic->type ) || pic->type == PF_RGB_332 )
 	{

@@ -129,6 +129,120 @@ static wavdata_t *S_ProcessSound( wavdata_t *sc )
 	return sc;
 }
 
+#if XASH_PSP
+/*
+=============================================================================
+
+the heap may be almost full in a big map: sounds leave S_RESERVE of it alone, the
+ones nobody hears go first. A sound that doesn't fit is tried again later, not every
+time it's played.
+
+=============================================================================
+*/
+#define S_RESERVE		( 2 * 1024 * 1024 )
+#define S_DENY_TIME		5.0f
+#define S_MAX_DENIED	16
+
+static struct
+{
+	const sfx_t	*sfx;
+	double	time;
+} s_denied[S_MAX_DENIED];
+static uint s_numdenied;
+
+static qboolean S_IsDenied( const sfx_t *sfx )
+{
+	for( int i = 0; i < S_MAX_DENIED; i++ )
+	{
+		if( s_denied[i].sfx == sfx && s_denied[i].time > host.realtime && s_denied[i].time < host.realtime + S_DENY_TIME * 2 )
+			return true;
+	}
+
+	return false;
+}
+
+static void S_Deny( const sfx_t *sfx )
+{
+	Con_Reportf( "%s: no memory for now\n", sfx->name );
+	s_denied[s_numdenied % S_MAX_DENIED].sfx = sfx;
+	s_denied[s_numdenied % S_MAX_DENIED].time = host.realtime + S_DENY_TIME;
+	s_numdenied++;
+}
+
+// is it played? Not the ambient ones that are too far away to be heard
+static qboolean S_SoundUsed( const sfx_t *sfx )
+{
+	for( int i = 0; i < snd.total_channels; i++ )
+	{
+		const channel_t *ch = &snd.channels[i];
+
+		if( ch->words )
+		{
+			for( const voxword_t *word = ch->words; word->sfx; word++ )
+			{
+				if( word->sfx == sfx )
+					return true;
+			}
+		}
+
+		if( ch->sfx == sfx && ( ch->words || ch->entchannel != CHAN_STATIC || ch->leftvol >= 8 || ch->rightvol >= 8 ))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+=================
+S_FreeIdleSound
+
+the largest sound that isn't played, false if there is none
+=================
+*/
+qboolean S_FreeIdleSound( void )
+{
+	sfx_t *best = NULL;
+
+	for( int i = 1; i < s_numSfx; i++ )
+	{
+		sfx_t *sfx = S_KnownSfx( i );
+
+		if( !sfx->cache || !sfx->name[0] || ( best && sfx->cache->size <= best->cache->size ) || S_SoundUsed( sfx ))
+			continue;
+		best = sfx;
+	}
+
+	if( !best )
+		return false;
+
+	Con_Reportf( "%s: freed, %s\n", best->name, Q_memprint( best->cache->size ));
+	S_PaintSync(); // the Media Engine may be mixing it
+	FS_FreeSound( best->cache );
+	best->cache = NULL;
+
+	for( int i = 0; i < snd.total_channels; i++ )
+	{
+		channel_t *ch = &snd.channels[i];
+
+		if( ch->sfx == best )
+			SetBits( ch->flags, FL_CHAN_PENDING ); // see S_MixNormalChannelsToRoombuffer
+	}
+
+	return true;
+}
+
+static qboolean S_MakeRoom( size_t size )
+{
+	while( PSP_HeapFree() < size + S_RESERVE || !PSP_HeapHasBlock( size + 4096 ))
+	{
+		if( !S_FreeIdleSound( ))
+			return false;
+	}
+
+	return true;
+}
+#endif
+
 /*
 =================
 S_LoadSound
@@ -146,6 +260,21 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 
 	if( COM_StringEmptyOrNULL( sfx->name ))
 		return NULL;
+
+#if XASH_PSP
+	if( cls.state == ca_active && Q_stricmp( sfx->name, "*default" ))
+	{
+		if( S_IsDenied( sfx ))
+			return NULL;
+
+		// its size isn't known yet
+		if( !S_MakeRoom( 128 * 1024 ))
+		{
+			S_Deny( sfx );
+			return NULL;
+		}
+	}
+#endif
 
 	// load it from disk
 	if( Q_stricmp( sfx->name, "*default" ))
@@ -166,7 +295,10 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 			sc = FS_LoadSound( sfx->name, NULL, 0 );
 #if XASH_PSP
 		if( Mem_SetSoftFail( false ) && !sc )
+		{
+			S_Deny( sfx );
 			return NULL;
+		}
 #endif
 	}
 
@@ -226,6 +358,9 @@ qboolean S_RequestSound( sfx_t *sfx )
 
 	if( S_SoundPending( sfx ))
 		return true;
+
+	if( S_IsDenied( sfx ))
+		return false;
 
 	if( !s_async.value || cls.state != ca_active || s_registering
 		|| s_loadq.tail - s_loadq.head >= S_LOAD_QUEUE || COM_StringEmpty( sfx->name ) || sfx->name[0] == '!' || !Q_stricmp( sfx->name, "*default" ))
@@ -303,8 +438,14 @@ void S_LoadThink( void )
 		return;
 	case PSP_AIO_OPEN:
 		Mem_SetSoftFail( true );
+		// the file in P5 RAM, if it fits there
 		if( wanted && PSP_AioSize() > 0 )
-			s_loadq.buffer = Mem_Malloc( sndpool, PSP_AioSize() + 128 );
+		{
+			if( S_MakeRoom( PSP_AioSize( )))
+				s_loadq.buffer = Mem_Malloc( host.volatilepool, PSP_AioSize() + 128 );
+			if( !s_loadq.buffer )
+				S_Deny( sfx );
+		}
 		Mem_SetSoftFail( false );
 
 		if( s_loadq.buffer )
@@ -324,6 +465,7 @@ void S_LoadThink( void )
 			sc = FS_LoadSound( name, S_LOAD_ALIGNED( s_loadq.buffer ), PSP_AioSize( ));
 			if( !Mem_SetSoftFail( false ) || sc )
 				sfx->cache = S_ProcessSound( sc ? sc : S_CreateDefaultSound( ));
+			else S_Deny( sfx );
 		}
 		break;
 	case PSP_AIO_FAILED:

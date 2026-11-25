@@ -16,6 +16,7 @@ GNU General Public License for more details.
 #include "common.h"
 #include "xash3d_mathlib.h"
 #include "pm_local.h"
+#include "mod_local.h"
 #include "ref_common.h"
 
 #undef FRAC_EPSILON
@@ -27,6 +28,30 @@ typedef struct
 	int		contents;
 	msurface_t	*surface;
 } linetrace_t;
+
+static qboolean PM_PointInFace( const model_t *mod, const msurface_t *surf, const vec3_t mid )
+{
+#if XASH_PSP
+	return Mod_PointInFace( mod, surf, mid, FRAC_EPSILON );
+#else
+	const mfacebevel_t *fb = surf->info->bevel;
+	vec3_t delta;
+
+	if( !fb ) return false; // ???
+
+	VectorSubtract( mid, fb->origin, delta );
+	if( DotProduct( delta, delta ) >= fb->radius )
+		return false; // no intersection
+
+	for( int j = 0; j < fb->numedges; j++ )
+	{
+		if( PlaneDiff( mid, &fb->edges[j] ) > FRAC_EPSILON )
+			return false; // outside the bounds
+	}
+
+	return true;
+#endif
+}
 
 /*
 ==============
@@ -51,13 +76,20 @@ fence texture testing
 */
 static int PM_SampleMiptex( const msurface_t *surf, const vec3_t point )
 {
-	mextrasurf_t	*info = surf->info;
-	mfacebevel_t	*fb = info->bevel;
 	int		contents;
 
 	// fill the default contents
+#if XASH_PSP
+	if( surf->texinfo && surf->texinfo->texture )
+		contents = Mod_GetFaceContents( surf->texinfo->texture->name );
+	else contents = CONTENTS_SOLID;
+#else
+	mextrasurf_t	*info = surf->info;
+	mfacebevel_t	*fb = info->bevel;
+
 	if( fb ) contents = fb->contents;
 	else contents = CONTENTS_SOLID;
+#endif
 
 	if( !surf->texinfo || !surf->texinfo->texture )
 		return contents;
@@ -139,24 +171,8 @@ loc0:
 	for( int i = 0; i < numsurfaces; i++ )
 	{
 		msurface_t	*surf = &mod->surfaces[firstsurface + i];
-		mextrasurf_t	*info = surf->info;
-		mfacebevel_t	*fb = info->bevel;
-		vec3_t		delta;
 
-		if( !fb ) continue;	// ???
-
-		VectorSubtract( mid, fb->origin, delta );
-		if( DotProduct( delta, delta ) >= fb->radius )
-			continue;	// no intersection
-
-		int j;
-		for( j = 0; j < fb->numedges; j++ )
-		{
-			if( PlaneDiff( mid, &fb->edges[j] ) > FRAC_EPSILON )
-				break; // outside the bounds
-		}
-
-		if( j != fb->numedges )
+		if( !PM_PointInFace( mod, surf, mid ))
 			continue; // we are outside the bounds of the facet
 
 		// hit the surface
@@ -266,24 +282,8 @@ loc0:
 	for( int i = 0; i < numsurfaces; i++ )
 	{
 		msurface_t	*surf = &mod->surfaces[firstsurface + i];
-		mextrasurf_t	*info = surf->info;
-		mfacebevel_t	*fb = info->bevel;
-		vec3_t		delta;
 
-		if( !fb ) continue;
-
-		VectorSubtract( mid, fb->origin, delta );
-		if( DotProduct( delta, delta ) >= fb->radius )
-			continue;	// no intersection
-
-		int j;
-		for( j = 0; j < fb->numedges; j++ )
-		{
-			if( PlaneDiff( mid, &fb->edges[j] ) > FRAC_EPSILON )
-				break; // outside the bounds
-		}
-
-		if( j != fb->numedges )
+		if( !PM_PointInFace( mod, surf, mid ))
 			continue; // we are outside the bounds of the facet
 
 		// hit the surface

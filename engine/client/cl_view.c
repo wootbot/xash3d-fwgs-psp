@@ -101,6 +101,10 @@ static void V_SetupViewModel( void )
 	view->curstate.number = cl.playernum + 1;
 	view->index = cl.playernum + 1;
 	view->model = CL_ModelHandle( cl.local.viewmodel );
+#if XASH_PSP
+	if( !Mod_Use( view->model ))
+		view->model = NULL;
+#endif
 	view->curstate.modelindex = cl.local.viewmodel;
 	view->curstate.sequence = cl.local.weaponsequence;
 	view->curstate.rendermode = kRenderNormal;

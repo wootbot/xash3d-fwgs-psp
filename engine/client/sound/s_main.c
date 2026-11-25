@@ -928,6 +928,30 @@ void S_AmbientSound( const vec3_t pos, int ent, sound_t handle, float fvol, floa
 
 	CL_GetEntitySpatialization( ch );
 
+#if XASH_PSP
+	qboolean unheard = false;
+
+	// the ones in other places load when they are heard, a map has megabytes of them
+	if( !sfx->cache && cls.state == ca_active && !FBitSet( flags, SND_STOP_LOOPING ) && !S_TestSoundChar( sfx->name, '!' ))
+	{
+		ch->sfx = sfx;
+		ch->master_vol = vol;
+		ch->dist_mult = (attn / SND_CLIP_DISTANCE);
+		ch->entchannel = CHAN_STATIC;
+		ch->basePitch = pitch;
+		if( ent == 0 ) SetBits( ch->flags, FL_CHAN_STATIC_SOUND );
+		else ClearBits( ch->flags, FL_CHAN_STATIC_SOUND );
+		SND_Spatialize( ch );
+		unheard = ch->leftvol < 8 && ch->rightvol < 8;
+	}
+
+	if( unheard )
+	{
+		ch->name[0] = '\0';
+		SetBits( ch->flags, FL_CHAN_PENDING );
+	}
+	else
+#endif
 	if( S_TestSoundChar( sfx->name, '!' ))
 	{
 		// this is a sentence. link words to play in sequence.
@@ -949,6 +973,16 @@ void S_AmbientSound( const vec3_t pos, int ent, sound_t handle, float fvol, floa
 		ch->name[0] = '\0';
 	}
 
+#if XASH_PSP
+	// no memory for it now
+	if( !pSource && !unheard && sfx && !S_SoundPending( sfx ) && !FBitSet( flags, SND_STOP_LOOPING ) && !ch->words && sfx->name[0] != '!' )
+	{
+		unheard = true;
+		SetBits( ch->flags, FL_CHAN_PENDING );
+	}
+
+	if( !unheard )
+#endif
 	if( !pSource && !S_SoundPending( sfx ))
 	{
 		S_FreeChannel( ch );

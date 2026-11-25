@@ -39,6 +39,14 @@ GNU General Public License for more details.
 #define MOD_STRICT_ALIGNMENT 0
 #endif
 
+#if MOD_STREAM_BSP
+#define MAX_STREAMED_LUMPS	32
+
+// the map being loaded: its lumps are read one at a time, when they are needed
+static file_t      *mod_bspfile;
+static fs_offset_t mod_bspfilesize;
+#endif
+
 typedef struct leaflist_s
 {
 	int      count;
@@ -150,6 +158,19 @@ typedef struct
 #if MOD_STRICT_ALIGNMENT
 	byte      *aligned_lumps[32]; // aligned copies of misaligned lumps
 	int       num_aligned_lumps;
+#endif
+
+#if MOD_STREAM_BSP
+	struct
+	{
+		size_t dataofs;       // of the pointer in this struct
+		int    fileofs, filelen;
+		byte   *data;         // while it's in memory
+	} lumps[MAX_STREAMED_LUMPS];
+	int       numlumps;
+
+	byte      *miptex;            // the texture being loaded, see Mod_GetMipTexForTexture
+	int       miptex_index;
 #endif
 
 } dbspmodel_t;
@@ -615,6 +636,170 @@ const mclipnode32_t box_clipnodes32[6] = { BOX_CLIPNODES_INITIALIZER };
 ===============================================================================
 */
 
+#if MOD_STREAM_BSP
+/*
+=================
+the map file is read lump by lump (MOD_STREAM_BSP): Mod_LoadLump only notes where
+a lump is, Mod_FetchLump loads it for the one that needs it and Mod_DropLump frees
+it again. Big maps are mostly textures, they are read one at a time.
+=================
+*/
+static size_t Mod_StreamRead( void *out, fs_offset_t ofs, size_t size )
+{
+	size_t len = 0;
+
+	// truncated files and bad offsets: zeros
+	if( ofs >= 0 && ofs < mod_bspfilesize )
+	{
+		const size_t left = Q_min( size, (size_t)( mod_bspfilesize - ofs ));
+		const fs_offset_t done = FS_Seek( mod_bspfile, ofs, SEEK_SET ) < 0 ? 0 : FS_Read( mod_bspfile, out, left );
+
+		len = Q_max( 0, done );
+	}
+
+	if( len < size )
+		memset( (byte *)out + len, 0, size - len );
+
+	return len;
+}
+
+static int Mod_FindStreamedLump( const dbspmodel_t *bmod, size_t dataofs )
+{
+	for( int i = 0; i < bmod->numlumps; i++ )
+	{
+		if( bmod->lumps[i].dataofs == dataofs )
+			return i;
+	}
+
+	return -1;
+}
+
+static void Mod_FetchLumpByOfs( dbspmodel_t *bmod, size_t dataofs )
+{
+	const int i = Mod_FindStreamedLump( bmod, dataofs );
+
+	if( i < 0 || bmod->lumps[i].data )
+		return;
+
+	bmod->lumps[i].data = Mem_Malloc( host.volatilepool, bmod->lumps[i].filelen );
+	Mod_StreamRead( bmod->lumps[i].data, bmod->lumps[i].fileofs, bmod->lumps[i].filelen );
+	*(byte **)((byte *)bmod + dataofs) = bmod->lumps[i].data;
+}
+
+static void Mod_DropLumpByOfs( dbspmodel_t *bmod, size_t dataofs )
+{
+	const int i = Mod_FindStreamedLump( bmod, dataofs );
+
+	if( i < 0 || !bmod->lumps[i].data )
+		return;
+
+	Mem_Free( bmod->lumps[i].data );
+	bmod->lumps[i].data = NULL;
+	*(byte **)((byte *)bmod + dataofs) = NULL;
+}
+
+// for the lumps that are kept as they are
+static void Mod_CopyLumpByOfs( dbspmodel_t *bmod, size_t dataofs, void *out, size_t size )
+{
+	const int i = Mod_FindStreamedLump( bmod, dataofs );
+	const byte *data = *(byte **)((byte *)bmod + dataofs);
+
+	if( i >= 0 && !data )
+		Mod_StreamRead( out, bmod->lumps[i].fileofs, size );
+	else if( data )
+		memcpy( out, data, size );
+}
+
+static qboolean Mod_HasLumpByOfs( const dbspmodel_t *bmod, size_t dataofs )
+{
+	return *(byte **)((byte *)bmod + dataofs) != NULL || Mod_FindStreamedLump( bmod, dataofs ) >= 0;
+}
+
+#define Mod_FetchLump( bmod, field )           Mod_FetchLumpByOfs( bmod, offsetof( dbspmodel_t, field ))
+#define Mod_DropLump( bmod, field )            Mod_DropLumpByOfs( bmod, offsetof( dbspmodel_t, field ))
+#define Mod_CopyLump( bmod, field, out, size ) Mod_CopyLumpByOfs( bmod, offsetof( dbspmodel_t, field ), out, size )
+#define Mod_HasLump( bmod, field )             Mod_HasLumpByOfs( bmod, offsetof( dbspmodel_t, field ))
+
+// only the directory of the textures lump is in memory
+static void Mod_FetchTextureLump( dbspmodel_t *bmod )
+{
+	const int i = Mod_FindStreamedLump( bmod, offsetof( dbspmodel_t, textures ));
+	int count;
+
+	if( i < 0 || bmod->lumps[i].filelen < sizeof( count ))
+		return;
+
+	Mod_StreamRead( &count, bmod->lumps[i].fileofs, sizeof( count ));
+	count = bound( 0, LittleLong( count ), ( bmod->lumps[i].filelen - (int)sizeof( count )) / (int)sizeof( int ));
+
+	const size_t size = Q_max( sizeof( dmiptexlump_t ), sizeof( int ) * ( count + 1 ));
+
+	bmod->lumps[i].data = Mem_Malloc( host.volatilepool, size );
+	Mod_StreamRead( bmod->lumps[i].data, bmod->lumps[i].fileofs, size );
+	*(int *)bmod->lumps[i].data = LittleLong( count );
+	bmod->textures = (dmiptexlump_t *)bmod->lumps[i].data;
+	bmod->miptex_index = -1;
+}
+
+// a part of the textures lump
+static void Mod_CopyLumpPart( dbspmodel_t *bmod, int ofs, void *out, size_t size )
+{
+	const int i = Mod_FindStreamedLump( bmod, offsetof( dbspmodel_t, textures ));
+
+	if( mod_bspfile && i >= 0 )
+		Mod_StreamRead( out, bmod->lumps[i].fileofs + ofs, size );
+	else memcpy( out, (byte *)bmod->textures + ofs, size );
+}
+
+static void Mod_DropMipTex( dbspmodel_t *bmod )
+{
+	if( bmod->miptex )
+		Mem_Free( bmod->miptex );
+	bmod->miptex = NULL;
+	bmod->miptex_index = -1;
+}
+
+static const byte *Mod_StreamMipTex( dbspmodel_t *bmod, int i, mip_t *out )
+{
+	if( bmod->miptex_index != i || !bmod->miptex )
+	{
+		const int lump = Mod_FindStreamedLump( bmod, offsetof( dbspmodel_t, textures ));
+		const int ofs = bmod->textures->dataofs[i];
+		const fs_offset_t left = (fs_offset_t)bmod->texdatasize - ofs;
+		mip_t mip;
+
+		Mod_DropMipTex( bmod );
+
+		if( ofs < 0 || left < (fs_offset_t)sizeof( mip ))
+			return NULL;
+
+		Mod_StreamRead( &mip, bmod->lumps[lump].fileofs + ofs, sizeof( mip ));
+
+		// with its palette, if there is one
+		uint64_t size = sizeof( mip );
+		if( mip.offsets[0] > 0 )
+		{
+			size += ((uint64_t)mip.width * mip.height * 85 ) >> 6;
+			size = Q_max( size, (uint64_t)mip.offsets[0] );
+			size += MIPTEX_CUSTOM_PALETTE_SIZE_BYTES;
+			size = Q_min( size, (uint64_t)left );
+		}
+
+		bmod->miptex = Mem_Malloc( host.volatilepool, size );
+		Mod_StreamRead( bmod->miptex, bmod->lumps[lump].fileofs + ofs, size );
+		bmod->miptex_index = i;
+	}
+
+	memcpy( out, bmod->miptex, sizeof( *out ));
+	return bmod->miptex;
+}
+#else
+#define Mod_FetchLump( bmod, field )
+#define Mod_DropLump( bmod, field )
+#define Mod_CopyLump( bmod, field, out, size ) memcpy( out, ( bmod )->field, size )
+#define Mod_HasLump( bmod, field )             (( bmod )->field != NULL )
+#endif
+
 static const byte *Mod_GetMipTexForTexture( dbspmodel_t *bmod, int i, mip_t *out )
 {
 	if( i < 0 || i >= bmod->textures->nummiptex )
@@ -622,6 +807,11 @@ static const byte *Mod_GetMipTexForTexture( dbspmodel_t *bmod, int i, mip_t *out
 
 	if( bmod->textures->dataofs[i] == -1 )
 		return NULL;
+
+#if MOD_STREAM_BSP
+	if( mod_bspfile )
+		return Mod_StreamMipTex( bmod, i, out );
+#endif
 
 	const byte *raw = (byte *)bmod->textures + bmod->textures->dataofs[i];
 	memcpy( out, raw, sizeof( *out ));
@@ -935,6 +1125,21 @@ static void Mod_LoadLump( const void *in, const mlumpinfo_t *info, mlumpstat_t *
 	// if no bmod is passed, we are only testing if BSP lumps are not corrupted
 	if( !bmod )
 		return;
+
+#if MOD_STREAM_BSP
+	if( mod_bspfile )
+	{
+		if( bmod->numlumps == MAX_STREAMED_LUMPS )
+			Host_Error( "%s: too many lumps in %s\n", __func__, loadstat.name );
+
+		bmod->lumps[bmod->numlumps].dataofs = info->dataofs;
+		bmod->lumps[bmod->numlumps].fileofs = l.fileofs;
+		bmod->lumps[bmod->numlumps].filelen = l.filelen;
+		bmod->numlumps++;
+		*(size_t *)((byte *)bmod + info->countofs) = numelems;
+		return;
+	}
+#endif
 
 	byte *data = (byte *)in + l.fileofs;
 
@@ -1503,7 +1708,7 @@ Mod_GetFaceContents
 determine face contents by name
 ==================
 */
-static int Mod_GetFaceContents( const char *name )
+int Mod_GetFaceContents( const char *name )
 {
 	if( !Q_strnicmp( name, "SKY", 3 ))
 		return CONTENTS_SKY;
@@ -1677,7 +1882,16 @@ static void Mod_CalcSurfaceExtents( model_t *mod, msurface_t *surf, const dbspmo
 	int		sample_size = Mod_SampleSizeForFace( surf );
 	mtexinfo_t	*tex = surf->texinfo;
 
+#if XASH_PSP
+	if( FBitSet( tex->flags, TEX_WORLD_LUXELS ))
+	{
+		info->lmvecs = Mem_Malloc( mod->mempool, sizeof( *info->lmvecs ) * 2 );
+		Mod_LightMatrixFromTexMatrix( tex, info->lmvecs );
+	}
+	else info->lmvecs = tex->vecs; // the same
+#else
 	Mod_LightMatrixFromTexMatrix( tex, info->lmvecs );
+#endif
 
 	mins[0] = lmmins[0] = mins[1] = lmmins[1] = 999999;
 	maxs[0] = lmmaxs[0] = maxs[1] = lmmaxs[1] =-999999;
@@ -1786,14 +2000,19 @@ static void Mod_CalcSurfaceBounds( model_t *mod, msurface_t *surf, const dbspmod
 		AddPointToBounds( v->position, surf->info->mins, surf->info->maxs );
 	}
 
+#if !XASH_PSP
 	VectorAverage( surf->info->mins, surf->info->maxs, surf->info->origin );
+#endif
 }
 
 /*
 =================
 Mod_CreateFaceBevels
+
+not on the PSP, see Mod_PointInFace: they take more memory than anything else in a big map
 =================
 */
+#if !XASH_PSP
 static void Mod_CreateFaceBevels( model_t *mod, msurface_t *surf, const dbspmodel_t *bmod )
 {
 	vec3_t		delta, edgevec;
@@ -1844,6 +2063,7 @@ static void Mod_CreateFaceBevels( model_t *mod, msurface_t *surf, const dbspmode
 		fb->radius = Q_max( radius, fb->radius );
 	}
 }
+#endif
 
 /*
 =================
@@ -2616,7 +2836,7 @@ Mod_LoadSurfEdges
 static void Mod_LoadSurfEdges( model_t *mod, dbspmodel_t *bmod )
 {
 	mod->surfedges = Mem_Malloc( mod->mempool, bmod->numsurfedges * sizeof( dsurfedge_t ));
-	memcpy( mod->surfedges, bmod->surfedges, bmod->numsurfedges * sizeof( dsurfedge_t ));
+	Mod_CopyLump( bmod, surfedges, mod->surfedges, bmod->numsurfedges * sizeof( dsurfedge_t ));
 	mod->numsurfedges = bmod->numsurfedges;
 }
 
@@ -3052,8 +3272,51 @@ static void Mod_LoadTexture( model_t *mod, dbspmodel_t *bmod, int textureIndex )
 	Mod_LoadTextureData( mod, bmod, textureIndex );
 }
 
+#if XASH_PSP
+// the largest size of the map's textures that keeps them in the budget
+#define MOD_TEXTURE_BUDGET ( 6 * 1024 * 1024 )
+
+static void Mod_LimitTextureSize( model_t *mod, dbspmodel_t *bmod )
+{
+	int size;
+
+	if( !bmod->isworld || Host_IsDedicated( ))
+		return;
+
+	for( size = 256; size > 64; size >>= 1 )
+	{
+		size_t total = 0;
+
+		for( int i = 0; i < mod->numtextures; i++ )
+		{
+			const int ofs = bmod->textures->dataofs[i];
+			mip_t mip;
+
+			if( ofs < 0 || (size_t)ofs + sizeof( mip ) > bmod->texdatasize )
+				continue;
+
+			Mod_CopyLumpPart( bmod, ofs, &mip, sizeof( mip ));
+
+			// with mipmaps
+			const size_t pixels = (size_t)Q_min( mip.width, size ) * Q_min( mip.height, size );
+			total += pixels + pixels / 3;
+		}
+
+		Con_Reportf( "%s: textures up to %d: %s\n", __func__, size, Q_memprint( total ));
+		if( total <= MOD_TEXTURE_BUDGET )
+			break;
+	}
+
+	Cvar_SetValue( "gu_texture_mapsize", size );
+}
+#endif
+
 static void Mod_LoadAllTextures( model_t *mod, dbspmodel_t *bmod )
 {
+#if XASH_PSP
+	Mod_LimitTextureSize( mod, bmod );
+#endif
+
 	for( int i = 0; i < mod->numtextures; i++ )
 		Mod_LoadTexture( mod, bmod, i );
 }
@@ -3206,6 +3469,11 @@ static void Mod_LoadTextures( model_t *mod, dbspmodel_t *bmod )
 	}
 #endif
 
+#if MOD_STREAM_BSP
+	if( mod_bspfile )
+		Mod_FetchTextureLump( bmod );
+#endif
+
 	dmiptexlump_t *lump = bmod->textures;
 
 #if XASH_BIG_ENDIAN
@@ -3237,6 +3505,10 @@ static void Mod_LoadTextures( model_t *mod, dbspmodel_t *bmod )
 	mod->numtextures = lump->nummiptex;
 
 	Mod_LoadAllTextures( mod, bmod );
+#if MOD_STREAM_BSP
+	Mod_DropMipTex( bmod );
+	Mod_DropLump( bmod, textures );
+#endif
 	Mod_SequenceAllAnimatedTextures( mod );
 }
 
@@ -3382,6 +3654,10 @@ static void Mod_LoadTexInfo( model_t *mod, dbspmodel_t *bmod )
 Mod_LoadSurfaces
 =================
 */
+#if XASH_PSP
+static float mod_nolmvecs[2][4];
+#endif
+
 static void Mod_LoadSurfaces( model_t *mod, dbspmodel_t *bmod )
 {
 	int          test_lightsize = -1;
@@ -3405,6 +3681,9 @@ static void Mod_LoadSurfaces( model_t *mod, dbspmodel_t *bmod )
 		// setup crosslinks between two parts of msurface_t
 		out->info = info;
 		info->surf = out;
+#if XASH_PSP
+		info->lmvecs = mod_nolmvecs; // bad surfaces keep it
+#endif
 
 		if( bmod->version == QBSP2_VERSION )
 		{
@@ -3469,7 +3748,9 @@ static void Mod_LoadSurfaces( model_t *mod, dbspmodel_t *bmod )
 
 		Mod_CalcSurfaceBounds( mod, out, bmod );
 		Mod_CalcSurfaceExtents( mod, out, bmod );
+#if !XASH_PSP
 		Mod_CreateFaceBevels( mod, out, bmod );
+#endif
 
 		// grab the second sample to detect colored lighting
 		if( test_lightsize > 0 && lightofs != -1 )
@@ -3924,11 +4205,11 @@ Mod_LoadVisibility
 static void Mod_LoadVisibility( model_t *mod, dbspmodel_t *bmod )
 {
 	// external bmodels have no visibility
-	if( !bmod->visdata || !bmod->visdatasize )
+	if( !Mod_HasLump( bmod, visdata ) || !bmod->visdatasize )
 		return;
 
 	mod->visdata = Mem_Malloc( mod->mempool, bmod->visdatasize );
-	memcpy( mod->visdata, bmod->visdata, bmod->visdatasize );
+	Mod_CopyLump( bmod, visdata, mod->visdata, bmod->visdatasize );
 }
 
 /*
@@ -3948,7 +4229,7 @@ static void Mod_LoadLightVecs( model_t *mod, dbspmodel_t *bmod )
 	}
 
 	bmod->deluxedata_out = Mem_Malloc( mod->mempool, bmod->deluxdatasize );
-	memcpy( bmod->deluxedata_out, bmod->deluxdata, bmod->deluxdatasize );
+	Mod_CopyLump( bmod, deluxdata, bmod->deluxedata_out, bmod->deluxdatasize );
 }
 
 /*
@@ -3966,7 +4247,7 @@ static void Mod_LoadShadowmap( model_t *mod, dbspmodel_t *bmod )
 	}
 
 	bmod->shadowdata_out = Mem_Malloc( mod->mempool, bmod->shadowdatasize );
-	memcpy( bmod->shadowdata_out, bmod->shadowdata, bmod->shadowdatasize );
+	Mod_CopyLump( bmod, shadowdata, bmod->shadowdata_out, bmod->shadowdatasize );
 }
 
 /*
@@ -3982,11 +4263,11 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 	switch( bmod->lightmap_samples )
 	{
 	case 1:
-		if( bmod->rgblightdata && bmod->rgblightdatasize > 0 && bmod->rgblightdatasize == bmod->lightdatasize * 3 )
+		if( Mod_HasLump( bmod, rgblightdata ) && bmod->rgblightdatasize > 0 && bmod->rgblightdatasize == bmod->lightdatasize * 3 )
 		{
 			bmod->lightdatasize = bmod->rgblightdatasize;
 			mod->lightdata = Mem_Malloc( mod->mempool, bmod->rgblightdatasize );
-			memcpy( mod->lightdata, bmod->rgblightdata, bmod->rgblightdatasize );
+			Mod_CopyLump( bmod, rgblightdata, mod->lightdata, bmod->rgblightdatasize );
 			SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 		}
 		else if( Mod_LoadLitfile( mod, "lit", bmod->lightdatasize * 3, &mod->lightdata, &bmod->lightdatasize ))
@@ -3997,14 +4278,18 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		{
 			mod->lightdata = (color24 *)Mem_Malloc( mod->mempool, bmod->lightdatasize * sizeof( color24 ));
 
+			Mod_FetchLump( bmod, lightdata );
+
 			// expand the white lighting data
 			for( int i = 0; i < bmod->lightdatasize; i++ )
 				mod->lightdata[i].r = mod->lightdata[i].g = mod->lightdata[i].b = bmod->lightdata[i];
+
+			Mod_DropLump( bmod, lightdata );
 		}
 		break;
 	case 3:	// load colored lighting
 		mod->lightdata = Mem_Malloc( mod->mempool, bmod->lightdatasize );
-		memcpy( mod->lightdata, bmod->lightdata, bmod->lightdatasize );
+		Mod_CopyLump( bmod, lightdata, mod->lightdata, bmod->lightdatasize );
 		SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 		break;
 	default:
@@ -4067,6 +4352,8 @@ static int Mod_LumpLooksLikeEntities( const char *lump, const size_t lumplen )
 	// look for "classname" string
 	return Q_memmem( lump, lumplen, "\"classname\"", sizeof( "\"classname\"" ) - 1 ) != NULL ? 1 : 0;
 }
+
+static int Mod_LumpLooksLikeEntitiesFile( file_t *f, const dlump_t *l, int flags, const char *msg );
 
 static void Mod_SwapBSPLumps( byte *mod_base, size_t bufferlen )
 {
@@ -4229,17 +4516,67 @@ static fs_offset_t Mod_FindBSPX( byte *mod_base, size_t bufferlen )
 	return max_offset;
 }
 
-#if MOD_STRICT_ALIGNMENT
-// the one being loaded, see Mod_AbortBmodelLoad
-static dbspmodel_t *mod_loading_bmod;
+#if MOD_STREAM_BSP
+// as Mod_FindBSPX, the header is in memory until the lumps are found
+static byte *Mod_StreamBSPX( const byte *mod_base )
+{
+	const fs_offset_t ofs = ALIGN( Mod_FindEndOfBSPFile( mod_base, mod_bspfilesize ), 4 );
+	dbspx_hdr_t header;
+
+	if( ofs + (fs_offset_t)sizeof( header ) > mod_bspfilesize )
+		return NULL;
+
+	Mod_StreamRead( &header, ofs, sizeof( header ));
+	if( header.id != LittleLong( IDBSPXHEADER ))
+		return NULL;
+
+	const int numlumps = LittleLong( header.numlumps );
+	if( numlumps < 0 || numlumps > 256 )
+		return NULL;
+
+	const size_t size = sizeof( header ) + sizeof( header.lumps[0] ) * numlumps;
+	dbspx_hdr_t *out = Mem_Malloc( host.volatilepool, size );
+
+	Mod_StreamRead( out, ofs, size );
+	out->id = LittleLong( out->id );
+	out->numlumps = numlumps;
+
+	for( int i = 0; i < numlumps; i++ )
+		le_struct_swap( dbspx_lump_swap, &out->lumps[i] );
+
+	Con_DPrintf( "Found valid BSPX signature at %lld\n", (long long)ofs );
+	return (byte *)out;
+}
 #endif
 
-static void Mod_FreeBmodel( dbspmodel_t *bmod )
+// the one being loaded, see Mod_AbortBmodelLoad
+#if MOD_STRICT_ALIGNMENT || MOD_STREAM_BSP
+static dbspmodel_t *mod_loading_bmod;
+
+static void Mod_FreeLumps( dbspmodel_t *bmod )
 {
 #if MOD_STRICT_ALIGNMENT
 	for( int i = 0; i < bmod->num_aligned_lumps; i++ )
 		Mem_Free( bmod->aligned_lumps[i] );
+	bmod->num_aligned_lumps = 0;
+#endif
+#if MOD_STREAM_BSP
+	for( int i = 0; i < bmod->numlumps; i++ )
+	{
+		if( bmod->lumps[i].data )
+			Mem_Free( bmod->lumps[i].data );
+	}
+	bmod->numlumps = 0;
+	Mod_DropMipTex( bmod );
+#endif
 	mod_loading_bmod = NULL;
+}
+#endif
+
+static void Mod_FreeBmodel( dbspmodel_t *bmod )
+{
+#if MOD_STRICT_ALIGNMENT || MOD_STREAM_BSP
+	Mod_FreeLumps( bmod );
 #endif
 	Mem_Free( bmod );
 }
@@ -4248,22 +4585,20 @@ static void Mod_FreeBmodel( dbspmodel_t *bmod )
 =================
 Mod_AbortBmodelLoad
 
-the load is abandoned with a Host_Error (out of memory): the aligned lump
-copies aren't in the model's pool, free them. bmod itself goes with the pool.
+the load is abandoned with a Host_Error (out of memory): the lumps in memory
+aren't in the model's pool, free them. bmod itself goes with the pool.
 =================
 */
 void Mod_AbortBmodelLoad( void )
 {
-#if MOD_STRICT_ALIGNMENT
-	dbspmodel_t *bmod = mod_loading_bmod;
-
-	if( !bmod )
-		return;
-
-	for( int i = 0; i < bmod->num_aligned_lumps; i++ )
-		Mem_Free( bmod->aligned_lumps[i] );
-	bmod->num_aligned_lumps = 0;
-	mod_loading_bmod = NULL;
+#if MOD_STRICT_ALIGNMENT || MOD_STREAM_BSP
+	if( mod_loading_bmod )
+		Mod_FreeLumps( mod_loading_bmod );
+#endif
+#if MOD_STREAM_BSP
+	if( mod_bspfile )
+		FS_Close( mod_bspfile );
+	mod_bspfile = NULL;
 #endif
 }
 
@@ -4298,6 +4633,15 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 		{
 			SetBits( flags, LUMP_BSP30EXT );
 		}
+#if MOD_STREAM_BSP
+		else if( mod_bspfile )
+		{
+			// only relevant for half-life maps
+			if( Mod_LumpLooksLikeEntitiesFile( mod_bspfile, &header->lumps[LUMP_ENTITIES], flags, "entities" ) == 0 &&
+				Mod_LumpLooksLikeEntitiesFile( mod_bspfile, &header->lumps[LUMP_PLANES], flags, "planes" ) == 1 )
+				SetBits( flags, LUMP_BSHIFT_SWAP );
+		}
+#endif
 		// only relevant for half-life maps
 		else if( !Mod_LumpLooksLikeEntities( mod_base + header->lumps[LUMP_ENTITIES].fileofs, header->lumps[LUMP_ENTITIES].filelen ) &&
 			 Mod_LumpLooksLikeEntities( mod_base + header->lumps[LUMP_PLANES].fileofs, header->lumps[LUMP_PLANES].filelen ))
@@ -4318,7 +4662,7 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	}
 
 	dbspmodel_t *bmod = Mem_Calloc( mod->mempool, sizeof( *bmod ));
-#if MOD_STRICT_ALIGNMENT
+#if MOD_STRICT_ALIGNMENT || MOD_STREAM_BSP
 	mod_loading_bmod = bmod;
 #endif
 	bmod->version = header->version;	// share up global
@@ -4330,7 +4674,19 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	bmod->isworld = isworld;
 	bmod->isbsp30ext = FBitSet( flags, LUMP_BSP30EXT );
 	bmod->hulls32bit = bmod->version == QBSP2_VERSION || ( !isworld && world.version == QBSP2_VERSION );
-	fs_offset_t bspx_header_offset = Mod_FindBSPX( mod_base, bufferlen );
+	const byte *bspx = NULL;
+#if MOD_STREAM_BSP
+	byte *bspx_header = NULL;
+	if( mod_bspfile )
+		bspx = bspx_header = Mod_StreamBSPX( mod_base );
+	else
+#endif
+	{
+		fs_offset_t bspx_header_offset = Mod_FindBSPX( mod_base, bufferlen );
+
+		if( bspx_header_offset >= 0 )
+			bspx = mod_base + bspx_header_offset;
+	}
 
 	// loading base lumps
 	for( int i = 0; i < ARRAYSIZE( srclumps ); i++, stat_index++ )
@@ -4341,11 +4697,15 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 		Mod_LoadLump( mod_base, &extlumps[i], &worldstats[stat_index], flags, LOADLUMP_BSP30EXT, NULL, bmod );
 
 	// loading bspx lumps
-	if( bspx_header_offset >= 0 )
+	if( bspx != NULL )
 	{
 		for( int i = 0; i < ARRAYSIZE( bspxlumps ); i++, stat_index++ )
-			Mod_LoadLump( mod_base, &bspxlumps[i], &worldstats[stat_index], flags, LOADLUMP_BSPX, mod_base + bspx_header_offset, bmod );
+			Mod_LoadLump( mod_base, &bspxlumps[i], &worldstats[stat_index], flags, LOADLUMP_BSPX, bspx, bmod );
 	}
+#if MOD_STREAM_BSP
+	if( bspx_header )
+		Mem_Free( bspx_header );
+#endif
 
 	if( !bmod->isworld ) // a1ba: why world excluded here?
 	{
@@ -4361,21 +4721,45 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	}
 
 	// load into heap
+	Mod_FetchLump( bmod, entdata );
 	Mod_LoadEntities( mod, bmod );
+	Mod_DropLump( bmod, entdata );
+	Mod_FetchLump( bmod, planes );
 	Mod_LoadPlanes( mod, bmod );
+	Mod_DropLump( bmod, planes );
+	Mod_FetchLump( bmod, submodels );
 	Mod_LoadSubmodels( mod, bmod );
+	Mod_DropLump( bmod, submodels );
+	Mod_FetchLump( bmod, vertexes );
 	Mod_LoadVertexes( mod, bmod );
+	Mod_DropLump( bmod, vertexes );
+	Mod_FetchLump( bmod, edges );
 	Mod_LoadEdges( mod, bmod );
+	Mod_DropLump( bmod, edges );
 	Mod_LoadSurfEdges( mod, bmod );
 	Mod_LoadTextures( mod, bmod );
 	Mod_LoadVisibility( mod, bmod );
+	Mod_FetchLump( bmod, texinfo );
+	Mod_FetchLump( bmod, faceinfo );
 	Mod_LoadTexInfo( mod, bmod );
+	Mod_DropLump( bmod, faceinfo );
+	Mod_DropLump( bmod, texinfo );
+	Mod_FetchLump( bmod, surfaces );
 	Mod_LoadSurfaces( mod, bmod );
 	Mod_LoadLighting( mod, bmod );
+	Mod_DropLump( bmod, surfaces );
+	Mod_FetchLump( bmod, markfaces );
 	Mod_LoadMarkSurfaces( mod, bmod );
+	Mod_DropLump( bmod, markfaces );
+	Mod_FetchLump( bmod, leafs );
 	Mod_LoadLeafs( mod, bmod );
+	Mod_DropLump( bmod, leafs );
+	Mod_FetchLump( bmod, nodes );
 	Mod_LoadNodes( mod, bmod );
+	Mod_DropLump( bmod, nodes );
+	Mod_FetchLump( bmod, clipnodes );
 	Mod_LoadClipnodes( mod, bmod );
+	Mod_DropLump( bmod, clipnodes );
 
 	// preform some post-initalization
 	Mod_MakeHull0( mod, bmod );
@@ -4557,6 +4941,37 @@ void Mod_LoadBrushModel( model_t *mod, void *buffer, size_t buffersize, qboolean
 
 	if( loaded ) *loaded = true;	// all done
 }
+
+#if MOD_STREAM_BSP
+/*
+=================
+Mod_LoadBrushModelFile
+
+the file is closed when it's done
+=================
+*/
+void Mod_LoadBrushModelFile( model_t *mod, file_t *f, size_t filesize, qboolean *loaded )
+{
+	static union
+	{
+		dheader_t header;
+		byte data[sizeof( dheader_t ) + sizeof( dextrahdr_t )];
+	} headbuf;
+
+	Mod_AbortBmodelLoad(); // one that ended in a Host_Error
+
+	mod_bspfile = f;
+	mod_bspfilesize = filesize;
+	Mod_StreamRead( headbuf.data, 0, sizeof( headbuf ));
+
+	Mod_LoadBrushModel( mod, headbuf.data, filesize, loaded );
+
+	if( mod_loading_bmod )
+		Mod_FreeLumps( mod_loading_bmod );
+	FS_Close( mod_bspfile );
+	mod_bspfile = NULL;
+}
+#endif
 
 /*
 ==================

@@ -3328,10 +3328,17 @@ void CL_ProcessFile( qboolean successfully_received, const char *filename )
 
 		if( cl.resourcesneeded.pNext == &cl.resourcesneeded )
 		{
+#if XASH_PSP
+			// not on the stack: the map loads from here. Kept if it ends in a Host_Error
+			static byte *msg_buf;
+			if( !msg_buf )
+				msg_buf = Mem_Malloc( cls.mempool, MAX_INIT_MSG );
+#else
 			byte	msg_buf[MAX_INIT_MSG];
+#endif
 			sizebuf_t msg;
 
-			MSG_Init( &msg, "Resource Registration", msg_buf, sizeof( msg_buf ));
+			MSG_Init( &msg, "Resource Registration", msg_buf, MAX_INIT_MSG );
 
 			if( CL_PrecacheResources( ))
 				CL_RegisterResources( &msg, cls.net_protocol );
@@ -3341,6 +3348,10 @@ void CL_ProcessFile( qboolean successfully_received, const char *filename )
 				Netchan_CreateFragments( &cls.netchan, &msg );
 				Netchan_FragSend( &cls.netchan );
 			}
+#if XASH_PSP
+			Mem_Free( msg_buf );
+			msg_buf = NULL;
+#endif
 		}
 
 		if( cls.netchan.tempbuffer )
@@ -3487,6 +3498,19 @@ static qboolean CL_ShouldRescanFilesystem( void )
 	return retval;
 }
 
+#if XASH_PSP
+static qboolean CL_ModelIsListed( const char *name )
+{
+	for( const resource_t *res = cl.resourcesonhand.pNext; res && res != &cl.resourcesonhand; res = res->pNext )
+	{
+		if( res->type == t_model && !Q_stricmp( res->szFileName, name ))
+			return true;
+	}
+
+	return false;
+}
+#endif
+
 qboolean CL_PrecacheResources( void )
 {
 	resource_t	*pRes;
@@ -3494,6 +3518,10 @@ qboolean CL_PrecacheResources( void )
 	// if we downloaded new WAD files or any other archives they must be added to searchpath
 	if( CL_ShouldRescanFilesystem( ))
 		FS_Rescan_f();
+
+#if XASH_PSP
+	Mod_FreeUnlisted( CL_ModelIsListed );
+#endif
 
 	// NOTE: world need to be loaded as first model
 	for( pRes = cl.resourcesonhand.pNext; pRes && pRes != &cl.resourcesonhand; pRes = pRes->pNext )
@@ -3535,6 +3563,9 @@ qboolean CL_PrecacheResources( void )
 		}
 	}
 
+#if XASH_PSP
+	Mod_BeginPrecache();
+#endif
 	if( cls.state != ca_active )
 		S_BeginRegistration();
 
@@ -3634,6 +3665,10 @@ qboolean CL_PrecacheResources( void )
 
 		SetBits( pRes->ucFlags, RES_PRECACHED );
 	}
+
+#if XASH_PSP
+	Mod_EndPrecache();
+#endif
 
 	// make sure modelcount is in-range
 	cl.nummodels = bound( 0, cl.nummodels, MAX_MODELS );
@@ -3994,6 +4029,9 @@ void Host_ClientFrame( void )
 	VID_CheckChanges();
 
 	// update the screen
+#if XASH_PSP
+	Mod_LoadCold();
+#endif
 	SCR_UpdateScreen ();
 
 	// update audio

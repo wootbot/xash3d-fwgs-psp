@@ -280,6 +280,22 @@ static entity_state_t *R_StudioGetPlayerState( int index )
 	if( index < 0 || index >= cl.maxclients )
 		return NULL;
 
+#if XASH_PSP
+	entity_state_t *state = &cl.frames[cl.parsecountmod].playerstate[index];
+
+	// not drawn with a weapon that isn't loaded
+	if( state->weaponmodel && !Mod_Use( CL_ModelHandle( state->weaponmodel )))
+	{
+		static entity_state_t copies[4];
+		static int copy;
+
+		copy = ( copy + 1 ) % ARRAYSIZE( copies );
+		copies[copy] = *state;
+		copies[copy].weaponmodel = 0;
+		return &copies[copy];
+	}
+#endif
+
 	return &cl.frames[cl.parsecountmod].playerstate[index];
 }
 

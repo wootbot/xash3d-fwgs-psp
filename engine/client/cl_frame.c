@@ -974,6 +974,11 @@ qboolean CL_AddVisibleEntity( cl_entity_t *ent, int entityType )
 		}
 	}
 
+#if XASH_PSP
+	if( !Mod_Use( ent->model ))
+		return false;
+#endif
+
 	// check for adding this entity
 	if( !clgame.dllFuncs.pfnAddEntity( entityType, ent, ent->model->name ))
 	{

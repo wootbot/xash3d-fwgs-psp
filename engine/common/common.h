@@ -408,6 +408,7 @@ void Mem_Stats_f( void );
 // Returns true if an allocation was skipped since the last call
 qboolean Mem_SetSoftFail( qboolean enable );
 void Mod_LoadOutOfMemory( const char *func, size_t size, const char *filename, int fileline );
+qboolean Mod_MakeRoomFor( size_t size );
 void Mod_AbortBmodelLoad( void );
 #endif
 #define Mem_Malloc( pool, size ) _Mem_Alloc( pool, size, false, __FILE__, __LINE__ )

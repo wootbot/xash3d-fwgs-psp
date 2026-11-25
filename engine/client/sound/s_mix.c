@@ -821,6 +821,16 @@ static int S_MixNormalChannelsToRoombuffer( portable_samplepair_t *dst, int end 
 		if( !ch->sfx->cache && S_SoundPending( ch->sfx ))
 			continue;
 
+#if XASH_PSP
+		// an ambient sound that isn't loaded until it's heard, or didn't fit
+		if( !ch->sfx->cache && !ch->words && ch->entchannel == CHAN_STATIC && FBitSet( ch->flags, FL_CHAN_PENDING ))
+		{
+			if( ch->leftvol >= 8 || ch->rightvol >= 8 )
+				S_RequestSound( ch->sfx );
+			continue;
+		}
+#endif
+
 		wavdata_t *sc = S_LoadSound( ch->sfx );
 
 		if( !sc )

@@ -82,9 +82,10 @@ byte *FS_LoadFileToPool( poolhandle_t pool, const char *path, fs_offset_t *files
 	fs_offset_t size = g_fsapi.FileLength( f );
 	byte *buf = Mem_Malloc( pool, size + 1 );
 
-	if( g_fsapi.Read( f, buf, size ) != size )
+	if( !buf || g_fsapi.Read( f, buf, size ) != size )
 	{
-		Mem_Free( buf );
+		if( buf )
+			Mem_Free( buf );
 		g_fsapi.Close( f );
 		return NULL;
 	}

@@ -72,7 +72,7 @@ GNU General Public License for more details.
 
 #define MAX_TEXTURES	1536
 #define MAX_DETAIL_TEXTURES	64
-#define MAX_LIGHTMAPS	64
+#define MAX_LIGHTMAPS	128
 #define SUBDIVIDE_SIZE	64
 #define MAX_DECAL_SURFS	256
 #define MAX_DRAW_STACK	2		// normal view and menu view
@@ -492,6 +492,9 @@ void R_MarkLeaves( void );
 void R_DrawWorld( void );
 void R_DrawWaterSurfaces( void );
 void R_StaticWaterClear( void );
+void R_WorldFree( void );
+void R_PrebuildLightmaps( model_t *mod );
+gu_poly_t *R_SurfPoly( msurface_t *surf );
 void R_DrawBrushModel( cl_entity_t *e );
 qboolean R_StaticBrushModel( const cl_entity_t *e );
 void R_DrawStaticBrushModels( cl_entity_t **ents, int count );
@@ -846,6 +849,8 @@ extern convar_t	gl_lightmap_nearest;
 extern convar_t	gl_keeptjunctions;
 extern convar_t	gl_round_down;
 extern convar_t	gu_texture_maxsize;
+extern convar_t	gu_texture_mapsize;
+extern int	gl_modelTextureSize;
 extern convar_t	gu_texture_vram;
 extern convar_t	r_studio_ge;
 extern convar_t	gl_wireframe;

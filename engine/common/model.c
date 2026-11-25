@@ -22,6 +22,12 @@ GNU General Public License for more details.
 #include "world.h"
 #include "enginefeatures.h"
 #include "client.h"
+#if XASH_PSP
+#include "sound.h"
+#endif
+#if XASH_PSP
+#include "platform/platform.h"
+#endif
 #include "server.h"
 
 static model_info_t	mod_crcinfo[MAX_MODELS];
@@ -345,8 +351,491 @@ void Mod_LoadOutOfMemory( const char *func, size_t size, const char *filename, i
 
 	Mod_AbortBmodelLoad();
 	Mod_FreeModel( mod );
-	Mem_Free( mod_loading_buf );
+	if( mod_loading_buf )
+		Mem_Free( mod_loading_buf );
 	Host_Error( "Not enough memory to load %s\n", name );
+}
+#endif
+
+#if MOD_STREAM_BSP
+// NULL if the file isn't a map
+static file_t *Mod_OpenMap( const char *name, fs_offset_t *length )
+{
+	file_t *f = FS_Open( name, "rb", false );
+	uint ident;
+
+	if( !f )
+		return NULL;
+
+	if( FS_Read( f, &ident, sizeof( ident )) == sizeof( ident ))
+	{
+		switch( ident )
+		{
+		case LittleLong( Q1BSP_VERSION ):
+		case LittleLong( HLBSP_VERSION ):
+		case LittleLong( QBSP2_VERSION ):
+			*length = FS_FileLength( f );
+			return f;
+		}
+	}
+
+	FS_Close( f );
+	return NULL;
+}
+
+static uint32_t Mod_FileCRC( const char *name )
+{
+	uint32_t crc;
+	byte buf[1024];
+	file_t *f = FS_Open( name, "rb", false );
+
+	CRC32_Init( &crc );
+	for( int len; f && ( len = FS_Read( f, buf, sizeof( buf ))) > 0; )
+		CRC32_ProcessBuffer( &crc, buf, len );
+	if( f ) FS_Close( f );
+
+	return CRC32_Final( crc );
+}
+
+/*
+==================
+Mod_LoadMap
+
+Mod_LoadModel for brush models, the file isn't loaded as a whole
+==================
+*/
+static model_t *Mod_LoadMap( model_t *mod, file_t *f, fs_offset_t length, qboolean crash )
+{
+	qboolean loaded, loaded2 = false;
+	char name[MAX_QPATH];
+
+	Q_strncpy( name, mod->name, sizeof( name ));
+	COM_FixSlashes( name );
+	Con_Reportf( "loading %s\n", mod->name );
+	mod->needload = NL_PRESENT;
+	mod->type = mod_bad;
+
+#if XASH_PSP
+	mod_loading = mod;
+	mod_loading_buf = NULL;
+#endif
+
+	Mod_LoadBrushModelFile( mod, f, length, &loaded );
+
+	if( loaded )
+	{
+		if( world.loading )
+			SetBits( mod->flags, MODEL_WORLD ); // mark worldmodel
+
+		if( Host_IsDedicated() )
+			loaded2 = true;
+#if !XASH_DEDICATED
+		else loaded2 = ref.dllFuncs.Mod_ProcessRenderData( mod, true, NULL, 0 );
+#endif
+	}
+
+#if XASH_PSP
+	mod_loading = NULL;
+#endif
+
+	if( !loaded || !loaded2 )
+	{
+		Mod_FreeModel( mod );
+
+		if( crash ) Host_Error( "Could not load model %s\n", name );
+		else Con_Printf( S_ERROR "Could not load model %s\n", name );
+
+		return NULL;
+	}
+
+	model_info_t *p = Mod_CRCInfo( mod );
+	mod->needload = NL_PRESENT;
+
+	if( FBitSet( p->flags, FCRC_SHOULD_CHECKSUM ))
+	{
+		const uint32_t currentCRC = Mod_FileCRC( name );
+
+		if( FBitSet( p->flags, FCRC_CHECKSUM_DONE ))
+		{
+			if( currentCRC != p->initialCRC )
+				Host_Error( "%s has a bad checksum\n", name );
+		}
+		else
+		{
+			SetBits( p->flags, FCRC_CHECKSUM_DONE );
+			p->initialCRC = currentCRC;
+		}
+	}
+
+	return mod;
+}
+#endif
+
+#if XASH_PSP
+/*
+==============================================================================
+
+STUDIO MODELS ON DEMAND
+
+A map's models may be more than fit. While a map is loading, studio models are only
+loaded as long as enough memory is left for the rest (Mod_KeepCold). The others are
+cold: no more than their bounds is known, Mod_Use loads them when they are needed and
+frees the ones that weren't used for the longest time.
+
+Cold models have no extradata: Mod_Use keeps them away from the renderer and the
+client library. Loading and freeing is only done between two frames (Mod_LoadCold).
+
+==============================================================================
+*/
+#define MOD_REQUESTS	16
+#define MOD_IDLE_TIME	2.0f	// not used for that long: may be freed
+#define MOD_RETRY_TIME	1.0f
+#define MOD_MARGIN		( 2 * 1024 * 1024 )	// left for everything else
+
+// studio models don't use numleafs (here: when it was last used) and numplanes
+// (here: not loaded before this time, -1 never)
+
+static model_t *mod_requests[MOD_REQUESTS];
+static int mod_numrequests;
+static size_t mod_reserve;	// != 0: a map is loading, this much is needed besides the models
+
+static qboolean Mod_IsCold( const model_t *mod )
+{
+	return mod->type == mod_studio && !mod->cache.data && mod->mempool;
+}
+
+// memory the model takes: what is left of the file, textures
+static size_t Mod_StudioCost( const studiohdr_t *hdr, size_t filesize )
+{
+	const size_t data = hdr->numtextures > 0 && hdr->texturedataindex > 0 && (size_t)hdr->texturedataindex < filesize ? hdr->texturedataindex : filesize;
+	const size_t pixels = filesize - data;
+
+	// the renderer's copies of the meshes, and textures of at most ~128 KB (R_StudioLimitTextures)
+	return data + data / 2 + ( hdr->numtextures > 0 ? Q_min( pixels, 192 * 1024 ) : 192 * 1024 );
+}
+
+static qboolean Mod_StudioHeader( const char *name, studiohdr_t *hdr, fs_offset_t *filesize, int *bodies )
+{
+	file_t *f = FS_Open( name, "rb", false );
+	qboolean ok;
+
+	if( !f )
+		return false;
+
+	*filesize = FS_FileLength( f );
+	ok = FS_Read( f, hdr, sizeof( *hdr )) == sizeof( *hdr ) && hdr->ident == IDSTUDIOHEADER && hdr->version == STUDIO_VERSION;
+
+	if( ok )
+	{
+		// as Mod_StudioBodyVariations
+		int count = 1;
+
+		if( hdr->numbodyparts < 0 || hdr->numbodyparts > 64 || FS_Seek( f, hdr->bodypartindex, SEEK_SET ) < 0 )
+			ok = false;
+
+		for( int i = 0; ok && i < hdr->numbodyparts; i++ )
+		{
+			mstudiobodyparts_t part;
+
+			if( FS_Read( f, &part, sizeof( part )) != sizeof( part ))
+				ok = false;
+			else count *= part.nummodels;
+		}
+		*bodies = count;
+	}
+
+	FS_Close( f );
+	return ok;
+}
+
+/*
+==================
+Mod_BeginPrecache
+
+the map is loaded and its models are next
+==================
+*/
+void Mod_BeginPrecache( void )
+{
+	const model_t *w = mod_first;
+
+	mod_numrequests = 0;
+	mod_reserve = 0;
+
+	if( !w || w->type != mod_brush || SV_Active( ))
+		return;
+
+	// the renderer's copy of the world: surfaces, nodes, lightmaps, polygons
+	size_t polys = w->numsurfedges * 40 + w->numsurfaces * 32;
+
+	mod_reserve = w->numsurfaces * 34 + ( w->numnodes + w->numleafs ) * 36 + w->nummarksurfaces * 2;
+	mod_reserve += ( w->numsurfaces - w->nummodelsurfaces ) * 32;
+	mod_reserve += polys > 2 * 1024 * 1024 ? 1536 * 1024 : polys;
+
+	if( w->lightdata )
+	{
+		size_t luxels = 0;
+
+		for( int i = 0; i < w->numsurfaces; i++ )
+		{
+			const mextrasurf_t *info = w->surfaces[i].info;
+
+			if( w->surfaces[i].samples && info )
+				luxels += ( info->lightextents[0] / 16 + 1 ) * ( info->lightextents[1] / 16 + 1 );
+		}
+		mod_reserve += luxels + luxels / 4;
+	}
+
+	// entities, sprites, sounds, sky, decals, temp entities, and some to spare
+	mod_reserve += 9 * 1024 * 1024;
+	Con_Reportf( "%s: %s free, %s needed besides the models\n", __func__, Q_memprint( PSP_HeapFree( )), Q_memprint( mod_reserve ));
+}
+
+void Mod_EndPrecache( void )
+{
+	mod_reserve = 0;
+}
+
+// leave it on the stick for now?
+static qboolean Mod_KeepCold( model_t *mod, const char *name )
+{
+	studiohdr_t hdr;
+	fs_offset_t filesize;
+	int bodies;
+
+	// players' own models are drawn with whatever there is
+	if( !mod_reserve || PSP_HeapFree() >= mod_reserve + 2 * 1024 * 1024 || !Q_strnicmp( name, "models/player", 13 ) || Q_stricmp( COM_FileExtension( name ), "mdl" ))
+		return false;
+
+	if( !Mod_StudioHeader( name, &hdr, &filesize, &bodies ))
+		return false;
+
+	if( PSP_HeapFree() >= mod_reserve + Mod_StudioCost( &hdr, filesize ))
+		return false;
+
+	mod->type = mod_studio;
+	mod->mempool = Mem_AllocPool( va( "^2%s^7", mod->name ));
+	mod->cache.data = NULL;
+	if( !VectorCompare( vec3_origin, hdr.bbmin ))
+	{
+		VectorCopy( hdr.bbmin, mod->mins );
+		VectorCopy( hdr.bbmax, mod->maxs );
+	}
+	else if( !VectorCompare( vec3_origin, hdr.min ))
+	{
+		VectorCopy( hdr.min, mod->mins );
+		VectorCopy( hdr.max, mod->maxs );
+	}
+	else
+	{
+		// computed from the vertices
+		byte *buf = FS_LoadFileToPool( host.volatilepool, name, NULL, false );
+
+		if( buf )
+		{
+			Mod_StudioHullBounds( buf, mod->mins, mod->maxs );
+			Mem_Free( buf );
+		}
+	}
+	mod->numframes = bodies;
+	mod->radius = RadiusFromBounds( mod->mins, mod->maxs );
+	mod->flags = hdr.flags;
+	mod->needload = NL_PRESENT;
+	mod->numleafs = 0;
+	Con_Reportf( "%s stays cold\n", mod->name );
+
+	return true;
+}
+
+static void Mod_Chill( model_t *mod )
+{
+	PSP_MeWait();
+	Con_Reportf( "%s is cold\n", mod->name );
+	ref.dllFuncs.Mod_ProcessRenderData( mod, false, NULL, 0 );
+	Mem_FreePool( &mod->mempool );
+	mod->mempool = Mem_AllocPool( va( "^2%s^7", mod->name ));
+	mod->cache.data = NULL;
+	mod->textures = NULL;
+	mod->numtextures = 0;
+}
+
+// frees models until there is enough memory, and a block of that size in one piece
+static qboolean Mod_MakeRoom( size_t size, size_t block )
+{
+	const int idle = host.realtime * 10 - MOD_IDLE_TIME * 10;
+
+	while( PSP_HeapFree() < size || !PSP_HeapHasBlock( block ))
+	{
+		model_t *oldest = NULL;
+
+		for( int i = 1; i < mod_numknown; i++ )
+		{
+			model_t *mod = Mod_Known( i );
+
+			// the ones with remapped textures are players
+			if( mod->type != mod_studio || !mod->cache.data || mod->numtextures || mod->numleafs > idle || !Q_strnicmp( mod->name, "models/player", 13 ))
+				continue;
+			if( !oldest || mod->numleafs < oldest->numleafs )
+				oldest = mod;
+		}
+
+		if( oldest )
+			Mod_Chill( oldest );
+		else if( !S_FreeIdleSound( ))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+==================
+Mod_MakeRoomFor
+
+an allocation failed in a game: can it be tried again?
+==================
+*/
+qboolean Mod_MakeRoomFor( size_t size )
+{
+	static qboolean active;
+	qboolean ok;
+
+	if( active || mod_loading || cls.state != ca_active || SV_Active( ))
+		return false;
+
+	active = true;
+	ok = Mod_MakeRoom( size, size );
+	active = false;
+
+	return ok;
+}
+
+static void Mod_Warm( model_t *mod )
+{
+	studiohdr_t hdr;
+	fs_offset_t filesize, length = 0;
+	char name[MAX_QPATH];
+	qboolean loaded = false;
+	int bodies;
+
+	Q_strncpy( name, mod->name, sizeof( name ));
+	COM_FixSlashes( name );
+
+	// failed: not again
+	mod->numplanes = -1;
+	if( !Mod_StudioHeader( name, &hdr, &filesize, &bodies ))
+		return;
+
+	// what stays of the file in one piece, the file itself goes into P5 RAM
+	const size_t data = hdr.texturedataindex > 0 && hdr.texturedataindex < filesize ? hdr.texturedataindex : filesize;
+
+	if( !Mod_MakeRoom( Mod_StudioCost( &hdr, filesize ) + MOD_MARGIN, data + 64 * 1024 ))
+	{
+		// try again later
+		mod->numplanes = host.realtime + MOD_RETRY_TIME + 1.0f;
+		return;
+	}
+
+	Mem_SetSoftFail( true );
+	byte *buf = FS_LoadFileToPool( host.volatilepool, name, &length, false );
+	if( Mem_SetSoftFail( false ) || !buf )
+	{
+		mod->numplanes = host.realtime + MOD_RETRY_TIME + 1.0f;
+		return;
+	}
+
+	Con_Reportf( "loading %s, %s free\n", mod->name, Q_memprint( PSP_HeapFree( )));
+	Mem_FreePool( &mod->mempool );
+	mod->textures = NULL;
+	mod->numtextures = 0;
+	mod_loading = mod;
+	mod_loading_buf = buf;
+
+	Mod_LoadStudioModel( mod, buf, length, &loaded );
+	if( loaded )
+		loaded = ref.dllFuncs.Mod_ProcessRenderData( mod, true, buf, length );
+	else mod->cache.data = NULL;
+
+	mod_loading = NULL;
+	Mem_Free( buf );
+	if( loaded )
+		mod->numplanes = 0;
+}
+
+/*
+==================
+Mod_LoadCold
+
+the models that were asked for, between two frames
+==================
+*/
+void Mod_LoadCold( void )
+{
+	// one a frame
+	if( mod_numrequests > 0 )
+	{
+		model_t *mod = mod_requests[0];
+
+		mod_numrequests--;
+		memmove( mod_requests, mod_requests + 1, sizeof( mod_requests[0] ) * mod_numrequests );
+
+		if( Mod_IsCold( mod ))
+			Mod_Warm( mod );
+	}
+}
+
+/*
+==================
+Mod_Use
+
+the model is about to be drawn: false if it's cold
+==================
+*/
+qboolean Mod_Use( model_t *mod )
+{
+	if( !mod )
+		return false;
+
+	if( mod->type != mod_studio )
+		return true;
+
+	// 1/10 s
+	mod->numleafs = host.realtime * 10;
+
+	if( !Mod_IsCold( mod ))
+		return true;
+
+	if( mod->numplanes < 0 || mod->numplanes > host.realtime || mod_numrequests == MOD_REQUESTS )
+		return false;
+
+	for( int i = 0; i < mod_numrequests; i++ )
+	{
+		if( mod_requests[i] == mod )
+			return false;
+	}
+
+	mod_requests[mod_numrequests++] = mod;
+	return false;
+}
+
+/*
+==================
+Mod_FreeUnlisted
+
+studio models of the last map that the next one doesn't have, before it's loaded
+==================
+*/
+void Mod_FreeUnlisted( qboolean (*listed)( const char *name ))
+{
+	mod_numrequests = 0;
+
+	for( int i = 1; i < mod_numknown; i++ )
+	{
+		model_t *mod = Mod_Known( i );
+
+		if( mod->type == mod_studio && mod->mempool && !listed( mod->name ))
+			Mod_FreeModel( mod );
+	}
 }
 #endif
 
@@ -379,7 +868,16 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 	Q_strncpy( tempname, mod->name, sizeof( tempname ));
 	COM_FixSlashes( tempname );
 
+#if MOD_STREAM_BSP
+	file_t *bsp = Mod_OpenMap( tempname, &length );
+	if( bsp )
+		return Mod_LoadMap( mod, bsp, length, crash );
+#endif
+
 #if XASH_PSP
+	if( Mod_KeepCold( mod, tempname ))
+		return mod;
+
 	// the file is only needed while loading, keep it out of the heap (P5 RAM)
 	byte *buf = FS_LoadFileToPool( host.volatilepool, tempname, &length, false );
 #else

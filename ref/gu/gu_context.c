@@ -51,6 +51,11 @@ static qboolean Mod_LooksLikeWaterTexture( const char *name )
 
 static void Mod_BrushUnloadTextures( model_t *mod )
 {
+#if XASH_PSP
+	if( FBitSet( mod->flags, MODEL_WORLD ))
+		R_WorldFree();
+#endif
+
 	for( int i = 0; i < mod->numtextures; i++ )
 	{
 		texture_t *tx = mod->textures[i];
@@ -109,8 +114,14 @@ static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte
 
 	switch( mod->type )
 	{
-	case mod_studio:
 	case mod_brush:
+#if XASH_PSP
+		if( FBitSet( mod->flags, MODEL_WORLD ))
+			R_PrebuildLightmaps( mod );
+#endif
+		loaded = true;
+		break;
+	case mod_studio:
 		loaded = true;
 		break;
 	case mod_sprite:

@@ -73,6 +73,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx );
 qboolean S_SoundPending( const sfx_t *sfx );
 qboolean S_RequestSound( sfx_t *sfx );
 void S_LoadThink( void );
+qboolean S_FreeIdleSound( void );
 extern convar_t s_async;
 #else
 #define S_SoundPending( sfx )	false
