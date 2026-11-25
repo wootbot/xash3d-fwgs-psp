@@ -297,7 +297,7 @@ int GU_ClipIsRequired( gu_vert_t* uv, int uvc )
 		"move		%0,   $0\n"			// res = 0
 	"1:\n"							// exit
 		".set		pop\n"				// Restore assembler option
-		:	"=r"( result ), "+r"( uv )
+		:	"+r"( result ), "+r"( uv )	// result in: 1 when it leaves the loop early
 		:	"r"( uv_end ),
 			"n"(sizeof( gu_vert_t ))
 		:	"$8"
