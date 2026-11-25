@@ -1920,8 +1920,15 @@ static gl_texture_t *GL_TextureForName( const char *name )
 /*
 ================
 GL_AllocTexture
+
+NULL if all slots are taken: a map with many models (each of their textures has a
+slot, also in an atlas) can take them all on the PSP, which models are loaded
+depends on the memory. They get the default texture then. The last
+TEXTURES_INTERNAL slots are for the renderer's own ("*name": lightmaps)
 ================
 */
+#define TEXTURES_INTERNAL	32
+
 static gl_texture_t *GL_AllocTexture( const char *name, texFlags_t flags )
 {
 	gl_texture_t	*tex;
@@ -1933,8 +1940,14 @@ static gl_texture_t *GL_AllocTexture( const char *name, texFlags_t flags )
 
 	if( i == gl_numTextures )
 	{
-		if( gl_numTextures == MAX_TEXTURES )
-			gEngfuncs.Host_Error( "GL_AllocTexture: MAX_TEXTURES limit exceeds\n" );
+		if( gl_numTextures >= ( name[0] == '*' ? MAX_TEXTURES : MAX_TEXTURES - TEXTURES_INTERNAL ))
+		{
+			static int warned;
+
+			if( !warned++ )
+				gEngfuncs.Con_Printf( S_WARN "%s: all %d texture slots are taken, %s and the next ones get the default texture\n", __func__, gl_numTextures, name );
+			return NULL;
+		}
 		gl_numTextures++;
 	}
 
@@ -2049,7 +2062,11 @@ int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 	if( !pic ) return 0; // couldn't loading image
 
 	// allocate the new one
-	tex = GL_AllocTexture( name, flags );
+	if( !( tex = GL_AllocTexture( name, flags )))
+	{
+		gEngfuncs.FS_FreeImage( pic );
+		return 0;
+	}
 	GL_ProcessImage( tex, pic );
 
 	if( !GL_UploadTexture( tex, pic ))
@@ -2100,11 +2117,8 @@ int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags
 			gEngfuncs.Host_Error( "GL_LoadTextureFromBuffer: couldn't find texture %s for update\n", name );
 		SetBits( tex->flags, flags );
 	}
-	else
-	{
-		// allocate the new one
-		tex = GL_AllocTexture( name, flags );
-	}
+	else if( !( tex = GL_AllocTexture( name, flags )))
+		return 0;
 
 	GL_ProcessImage( tex, pic );
 
@@ -2133,6 +2147,9 @@ int GL_CreateAtlasPage( const char *name, int width, int height, int rows, const
 
 	gl_texture_t *tex = GL_AllocTexture( name, 0 );
 	size_t size = 0, offset = 0;
+
+	if( !tex )
+		return 0;
 
 	tex->width = tex->srcWidth = width;
 	tex->height = tex->srcHeight = height;
