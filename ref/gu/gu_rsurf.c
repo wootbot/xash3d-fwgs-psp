@@ -732,11 +732,21 @@ static void LM_UploadBlock( qboolean dynamic )
 {
 	if( dynamic )
 	{
-		// NOTE: the GE reads the texture when it executes the list, after this returns
+		// the GE reads the texture when it executes the list, long after this returns: in a
+		// frame with more than one block the last one's light overwrote the others' (the
+		// flashlight on deluge_beta_v3). Each block gets its own memory in the display list
 		tr.dlightTexture = tr.dlightTextures[guRender.vert_frame & 1];
-		GU_UpdateTextureRect( tr.dlightTexture, 0, 0, BLOCK_SIZE, gl_lms.atlas.max_height, gl_lms.lightmap_buffer );
-		glState.currentTexture = -1; // force rebind
-		GL_Bind( XASH_TEXTURE0, tr.dlightTexture );
+		if( !FBitSet( R_GetTexture( tr.dlightTexture )->flags, TF_IMG_UPLOADED ))
+			GU_UpdateTextureRect( tr.dlightTexture, 0, 0, BLOCK_SIZE, 1, gl_lms.lightmap_buffer ); // format and CLUT
+
+		const int rows = Q_max( 1, gl_lms.atlas.max_height );
+		byte *mem = extGuGetMemoryNoStall( BLOCK_SIZE * rows * LIGHTMAP_BPP + 16 );
+		gl_texture_t block = *R_GetTexture( tr.dlightTexture );
+
+		block.dstTexture = (byte *)((((uint)mem ) + 15 ) & ~15u );
+		memcpy( block.dstTexture, gl_lms.lightmap_buffer, BLOCK_SIZE * rows * LIGHTMAP_BPP );
+		extGuCmdEnd( GL_BindCommands( &block, extGuCmdBegin( )));
+		glState.currentTexture = -1;
 	}
 	else
 	{
