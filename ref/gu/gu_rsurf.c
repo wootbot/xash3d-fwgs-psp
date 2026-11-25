@@ -2101,10 +2101,10 @@ of their own): see me_psp.c.
 static CVAR_DEFINE_AUTO( r_world_me, "1", FCVAR_ARCHIVE, "walk the world and write its draw commands on the Media Engine" );
 static CVAR_DEFINE_AUTO( r_brushes_me, "1", FCVAR_ARCHIVE, "the same for the static brush models (needs r_world_me)" );
 
-#define MEWORLD_MAXVIS	2048	// visible plain surfaces
+#define MEWORLD_MAXVIS	4096	// visible plain surfaces
 #define MEWORLD_MAXLIST	1024	// surfaces for the main CPU, of each kind
 #define MEWORLD_MAXLEAFS	256	// leaves with efrags
-#define MEWORLD_CMDS	12288	// GE commands of all lists of a frame
+#define MEWORLD_CMDS	24576	// GE commands of all lists of a frame
 #define MEWORLD_MAXBIND	48	// GE commands of one bind
 #define MEWORLD_MAXBRUSHES	128	// static brush models
 #define MEWORLD_BACKSIDE	BIT( 15 )	// meworld_res_t.who: CULL_BACKSIDE
@@ -2165,6 +2165,7 @@ typedef struct
 
 	// the ME's own
 	uint		*p;		// end of the commands
+	uint		base;		// the last BASE in this list, ~0 none yet
 	int		full;
 	int		numvis, numtextures;
 	meworld_res_t	*res;
@@ -2454,12 +2455,15 @@ static qboolean R_MeBind( meworld_job_t *job, int texnum )
 // extGuDrawArrayNoStall with the vertex type set before
 static qboolean R_MeDrawVerts( meworld_job_t *job, const gu_vert_t *verts, int numverts )
 {
+	const uint base = ( 16 << 24 ) | (((uint)verts >> 8 ) & 0xf0000 );
 	uint *p = job->p;
 
 	if( !R_MeSpace( job, 3 ))
 		return false;
 
-	*p++ = ( 16 << 24 ) | (((uint)verts >> 8 ) & 0xf0000 ); // BASE
+	// the polygons are mostly in one 16 MB block
+	if( base != job->base )
+		*p++ = job->base = base; // BASE
 	*p++ = ( 1 << 24 ) | ((uint)verts & 0xffffff ); // VADDR
 	*p++ = ( 4 << 24 ) | ( GU_TRIANGLE_FAN << 16 ) | numverts; // PRIM
 	job->p = p;
@@ -2473,6 +2477,7 @@ static uint32_t R_MeListBegin( meworld_job_t *job )
 
 	*job->p++ = 0; // NOP, so that no list starts at 0
 	*job->p++ = ( 18 << 24 ) | GU_TEXTURE_32BITF | GU_VERTEX_32BITF; // VTYPE
+	job->base = ~0u;
 	return job->p - 1 - job->cmds;
 }
 
@@ -2673,16 +2678,22 @@ void R_MeWorldBegin( void )
 
 	if( !r_meworld.alloc )
 	{
+		// tried on this map already (not in r_world_me: it's archived, the next map may fit)
+		static const model_t *nomem;
 		const size_t outsize = ( sizeof( meworld_out_t ) + 63 ) & ~63;
 		const size_t size = outsize + (( ws_numsurfs * sizeof( uint16_t ) + 63 ) & ~63 );
+
+		if( nomem == WORLDMODEL )
+			return;
 
 		r_meworld.alloc = memalign( 64, size );
 		if( !r_meworld.alloc )
 		{
-			gEngfuncs.Con_Printf( S_WARN "%s: out of memory\n", __func__ );
-			gEngfuncs.Cvar_SetValue( "r_world_me", 0.0f );
+			gEngfuncs.Con_Printf( S_WARN "%s: out of memory, the main CPU walks the world on this map\n", __func__ );
+			nomem = WORLDMODEL;
 			return;
 		}
+		nomem = NULL;
 
 		memset( r_meworld.alloc, 0, size );
 		job->out = r_meworld.alloc;
@@ -2763,6 +2774,13 @@ qboolean R_MeBrushClassify( const cl_entity_t *e, meworld_brush_t *m )
 	{
 		m->mins[j] = bound( -32768, (int)( mod->mins[j] - 1.0f ), 32767 );
 		m->maxs[j] = bound( -32768, (int)( mod->maxs[j] + 1.0f ), 32767 );
+	}
+
+	// R_MeBrush can't do these: R_DrawStaticBrushModels draws this one
+	for( int i = mod->firstmodelsurface - bs_first; i < mod->firstmodelsurface - bs_first + mod->nummodelsurfaces; i++ )
+	{
+		if( FBitSet( bs_surfs[i].flags, BS_SLOW ))
+			return false;
 	}
 
 	m->firstsurf = mod->firstmodelsurface;
