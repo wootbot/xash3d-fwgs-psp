@@ -376,6 +376,25 @@ static int GL_BuildPolygonFromSurface( model_t *mod, msurface_t *fa )
 		R_LightmapCoord( lm[i].xyz, fa, sample_size, lm[i].uv );
 	}
 
+	// the texture repeats: whole repeats away from the polygon's middle, the GE's 24 bit
+	// floats get less accurate with the size of the coordinates. Detail textures don't
+	// repeat with it, they get seams if their scale isn't an integer.
+	for( int j = 0; j < 2; j++ )
+	{
+		float lo = poly->verts[0].uv[j], hi = lo;
+
+		for( int i = 1; i < lnumverts; i++ )
+		{
+			lo = Q_min( lo, poly->verts[i].uv[j] );
+			hi = Q_max( hi, poly->verts[i].uv[j] );
+		}
+
+		const float shift = floorf(( lo + hi ) * 0.5f );
+
+		for( int i = 0; i < lnumverts; i++ )
+			poly->verts[i].uv[j] -= shift;
+	}
+
 	// remove co-linear points - Ed
 	if( !gl_keeptjunctions.value && !FBitSet( fa->flags, SURF_UNDERWATER ))
 	{

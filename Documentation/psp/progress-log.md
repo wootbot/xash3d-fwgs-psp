@@ -927,8 +927,7 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   (pitch) and Y as axis 3 (yaw), both negated, like the old port, which expects its config to remap
   them. Now X is yaw and Y is pitch, not negated, so the defaults (`joy_axis_binding sfpyrl`,
   positive `joy_yaw`/`joy_pitch`) are right. Configs that worked around it (`sfyprl`, negative
-  `joy_yaw`/`joy_pitch`) have to go back to the defaults. The workaround was tried live
-  by cvar, the new build isn't on the PSP yet.
+  `joy_yaw`/`joy_pitch`) have to go back to the defaults.
 
 ## 2026-11-24: brush entities seen through walls
 
@@ -938,3 +937,9 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   Tried live with 0.016 (2 steps) and confirmed by the user.
 - The analog axes' workaround was confirmed by the user too.
 - The FPS meter stuck at 71 was `fps_max 72`, the PSP never dropped under it. 200 shows 95-116 there.
+- Textures of floor polygons shifted and stretched when the view shook (user report, `blastcorpse1` at
+  -3107 3371 -106): the texture coordinates of world polygons were map coordinates over the texture size, tens
+  of repeats far from the origin, and the GE interpolates in 24 bit floats. Whole repeats are subtracted per
+  polygon at load (GL_BuildPolygonFromSurface), free at runtime. Confirmed by the user; the guard band clip
+  planes were not it, they stay at 1440 / 1632 pixels. Detail textures (off by default) can get seams.
+- Stress server plugin: `setpos <eye x y z> <pitch> <yaw>` takes what the client's `viewpos` prints.
