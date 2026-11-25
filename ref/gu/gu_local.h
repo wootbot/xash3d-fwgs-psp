@@ -442,6 +442,7 @@ int GL_CreateAtlasPage( const char *name, int width, int height, int rows, const
 void GL_PixelConverter( byte *dst, const byte *src, int size, int inFormat, int outFormat );
 extern uint gl_texframe[MAX_TEXTURES];	// guRender.vert_frame it was last used in, about
 #define GL_TouchTexture( texnum ) ( gl_texframe[( texnum )] = guRender.vert_frame )
+extern uint gl_texgen;	// changes when a texture's data or palette moves (GL_PlaceTextures)
 void GL_PlaceTextures( void );
 qboolean GU_UpdateTextureRect( int texnum, int xoff, int yoff, int width, int height, const void *buffer );
 int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags );

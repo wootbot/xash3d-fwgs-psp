@@ -45,6 +45,7 @@ static gl_texture_t*	gl_texturesHashTable[TEXTURES_HASH_SIZE];
 static uint		gl_numTextures;
 static byte*		gl_palette_332 = NULL;
 uint			gl_texframe[MAX_TEXTURES];
+uint			gl_texgen;
 
 /*
 	CLUTs are 16-bit, the format is picked per texture by the alpha the palette needs
@@ -1501,6 +1502,7 @@ static void GL_SetTextureData( int texnum, byte *data, byte *palette )
 
 	tex->dstTexture = data;
 	tex->dstPalette = palette;
+	gl_texgen++;
 	if( vchkptr( data ))
 		SetBits( tex->flags, TF_IMG_INVRAM );
 	else ClearBits( tex->flags, TF_IMG_INVRAM );

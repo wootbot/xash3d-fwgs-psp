@@ -7619,6 +7619,24 @@ typedef struct
 
 static geskin_t	*ge_skins; // MAX_TEXTURES, allocated on first use
 
+// skin blocks replaced while lists the GE may still draw call them: freed later
+#define GE_OLDBLOCKS	64
+static struct { void *mem; uint frame; } ge_oldblocks[GE_OLDBLOCKS];
+static uint ge_numold, ge_numoldfree;
+
+static void R_StudioGEFreeLater( void *mem )
+{
+	// R_NextFrame: the GE and the ME are done with the lists two frames back
+	while( ge_numoldfree != ge_numold && ge_oldblocks[ge_numoldfree % GE_OLDBLOCKS].frame + 3 <= guRender.vert_frame )
+		free( ge_oldblocks[ge_numoldfree++ % GE_OLDBLOCKS].mem );
+
+	if( !mem || ge_numold - ge_numoldfree >= GE_OLDBLOCKS )
+		return; // rare: it leaks
+
+	ge_oldblocks[ge_numold % GE_OLDBLOCKS].mem = mem;
+	ge_oldblocks[ge_numold++ % GE_OLDBLOCKS].frame = guRender.vert_frame;
+}
+
 static void R_StudioGESkinKey( const gl_texture_t *t, const mstudiotexture_t *ptex, geskin_t *k )
 {
 	k->data = t->dstTexture;
@@ -7710,17 +7728,16 @@ static const uint *R_StudioGESkinBlock( const mstudiotexture_t *ptex, int skinin
 	const uint *frame_block = R_StudioGEBuildSkinBlock( ptex, skinindex, bindtex );
 	const uint words = extGuCmdBegin() - frame_block; // up to and including the RET
 
-	if( words > s->capacity )
-	{
-		// an old block may still be called from the list the GE is drawing:
-		// only happens when a texture or a cvar changed, let it leak
-		uint *mem = memalign( 16, words * sizeof( uint ));
-		if( !mem )
-			return frame_block;
-		ge_rec_gen++; // recorded props call the old block
-		s->block = mem;
-		s->capacity = words;
-	}
+	// a new block: the old one may still be called from the lists the GE draws
+	// (rewriting it there drew the next textures from a mix of old and new
+	// addresses). Only when a texture moved or a cvar changed
+	uint *mem = memalign( 16, words * sizeof( uint ));
+	if( !mem )
+		return frame_block;
+	ge_rec_gen++; // recorded props call the old block
+	R_StudioGEFreeLater( s->block );
+	s->block = mem;
+	s->capacity = words;
 
 	memcpy( s->block, frame_block, words * sizeof( uint ));
 	sceKernelDcacheWritebackRange( s->block, words * sizeof( uint ));
@@ -10196,6 +10213,7 @@ static CVAR_DEFINE_AUTO( r_studio_propcache, "1", FCVAR_ARCHIVE, "keep the bones
 
 #define PROP_MAXBONES	2
 #define PROP_SLOTS	64
+#define PROP_MAXITEMS	32
 #define PROP_LIGHT_TIME	0.25
 
 typedef struct
@@ -10226,6 +10244,9 @@ typedef struct
 	vec3_t		rec_absmin, rec_absmax;
 	vec3_t		rec_attachment[4];
 	int		rec_polys;
+	uint		rec_texgen;	// gl_texgen it was recorded in: the skin blocks have the textures' addresses
+	short		rec_tex[PROP_MAXITEMS];	// touched when it's drawn, or they'd leave VRAM while in use
+	int		rec_numtex;
 } propcache_t;
 
 static propcache_t r_propcache[PROP_SLOTS];
@@ -10333,13 +10354,13 @@ changed, or a skin block or GE model changed.
 static CVAR_DEFINE_AUTO( r_studio_proplist, "1", FCVAR_ARCHIVE, "draw props that keep their bones and light from GE commands recorded once" );
 
 #define PROP_LIGHTBLOCK_MAX	64	// words, the light block is ~35
-#define PROP_MAXITEMS	32
 
 typedef struct
 {
 	const gebatch_t	*batches;
 	int		numbatches;
 	const uint	*skin;
+	int		texnum;
 	int		flat;
 	qboolean		newsubmodel;	// the GE bone slots start over
 } propitem_t;
@@ -10436,6 +10457,7 @@ static void R_StudioPropRecordCommands( propcache_t *pc, cl_entity_t *e )
 			it->batches = merge->groups[g].batches;
 			it->numbatches = merge->groups[g].numbatches;
 			it->skin = R_StudioPropSkinBlock( &ge_atlas_ptex, 0, merge->groups[g].atlas );
+			it->texnum = merge->groups[g].atlas;
 			it->flat = false;
 			it->newsubmodel = first;
 			first = false;
@@ -10459,6 +10481,7 @@ static void R_StudioPropRecordCommands( propcache_t *pc, cl_entity_t *e )
 			it->batches = gm->meshes[j].batches;
 			it->numbatches = gm->meshes[j].numbatches;
 			it->skin = R_StudioPropSkinBlock( ptex, pskinref[pmesh[j].skinref], 0 );
+			it->texnum = ptex->index;
 			it->flat = FBitSet( ptex->flags, STUDIO_NF_FLATSHADE ) ? 1 : 0;
 			it->newsubmodel = first;
 			first = false;
@@ -10502,9 +10525,13 @@ static void R_StudioPropRecordCommands( propcache_t *pc, cl_entity_t *e )
 
 	pc->rec_main = p;
 	pc->rec_lastskin = NULL;
+	pc->rec_numtex = 0;
 	for( int i = 0; i < numitems; i++ )
 	{
 		const propitem_t *it = &items[i];
+
+		if( it->texnum > 0 && it->texnum < MAX_TEXTURES )
+			pc->rec_tex[pc->rec_numtex++] = it->texnum;
 
 		if( it->newsubmodel )
 			ge_slots_valid = 0;
@@ -10533,6 +10560,7 @@ static void R_StudioPropRecordCommands( propcache_t *pc, cl_entity_t *e )
 	memcpy( pc->rec_attachment, e->attachment, sizeof( pc->rec_attachment ));
 	pc->rec_polys = polys;
 	pc->rec_time = pc->time;
+	pc->rec_texgen = gl_texgen;
 	pc->rec_gen = ge_rec_gen;
 }
 
@@ -10597,7 +10625,7 @@ static propcache_t *R_StudioPropRecorded( const cl_entity_t *e )
 	if( pc->e != e && ( pc = &r_propcache[( h + 1 ) & ( PROP_SLOTS - 1 )] )->e != e )
 		return NULL;
 
-	if( !pc->valid || pc->rec_gen != ge_rec_gen || pc->rec_time != pc->time || pc->rec_frame == guRender.vert_frame )
+	if( !pc->valid || pc->rec_gen != ge_rec_gen || pc->rec_texgen != gl_texgen || pc->rec_time != pc->time || pc->rec_frame == guRender.vert_frame )
 		return NULL;
 	if( pc->model != e->model || pc->sequence != e->curstate.sequence || pc->body != e->curstate.body || pc->skin != e->curstate.skin || pc->frame != e->curstate.frame )
 		return NULL;
@@ -10625,6 +10653,9 @@ static qboolean R_StudioPropDrawRecorded( cl_entity_t *e )
 	pc->rec_frame = guRender.vert_frame;
 	if( R_CullBox( pc->rec_absmin, pc->rec_absmax ))
 		return true;
+
+	for( int i = 0; i < pc->rec_numtex; i++ )
+		GL_TouchTexture( pc->rec_tex[i] );
 
 	r_stats.c_studio_models_drawn++;
 	r_stats.c_studio_polys += pc->rec_polys;
