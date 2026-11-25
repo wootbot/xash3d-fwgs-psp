@@ -429,7 +429,12 @@ static void PSP_DbgConUpdate_f( void )
 
 	while( total < size && ( n = recv( sock, buf, Q_min( (int)sizeof( buf ), size - total ), 0 )) > 0 )
 	{
-		write( fd, buf, n );
+		// a full stick writes less: stop, the old EBOOT stays
+		if( write( fd, buf, n ) != n )
+		{
+			Con_Printf( S_ERROR "psp_update: write failed after %d bytes (stick full?)\n", total );
+			break;
+		}
 		total += n;
 	}
 
@@ -440,6 +445,7 @@ static void PSP_DbgConUpdate_f( void )
 	if( total != size )
 	{
 		Con_Printf( S_ERROR "psp_update: got %d of %d bytes\n", total, size );
+		remove( path );
 		return;
 	}
 
@@ -454,9 +460,17 @@ static void PSP_DbgConUpdate_f( void )
 	PSP_DbgConRestart_f();
 }
 
+static void PSP_Rm_f( void )
+{
+	if( Cmd_Argc() < 2 || Q_strstr( Cmd_Argv( 1 ), ".." ))
+		return;
+	Con_Printf( "psp_rm %s: %s\n", Cmd_Argv( 1 ), FS_Delete( Cmd_Argv( 1 )) ? "ok" : "failed" );
+}
+
 void PSP_DbgConInit( void )
 {
 	dbg.enabled = Sys_CheckParm( "-dbgcon" );
+	Cmd_AddCommand( "psp_rm", PSP_Rm_f, "delete a file in the game directory (debugging)" );
 	Cmd_AddCommand( "psp_restart", PSP_DbgConRestart_f, "restart the game (debugging)" );
 	Cmd_AddCommand( "psp_update", PSP_DbgConUpdate_f, "receive a new EBOOT.PBP (or the given file) from scripts/psp/dbgcon.py and restart with it (debugging)" );
 }
