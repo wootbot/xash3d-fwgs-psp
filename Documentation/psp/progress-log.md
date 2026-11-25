@@ -966,3 +966,24 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   CL_ClearState), and a file nobody needs doesn't register resources. Built, not tried on the PSP yet.
 - `deluge_beta_v3` doesn't fit: the 25 MB .bsp is loaded as a whole (`Not enough memory`, filesystem_engine.c:83; the
   largest free block was 8.6 MB), after 12 minutes of downloads. The PSP is left at the console.
+- 2026-11-24 (evening): **`deluge_beta_v3` loads** (`47337a07`; 25 MB .bsp, 30738 surfaces, 336 embedded textures).
+  - The raw file was the smaller problem. mextrasurf_t was 324 bytes a surface, face bevels ~170 (used by
+    PM_RecursiveSurfCheck and the ME's sky trace only), polygons 5.5 MB, textures 14 MB at 256, light 3.2 MB. A place in
+    it sees ~1300 surfaces (median, max 4750). Heap: 36.5 MB, 6.3 MB of it used at the menu.
+  - Streaming loader compared with the old one on the PC (address sanitizer, dedicated build): identical on 63 of 63
+    maps. The first try read every lump twice: Q_max( 0, FS_Read( )) evaluates its argument twice.
+  - Mod_PointInFace against the bevels: 32 of 1.2 million points differ, all within 1/32 unit of an edge.
+  - Memory after loading: world 14 MB (from 15.4 without the lightmap part), ~33.5 MB in use in game, 1.5-3 MB free.
+    DXT1 halved the world textures (4.0 -> 0.8 MB in RAM), sprites 2.5 -> 1.1 MB with a 64 pixel limit.
+  - The first frame has no view leaf: its PVS is everything, all polygons were built and never dropped (5.5 MB,
+    a 583 ms frame).
+  - Lightmaps built at load time were black: CL_RunLightStyles returns without a world, the styles were 0.
+  - **Power-offs: an uninitialised pointer.** gu_poly_t.chain of the on-demand polygons (Mem_Calloc before, raw memory
+    now), followed by DrawGLPolyChain in the lightmap pass of slow surfaces. Found with stage names sent one by
+    one over Wi-Fi (`psp_crumbs`, not committed). Suspected and not confirmed before that: battery, main thread stack
+    (460 of 512 KB: CL_ProcessFile and CL_BatchResourceRequest had 192 KB buffers around the map load, moved
+    to the heap), GE list overflow (a guard was added). Two restarts that didn't come back are unexplained.
+  - With it: 8 places of the map visited, 38 (main start) to 178 fps. Allocation failures that free idle models
+    and sounds, and blastcorpse1 with the final version, aren't tested on the PSP.
+  - Open: the main start at 60 fps (SCR_UpdateScreen 20 ms: world 6.5, models 3.4, ~10 not explained), light styles on
+    big maps, loading (~35 s in one call), memory in pieces after a while.

@@ -75,6 +75,8 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
       keyframes was tried twice and saves almost nothing (see the progress log).
 - [x] Sounds load in the background, decals with the map: no frames over ~35 ms in the blastcorpse1 fight.
 - [x] Memory in the stress scene: 7 MB left (2026-11-24).
+- [~] Big maps: `deluge_beta_v3` (25 MB) loads and runs, 38 fps at its main start (must be 60), the rest of the
+      tested places 45-178 (2026-11-24). Left: that start, light styles there, loading time, fragmented memory.
 - [ ] Shells, gibs, blood drips: tiny batched meshes/sprites, caps on count and lifetime.
 - [~] World: compact copies of the world surfaces for the walk and both passes (done, world
       3.7 -> 2.0 ms in fight1), and a compact BSP tree for the walk (walk ~1.2 -> 0.92 ms).
