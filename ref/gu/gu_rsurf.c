@@ -706,6 +706,15 @@ static void R_AddDynamicLights( const msurface_t *surf, float sample_size, int s
 
 =============================================================================
 */
+/*
+CLOAD of a lightmap's CLUT (256 16-bit colors in 32 byte blocks), sent again before
+each lightmap draw: in a long run of draws after one bind the GE went on with
+another CLUT for some polygons (red floors and doors in deluge_beta_v3, depending
+on the view and on what was drawn before). Only reloading the CLUT fixed it; the
+CLUT is in VRAM, so this doesn't take bus time from the CPUs
+*/
+#define LM_CLOAD	(( 0xC4 << 24 ) | ( 256 * 2 / 32 ))
+
 static void LM_InitBlock( void )
 {
 	Atlas_Init( &gl_lms.atlas, BLOCK_SIZE );
@@ -2148,16 +2157,10 @@ static void R_WorldSurfsDrawLightmaps( int page )
 	for( int s = ws_lmhead[page]; s != WS_NONE; s = ws_surfs[s].lmnext )
 	{
 		const gu_wsurf_t *w = &ws_surfs[s];
+		uint *p = extGuCmdBegin();
 
-		// the page again before a polygon that may need clipping: the GE drew some
-		// of those with another palette than the page's (whole floor polygons red in
-		// deluge_beta_v3 after a while of play), although the commands between the
-		// page's bind and these draws are only clipped vertices and draws
-		if( !FBitSet( w->texflags, WS_NOCLIP ))
-		{
-			glState.currentTexture = -1;
-			GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[page] );
-		}
+		*p++ = LM_CLOAD;
+		extGuCmdEnd( p );
 		R_WorldSurfDraw( w, w->verts + w->numverts );
 	}
 
@@ -2195,7 +2198,7 @@ static CVAR_DEFINE_AUTO( r_brushes_me, "1", FCVAR_ARCHIVE, "the same for the sta
 #define MEWORLD_MAXVIS	4096	// visible plain surfaces
 #define MEWORLD_MAXLIST	1024	// surfaces for the main CPU, of each kind
 #define MEWORLD_MAXLEAFS	256	// leaves with efrags
-#define MEWORLD_CMDS	16384	// GE commands of all lists of a frame (deluge_beta_v3: up to ~13600)
+#define MEWORLD_CMDS	18432	// GE commands of all lists of a frame (deluge_beta_v3: up to ~13600, then a CLOAD per lightmap draw)
 #define MEWORLD_BUFFERS	3	// the GE may still read the lists of two frames (R_NextFrame), R_MeWorldEarly writes the next one's
 #define MEWORLD_MAXBIND	48	// GE commands of one bind
 #define MEWORLD_MAXBRUSHES	128	// static brush models
@@ -2690,6 +2693,9 @@ static void R_MeCommands( meworld_job_t *job )
 
 		for( int n = out->lmhead[i]; n != WS_NONE; n = out->vis[n].lmnext )
 		{
+			if( !R_MeSpace( job, 1 ))
+				return;
+			*job->p++ = LM_CLOAD;
 			if( !R_MeDrawVerts( job, out->vis[n].verts + out->vis[n].numverts, out->vis[n].numverts ))
 				return;
 		}
@@ -3663,7 +3669,13 @@ static void DrawGLPolyChain( gu_poly_t *p, float soffset, float toffset )
 	if( dynamic ) sceGuTexOffset( -soffset, -toffset );
 
 	for( ; p != NULL; p = p->chain )
+	{
+		uint *cmd = extGuCmdBegin();
+
+		*cmd++ = LM_CLOAD;
+		extGuCmdEnd( cmd );
 		GU_DrawPoly( p, &p->verts[p->numverts] );
+	}
 
 	if( dynamic ) sceGuTexOffset( 0.0f, 0.0f );
 }
