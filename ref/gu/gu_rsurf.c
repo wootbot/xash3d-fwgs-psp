@@ -3965,6 +3965,51 @@ static int R_SurfaceCompare( const void *a, const void *b )
 	return 0;
 }
 
+#if XASH_PSP
+typedef struct
+{
+	float		dist;
+	sortedface_t	face;
+} sortkey_t;
+
+static int R_SortKeyCompare( const void *a, const void *b )
+{
+	const float d1 = ((const sortkey_t *)a)->dist, d2 = ((const sortkey_t *)b)->dist;
+
+	return d1 > d2 ? -1 : d1 < d2 ? 1 : 0;
+}
+
+// R_SurfaceCompare's order with each distance computed once: qsort read the
+// surfaces' boxes ~8 times each (deluge_beta_v3, 8 translucent brush models,
+// 0.56 -> 0.46 ms with their culling)
+static void R_SortSurfacesBackToFront( sortedface_t *faces, int count )
+{
+	static sortkey_t keys[512];
+
+	if( count > ARRAYSIZE( keys ))
+	{
+		qsort( faces, count, sizeof( *faces ), R_SurfaceCompare );
+		return;
+	}
+
+	for( int i = 0; i < count; i++ )
+	{
+		const mextrasurf_t *info = faces[i].surf->info;
+		vec3_t org;
+
+		VectorAverage( info->mins, info->maxs, org );
+		VectorAdd( RI.currententity->origin, org, org );
+		keys[i].dist = DotProduct( org, RI.vforward ) - RI.viewplanedist;
+		keys[i].face = faces[i];
+	}
+
+	qsort( keys, count, sizeof( *keys ), R_SortKeyCompare );
+
+	for( int i = 0; i < count; i++ )
+		faces[i] = keys[i].face;
+}
+#endif
+
 static void R_SetRenderMode( cl_entity_t *e )
 {
 	// NOTE: sceGuDepthMask( GU_TRUE ) disables depth writes
@@ -4128,7 +4173,11 @@ static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mi
 
 	// sort faces if needs
 	if( !FBitSet( clmodel->flags, MODEL_LIQUID ) && e->curstate.rendermode == kRenderTransTexture && !gl_nosort.value )
+#if XASH_PSP
+		R_SortSurfacesBackToFront( draw_surfaces, num_sorted );
+#else
 		qsort( draw_surfaces, num_sorted, sizeof( sortedface_t ), R_SurfaceCompare );
+#endif
 
 	return num_sorted;
 }
