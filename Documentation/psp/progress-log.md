@@ -1088,3 +1088,6 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   queries and sends each again once with the challenge; the PSP got `I` replies from HLDS and an internet server
   right after. Upstream has the same bug. Favorites are in `valve/favorite_servers.lst` (`<adr> gs` per line),
   the name in `config.cfg`.
+- 2026-11-25: the server browser tabs (Direct/Favorites/History) could only be clicked with the mouse, so the
+  PSP was stuck on Direct. mainui is now a fork (`wootbot/mainui_cpp`, branch `psp`): L/R switch the tabs
+  there instead of paging the list.

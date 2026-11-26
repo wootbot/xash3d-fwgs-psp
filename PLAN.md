@@ -146,3 +146,5 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - **Wi-Fi**: PSP only supports WEP/WPA; modern routers may need mixed mode or a separate SSID.
 - **Fake-client kicks** on some GoldSrc servers (upstream known issue).
 - **Submodule changes** (mainui, library_suffix) would need forks — track any here.
+  - mainui: fork `wootbot/mainui_cpp`, branch `psp` (on top of upstream `8981066`): L/R switch the
+    server browser tabs (no cursor on the PSP). Rebase it when updating mainui.
