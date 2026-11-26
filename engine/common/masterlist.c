@@ -217,12 +217,97 @@ NET_QueryServerByAddress
 
 ========================
 */
+// GoldSrc servers that follow Steam's A2S_INFO change (Steam HLDS since 2020,
+// ReHLDS) answer an info query without a challenge with a challenge only, the
+// query must be sent again with it. Remember the queries sent, so each can be
+// repeated once
+#define MAX_INFO_QUERIES   64
+#define INFO_QUERY_TIMEOUT 10.0
+
+static struct
+{
+	netadr_t adr;
+	double time;
+	qboolean challenged;
+} info_queries[MAX_INFO_QUERIES];
+static int info_queries_next;
+
+static void NET_SendGoldSrcInfoQuery( netadr_t adr, const uint32_t *challenge )
+{
+	byte buf[sizeof( A2S_GOLDSRC_INFO ) + sizeof( uint32_t )];
+	size_t len = sizeof( A2S_GOLDSRC_INFO ); // includes null terminator
+
+	memcpy( buf, A2S_GOLDSRC_INFO, len );
+
+	if( challenge )
+	{
+		// little endian, as it came in the challenge
+		buf[len++] = ( *challenge ) & 0xff;
+		buf[len++] = ( *challenge >> 8 ) & 0xff;
+		buf[len++] = ( *challenge >> 16 ) & 0xff;
+		buf[len++] = ( *challenge >> 24 ) & 0xff;
+	}
+
+	Netchan_OutOfBand( NS_CLIENT, adr, len, buf );
+}
+
 void NET_QueryServerByAddress( netadr_t adr, connprotocol_t proto )
 {
-	if( proto == PROTO_GOLDSRC )
-		Netchan_OutOfBand( NS_CLIENT, adr, sizeof( A2S_GOLDSRC_INFO ), (const byte *)A2S_GOLDSRC_INFO ); // includes null terminator
-	else
+	int i;
+
+	if( proto != PROTO_GOLDSRC )
+	{
 		Netchan_OutOfBandPrint( NS_CLIENT, adr, A2A_INFO " %i", PROTOCOL_VERSION );
+		return;
+	}
+
+	NET_SendGoldSrcInfoQuery( adr, NULL );
+
+	// reuse the entry of a server queried before
+	for( i = 0; i < MAX_INFO_QUERIES; i++ )
+	{
+		if( info_queries[i].time != 0.0 && NET_CompareAdr( info_queries[i].adr, adr ))
+			break;
+	}
+
+	if( i == MAX_INFO_QUERIES )
+	{
+		i = info_queries_next;
+		info_queries_next = ( info_queries_next + 1 ) % MAX_INFO_QUERIES;
+	}
+
+	info_queries[i].adr = adr;
+	info_queries[i].time = host.realtime;
+	info_queries[i].challenged = false;
+}
+
+/*
+========================
+NET_QueryServerChallenge
+
+the server answered an info query with a challenge: send the query again
+with it, once. Returns false if no info query to that server is pending
+========================
+*/
+qboolean NET_QueryServerChallenge( netadr_t from, uint32_t challenge )
+{
+	for( int i = 0; i < MAX_INFO_QUERIES; i++ )
+	{
+		if( info_queries[i].time == 0.0 || info_queries[i].challenged )
+			continue;
+
+		if( host.realtime - info_queries[i].time > INFO_QUERY_TIMEOUT )
+			continue;
+
+		if( !NET_CompareAdr( info_queries[i].adr, from ))
+			continue;
+
+		info_queries[i].challenged = true;
+		NET_SendGoldSrcInfoQuery( from, &challenge );
+		return true;
+	}
+
+	return false;
 }
 
 static int NET_ParseMasterStaticBody( const byte *body, size_t size )

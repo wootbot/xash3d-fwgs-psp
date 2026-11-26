@@ -936,6 +936,7 @@ void NET_MasterShutdown( void );
 qboolean NET_GetMaster( netadr_t from, uint *challenge, double *last_heartbeat );
 qboolean NET_MasterQuery( uint32_t key, qboolean net, const char *filter );
 void NET_QueryServerByAddress( netadr_t adr, connprotocol_t proto );
+qboolean NET_QueryServerChallenge( netadr_t from, uint32_t challenge );
 
 //
 // munge.c

@@ -1082,3 +1082,9 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
 - 2026-11-25: the TEMP profiling probes (stage marks, PROF/PT timers, sampler, benchmarks, checks) are committed
   on the local branch `psp-probes` (`c32bfe8f`), not on master; master's working tree carries the same changes
   uncommitted. `git diff master psp-probes | git apply` brings them back onto a clean master tree.
+- 2026-11-25: server browser showed no GoldSrc servers (favorites, history, Direct): Steam HLDS and ReHLDS answer
+  `TSource Engine Query` without a challenge with `A` + challenge only, and the engine repeated the query with
+  the challenge only for NetAPI requests. `NET_QueryServerChallenge` (masterlist.c) now remembers browser info
+  queries and sends each again once with the challenge; the PSP got `I` replies from HLDS and an internet server
+  right after. Upstream has the same bug. Favorites are in `valve/favorite_servers.lst` (`<adr> gs` per line),
+  the name in `config.cfg`.
