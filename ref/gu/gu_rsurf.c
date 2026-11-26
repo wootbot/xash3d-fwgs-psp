@@ -68,6 +68,9 @@ static msurface_t		*skychain = NULL;
 static gllightmapstate_t	gl_lms;
 #if XASH_PSP
 static const model_t	*lm_prebuilt; // see R_PrebuildLightmaps
+#if XASH_PSP
+static void R_PrebuiltSwitch( void );
+#endif
 #endif
 
 static void LM_UploadBlock( qboolean dynamic );
@@ -804,6 +807,13 @@ static byte R_PrebuiltLuxel( const gl_texture_t *page, int x, int y )
 	if( FBitSet( page->flags, TF_IMG_SWIZZLED ))
 		return page->dstTexture[(( y >> 3 ) * ( page->width >> 4 ) + ( x >> 4 )) * 128 + ( y & 7 ) * 16 + ( x & 15 )];
 	return page->dstTexture[y * page->width + x];
+}
+
+static void R_PrebuiltSetLuxel( const gl_texture_t *page, int x, int y, byte lm )
+{
+	if( FBitSet( page->flags, TF_IMG_SWIZZLED ))
+		page->dstTexture[(( y >> 3 ) * ( page->width >> 4 ) + ( x >> 4 )) * 128 + ( y & 7 ) * 16 + ( x & 15 )] = lm;
+	else page->dstTexture[y * page->width + x] = lm;
 }
 #endif
 
@@ -5178,6 +5188,9 @@ void R_DrawWorld( void )
 		return;
 
 	VectorCopy( RI.cullorigin, tr.modelorg );
+#if XASH_PSP
+	R_PrebuiltSwitch();
+#endif
 	memset( gl_lms.lightmap_surfaces, 0, sizeof( gl_lms.lightmap_surfaces ));
 	// their passes empty them (they're 12 KB, most of the data cache)
 	if( R_SeparatePassActive( &draw_fullbrights ))
@@ -5454,8 +5467,8 @@ R_PrebuildLightmaps
 
 the light of a big map takes megabytes. Its lightmaps are built as soon as it's
 loaded, after that only the light of the floors is kept, for the models on them. The
-light styles don't change its lightmaps then; the dynamic lights go on top of the
-pages (R_PrebuiltPage).
+switchable lights are built again when they switch (R_PrebuiltSwitch), the other
+styles stay as they were; the dynamic lights go on top of the pages (R_PrebuiltPage).
 ==================
 */
 #define LM_PREBUILD_SIZE	( 1024 * 1024 )
@@ -5517,11 +5530,288 @@ static void R_PrebuildDarkStyles( const model_t *mod )
 	}
 }
 
+#if LIGHTMAP_BPP == 1
+/*
+the switchable lights of a prebuilt map (styles 32 and up: deluge_beta_v3's key
+lights). A surface they reach keeps its light without them (332 pixels) and, per
+style, a byte a luxel (the brightest channel) with the layer's color. When the
+server switches a style its surfaces are built again into their pages
+*/
+#define LM_SWITCH_MIN	8	// layers with less light stay as the map starts them
+
+typedef struct
+{
+	msurface_t	*surf;
+	byte		*base;		// 332 pixels without the layers, then the layers
+	byte		color[MAXLIGHTMAPS][3];
+	byte		style[MAXLIGHTMAPS];
+	byte		numlayers;
+} lm_switch_t;
+
+static lm_switch_t	*lm_switch;
+static int		lm_numswitch;
+static int		lm_switchvalue[MAX_LIGHTSTYLES];	// the values the pages have
+static int		lm_switchlevel[3][8];		// a 332 level back to the light scale
+
+static int R_LmLightScale( void )
+{
+	return ( pow( 2.0f, 1.0f / v_lightgamma->value ) * 256 ) + 0.5;
+}
+
+// the light scale (bl * lightscale >> 14) to a color, as R_BuildLightMap
+static int R_LmGamma( int c )
+{
+	c = bound( 0, c, 1023 );
+	return FBitSet( gp_host->features, ENGINE_LINEAR_GAMMA_SPACE ) ? c >> 2 : tr.lightgammatable[c] >> 2;
+}
+
+static byte R_LmPack( const int c[3] )
+{
+	const int r = R_LmGamma( c[0] ), g = R_LmGamma( c[1] ), b = R_LmGamma( c[2] );
+
+	return (( r >> 5 ) & 0x07 ) | (( g >> 2 ) & 0x38 ) | ( b & 0xc0 );
+}
+
+static qboolean R_LmSwitchLayer( const msurface_t *surf, int map, int size )
+{
+	const int style = surf->styles[map];
+	const byte *lm = (const byte *)&surf->samples[map * size];
+
+	if( style < 32 || style >= MAX_LIGHTSTYLES )
+		return false;
+
+	for( int i = 0; i < size * 3; i++ )
+	{
+		if( lm[i] >= LM_SWITCH_MIN )
+			return true;
+	}
+	return false;
+}
+
+// before the light data goes, after the pages are built with the styles as the map starts
+static void R_PrebuildSwitches( model_t *mod )
+{
+	const int lightscale = R_LmLightScale();
+	int count = 0, bytes = 0;
+
+	lm_switch = NULL;
+	lm_numswitch = 0;
+
+	for( int pass = 0; pass < 2; pass++ )
+	{
+		byte *mem = NULL;
+
+		if( pass )
+		{
+			if( !count )
+				return;
+			mem = Mem_Malloc( mod->mempool, count * sizeof( *lm_switch ) + bytes );
+			lm_switch = (lm_switch_t *)mem;
+			mem += count * sizeof( *lm_switch );
+		}
+
+		for( int i = 0; i < mod->numsurfaces; i++ )
+		{
+			msurface_t *surf = &mod->surfaces[i];
+
+			if( !surf->samples || FBitSet( surf->flags, SURF_DRAWTILED|SURF_DRAWTURB ) || surf->lightmaptexturenum < 0 )
+				continue;
+
+			const int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
+			const int smax = ( surf->info->lightextents[0] / sample_size ) + 1;
+			const int tmax = ( surf->info->lightextents[1] / sample_size ) + 1;
+			const int size = smax * tmax;
+			int layers = 0;
+
+			for( int map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++ )
+				layers += R_LmSwitchLayer( surf, map, size );
+
+			if( !layers )
+				continue;
+
+			if( !pass )
+			{
+				count++;
+				bytes += size * ( 1 + layers );
+				continue;
+			}
+
+			lm_switch_t *sw = &lm_switch[lm_numswitch++];
+
+			memset( sw, 0, sizeof( *sw ));
+			sw->surf = surf;
+			sw->base = mem;
+			mem += size;
+
+			for( int map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++ )
+			{
+				if( !R_LmSwitchLayer( surf, map, size ))
+					continue;
+
+				const color24 *lm = &surf->samples[map * size];
+				const int n = sw->numlayers++;
+				uint sum[3] = { 0 };
+
+				sw->style[n] = surf->styles[map];
+				for( int k = 0; k < size; k++ )
+				{
+					mem[k] = Q_max( lm[k].r, Q_max( lm[k].g, lm[k].b ));
+					sum[0] += lm[k].r;
+					sum[1] += lm[k].g;
+					sum[2] += lm[k].b;
+				}
+				mem += size;
+
+				const uint top = Q_max( 1, Q_max( sum[0], Q_max( sum[1], sum[2] )));
+
+				for( int c = 0; c < 3; c++ )
+					sw->color[n][c] = (uint64_t)sum[c] * 255 / top;
+			}
+
+			// the light without those layers
+			for( int k = 0; k < size; k++ )
+			{
+				int c[3] = { 0 };
+
+				for( int map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++ )
+				{
+					if( R_LmSwitchLayer( surf, map, size ))
+						continue;
+
+					const color24 *lm = &surf->samples[map * size + k];
+					const uint scale = g_lightstylevalue[surf->styles[map]];
+
+					c[0] += lm->r * scale;
+					c[1] += lm->g * scale;
+					c[2] += lm->b * scale;
+				}
+				for( int ch = 0; ch < 3; ch++ )
+					c[ch] = (uint)c[ch] * lightscale >> 14;
+				sw->base[k] = R_LmPack( c );
+			}
+		}
+	}
+
+	memcpy( lm_switchvalue, g_lightstylevalue, sizeof( lm_switchvalue ));
+
+	// the middle of the light scale of each 332 level (red and green 3 bits, blue 2)
+	for( int ch = 0; ch < 3; ch++ )
+	{
+		const int shift = ch == 2 ? 6 : 5;
+
+		for( int lvl = 0; lvl < 8; lvl++ )
+		{
+			int lo = -1, hi = -1;
+
+			for( int c = 0; c < 1024; c++ )
+			{
+				if(( R_LmGamma( c ) >> shift ) == lvl )
+				{
+					if( lo < 0 )
+						lo = c;
+					hi = c;
+				}
+			}
+			lm_switchlevel[ch][lvl] = lo < 0 ? ( lvl ? lm_switchlevel[ch][lvl - 1] : 0 ) : ( lo + hi ) / 2;
+		}
+	}
+
+	gEngfuncs.Con_Reportf( "%s: %d surfaces, %d KB\n", __func__, lm_numswitch, (int)( count * sizeof( *lm_switch ) + bytes ) >> 10 );
+}
+
+// a style the pages were built with changed: its surfaces again (once per frame, main CPU)
+static void R_PrebuiltSwitch( void )
+{
+	uint changed[MAX_LIGHTSTYLES / 32] = { 0 };
+	qboolean any = false;
+	byte touched[MAX_LIGHTMAPS] = { 0 };
+
+	if( !lm_numswitch || lm_prebuilt != WORLDMODEL )
+		return;
+
+	for( int i = 32; i < MAX_LIGHTSTYLES; i++ )
+	{
+		if( g_lightstylevalue[i] != lm_switchvalue[i] )
+		{
+			changed[i >> 5] |= 1u << ( i & 31 );
+			lm_switchvalue[i] = g_lightstylevalue[i];
+			any = true;
+		}
+	}
+
+	if( !any )
+		return;
+
+	const int lightscale = R_LmLightScale();
+
+	for( int i = 0; i < lm_numswitch; i++ )
+	{
+		const lm_switch_t *sw = &lm_switch[i];
+		qboolean hit = false;
+
+		for( int n = 0; n < sw->numlayers; n++ )
+			hit |= ( changed[sw->style[n] >> 5] >> ( sw->style[n] & 31 )) & 1;
+
+		const gl_texture_t *page = hit ? R_PrebuiltPage( sw->surf ) : NULL;
+
+		if( !page )
+			continue;
+
+		const msurface_t *surf = sw->surf;
+		const int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
+		const int smax = ( surf->info->lightextents[0] / sample_size ) + 1;
+		const int tmax = ( surf->info->lightextents[1] / sample_size ) + 1;
+		int fac[MAXLIGHTMAPS][3];
+
+		// light scale per layer byte: sample * color / 255 * style * lightscale >> 14
+		for( int n = 0; n < sw->numlayers; n++ )
+		{
+			for( int c = 0; c < 3; c++ )
+				fac[n][c] = (int)(( (int64_t)sw->color[n][c] * lm_switchvalue[sw->style[n]] * lightscale ) / 255 );
+		}
+
+		for( int t = 0, k = 0; t < tmax; t++ )
+		{
+			for( int s = 0; s < smax; s++, k++ )
+			{
+				const byte b = sw->base[k];
+				int c[3] = { lm_switchlevel[0][b & 7], lm_switchlevel[1][( b >> 3 ) & 7], lm_switchlevel[2][b >> 6] };
+
+				for( int n = 0; n < sw->numlayers; n++ )
+				{
+					const int v = sw->base[( n + 1 ) * smax * tmax + k];
+
+					for( int ch = 0; ch < 3; ch++ )
+						c[ch] += v * fac[n][ch] >> 14;
+				}
+				R_PrebuiltSetLuxel( page, surf->light_s + s, surf->light_t + t, R_LmPack( c ));
+			}
+		}
+		touched[surf->lightmaptexturenum] = true;
+	}
+
+	// the GE reads the pages from memory; GL_BindCommands flushes its texture cache
+	for( int i = 0; i < MAX_LIGHTMAPS; i++ )
+	{
+		if( touched[i] )
+		{
+			const gl_texture_t *page = R_GetTexture( tr.lightmapTextures[i] );
+
+			sceKernelDcacheWritebackRange( page->dstTexture, page->size );
+		}
+	}
+}
+#else
+static void R_PrebuildSwitches( model_t *mod ) { }
+static void R_PrebuiltSwitch( void ) { }
+#endif
+
 void R_PrebuildLightmaps( model_t *mod )
 {
 	int total = 0, kept = 0;
 
 	lm_prebuilt = NULL;
+	lm_numswitch = 0;
 
 	if( !mod->lightdata )
 		return;
@@ -5555,6 +5845,7 @@ void R_PrebuildLightmaps( model_t *mod )
 	for( int i = 0; i < mod->numsurfaces; i++ )
 		GL_CreateSurfaceLightmap( &mod->surfaces[i], mod );
 	LM_UploadBlock( false );
+	R_PrebuildSwitches( mod );
 
 	color24 *out = Mem_Malloc( mod->mempool, kept * sizeof( *out ));
 	int ofs = 0;
@@ -5624,6 +5915,7 @@ void R_WorldFree( void )
 		GL_FreeTexture( tr.lightmapTextures[i] );
 	memset( tr.lightmapTextures, 0, sizeof( tr.lightmapTextures ));
 	lm_prebuilt = NULL;
+	lm_numswitch = 0;
 }
 #endif
 
