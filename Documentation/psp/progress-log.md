@@ -1051,3 +1051,5 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   50 fps while the bots join (player models load); baseline on the same server and build without bots
   110-117 fps (~114). Per frame with the bots: CL_EmitEntities 1.4 -> 3.1 ms, SCR2 4.2 -> 5.8 ms, packets
   0.6 -> 1.0 ms, sound channels 5 -> 15, particles 28-136 -> 380, tracers 1-5 -> 26.
+  With 15 bots (16 players): 51-58 fps (~54), 45 fps while they join, all under 60. Per frame: CL_EmitEntities
+  4.6 ms, SCR2 7.5 ms, packets 1.9 ms, send 2.2 ms; sound channels 31, particles 452, tracers 37.
