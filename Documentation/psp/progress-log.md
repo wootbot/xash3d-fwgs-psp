@@ -1079,3 +1079,6 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   - Test tools (ignored): stress plugin `stress <p> <m> here [shooters]` (in front of the player, only the
     first ones fire), `fight_bots.sh` (RECORD=, PROFILE=), `fight_toggle.sh` (live A/B after the LODs),
     `td_pt.sh`.
+- 2026-11-25: the TEMP profiling probes (stage marks, PROF/PT timers, sampler, benchmarks, checks) are committed
+  on the local branch `psp-probes` (`c32bfe8f`), not on master; master's working tree carries the same changes
+  uncommitted. `git diff master psp-probes | git apply` brings them back onto a clean master tree.
