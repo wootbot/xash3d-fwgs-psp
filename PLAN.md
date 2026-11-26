@@ -73,6 +73,10 @@ Frame budget at 60 fps (16.7 ms) for the ceiling scene, roughly:
 - [x] Reduced skeletons and decimated meshes: levels of detail made from the models at run time
       (`r_studio_lod`), poses kept for a few frames when the ME has too much to do. A cache of decoded
       keyframes was tried twice and saves almost nothing (see the progress log).
+- [ ] Levels of detail ready when a game starts: they're made again after every map load, ~50 ms of
+      frames per submodel, so with 16 players they take ~50 s and the fight runs at 45-50 fps until
+      then, 60-63 after (2026-11-25). Options: make them on the idle ME, or a file of them made on the PC
+      (same code) plus the run-time path for unknown models.
 - [x] Sounds load in the background, decals with the map: no frames over ~35 ms in the blastcorpse1 fight.
 - [x] Memory in the stress scene: 7 MB left (2026-11-24).
 - [~] Big maps: `deluge_beta_v3` (25 MB) loads and runs, 56-61 fps at its main start depending on the

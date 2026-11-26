@@ -1056,3 +1056,26 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   16 players with only 6 bots firing (`stress 15 0 here 6`): 55-62 fps (~59), half the windows at 60 or
   above. 9 fewer shooters save only ~1.6 ms a frame (18.5 -> 16.9 ms): sound channels 31 -> 16, particles 452 -> 240,
   tracers 37 -> 7; the players themselves (entities, packets, drawing) are the rest.
+- 2026-11-25 (2): **Profile of the 16 player fight** (15 firing bots, demo `fight16` recorded live, ~19 ms median).
+  - The stage sampler and `psp_stagetime` both put ~1 ms a frame (8%) in R_StudioSetupPlayerModel, timed
+    directly it is 0.04 ms (15 calls). Cause not found (the stack is 5 deep there; PSP_STAGE_MAX raised
+    to 24 changed nothing). The PSP_PROF slot numbers collide too (cl_adjclock, e_late showed other
+    sections' times). New TEMP timer `PSP_PT( name, x )`: its own counter per call site, inclusive wall time,
+    `PT` line after `PROF`; PSP_PROF goes through it with `PSP_PT_ON 1` (~1.5 us a call, ~2 ms a frame).
+  - Inclusive ms a frame (demo, with that overhead): renderer 7.2 (prepare 2.0-2.25, world 1.0, brush
+    entities 0.5, view model 0.45), packets 2.1-4.0 (4 ms each: entity states copied 1.3, delta 1.1),
+    packet entities linked 1.8-2.6 (CL_AddVisibleEntity 110-150 a frame), events 1.3-1.75 (bullet traces
+    ~150 us each), prediction 1.2, ME player setup 1.0, particles 0.9, HUD 0.35. Flat, as before.
+  - **Levels of detail are made again after every map load** (each demo, each join) and that takes ~50 ms
+    of frames per submodel on the PSP (PC ~0.5 ms: CPU bound, no doubles). With 16 players ~38 submodels,
+    2.1 s of frames: 0.2-0.7 ms a frame for ~50 s, and the models are drawn without them until then.
+    Live: 45-50 fps during it, **60-63 fps after** (15 firing bots, no probes). The earlier 54 fps
+    (above) were mostly measured during it. Not fixed yet (PLAN).
+  - LOD code: the cheapest vertex from a packed cost array, each neighbor's edge cost once (`7c6a84c4`).
+    Same results byte for byte (PC harness over all 597 submodels, sanitizers), PC 455 -> 310 ms, PSP
+    ~57 -> 42-56 ms per submodel (the per collapse math dominates there).
+  - Network yield (`67318da1`): the main thread drops below the stack's threads instead of sleeping 4% of
+    the frame. Demo 1.08 -> 0.50 ms a frame; live the same fps (60.1 vs 59.8, alternating every 25 s).
+  - Test tools (ignored): stress plugin `stress <p> <m> here [shooters]` (in front of the player, only the
+    first ones fire), `fight_bots.sh` (RECORD=, PROFILE=), `fight_toggle.sh` (live A/B after the LODs),
+    `td_pt.sh`.
