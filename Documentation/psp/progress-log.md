@@ -1045,3 +1045,9 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   server changes such a style, its surfaces are built again into their pages (light scale back from each 332 level,
   plus the layers, gamma, 332). Tested with a server command that Use()s the red key light by name: off, then on
   again; on again matches the load-time bake (mean difference 1.3 of 255). Animated styles (1-31) stay frozen there.
+- 2026-11-25: **blastcorpse1 fight with 8 more players** (stress plugin, `stress 8 0 here`: 8 fake players
+  with MP5s placed in front of the player right after the fight trigger, firing ~80% of the time; 9 players
+  on the server). Build with the TEMP probes of the day. Steady state 66-78 fps (~73), one 5 s window of
+  50 fps while the bots join (player models load); baseline on the same server and build without bots
+  110-117 fps (~114). Per frame with the bots: CL_EmitEntities 1.4 -> 3.1 ms, SCR2 4.2 -> 5.8 ms, packets
+  0.6 -> 1.0 ms, sound channels 5 -> 15, particles 28-136 -> 380, tracers 1-5 -> 26.
