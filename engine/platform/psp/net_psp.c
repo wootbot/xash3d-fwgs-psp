@@ -36,7 +36,10 @@ GNU General Public License for more details.
 #define APCTL_THREAD_STACK  ( 12 * 1024 )
 #define APCTL_THREAD_PRIO   48
 #define APCTL_TIMEOUT       30.0 // seconds
+#define NET_MAIN_PRIO       0x20 // the main thread's (the watchdog restores the same)
+#define NET_YIELD_PRIO      ( APCTL_THREAD_PRIO + 1 )
 
+static CVAR_DEFINE_AUTO( net_psp_yield, "1", FCVAR_ARCHIVE, "how the network threads get the CPU each frame: 1 = run them until they wait, 0 = a sleep of 4% of the frame" );
 static CVAR_DEFINE_AUTO( net_psp_profile, "1", FCVAR_ARCHIVE | FCVAR_PRIVILEGED, "Wi-Fi connection profile number from the system network settings" );
 
 static struct
@@ -243,7 +246,9 @@ PSP can send but hardly ever receives anything. They run while the main
 thread sleeps, ~0.6 ms a frame in a firefight: a short sleep is enough, a
 1 ms one left the CPU idle for the rest of it. In long frames it's 4% of the
 time: 200 us 25 times a second isn't enough for them, what the server sent
-came up to a second late.
+came up to a second late. net_psp_yield 1 (the default) drops this thread below
+them instead, so they run exactly as long as they need: ~0.5 ms a frame with
+little traffic, where the sleep was ~1 ms in a 20 ms frame.
 ==================
 */
 void PSP_NetFrame( void )
@@ -256,6 +261,13 @@ void PSP_NetFrame( void )
 
 	if( psp_net.joining )
 		sceKernelDelayThread( 8 * 1000 ); // the key exchange takes time
+	else if( psp_net.stack && net_psp_yield.value )
+	{
+		// below all of the stack's threads (Wi-Fi 39, inet 42, apctl 48) for a moment:
+		// whatever they have to do runs now, and this thread goes on as soon as they wait
+		sceKernelChangeThreadPriority( 0, NET_YIELD_PRIO );
+		sceKernelChangeThreadPriority( 0, NET_MAIN_PRIO );
+	}
 	else if( psp_net.stack )
 		sceKernelDelayThread( elapsed < 12000 ? 200 : Q_min( elapsed / 25, 2000 ));
 }
@@ -626,6 +638,7 @@ static void PSP_NetStatus_f( void )
 void PSP_NetRegisterCommands( void )
 {
 	Cvar_RegisterVariable( &net_psp_profile );
+	Cvar_RegisterVariable( &net_psp_yield );
 	Cmd_AddCommand( "net_psp_status", PSP_NetStatus_f, "show the Wi-Fi connection state" );
 	Cmd_AddCommand( "net_psp_profiles", PSP_NetProfiles_f, "list the Wi-Fi connection profiles from the system settings" );
 }
