@@ -6186,6 +6186,7 @@ static struct
 	const mstudiomodel_t *submodel;
 	lodtri_t		*tris;
 	lodvert_t		*verts;
+	float		*costs;	// verts[].cost packed: the cheapest one is looked for after every collapse
 	int		*next;	// of a corner
 	vec3_t		*norms;
 	int		numtris, numverts, left, level;
@@ -6216,6 +6217,7 @@ static void R_StudioLodAbort( void )
 	free( ge_lod.strip );
 	free( ge_lod.tris );
 	free( ge_lod.verts );
+	free( ge_lod.costs );
 	free( ge_lod.next );
 	free( ge_lod.norms );
 	R_StudioLodFreeOut( &ge_lod.out );
@@ -6622,24 +6624,39 @@ static void R_StudioLodCost( int u )
 		}
 	}
 
+	// each neighbor once (it's in two triangles or more), in the same order
+	uint16_t seen[64];
+	int numseen = 0;
+
 	for( int c = pu->head; c >= 0; c = ge_lod.next[c] )
 	{
 		const lodtri_t *t = &ge_lod.tris[c / 3];
 
 		for( int i = 0; i < 3; i++ )
 		{
-			if( t->v[i] == u )
+			const int w = t->v[i];
+			int k;
+
+			if( w == u )
 				continue;
 
-			const float cost = R_StudioLodEdgeCost( u, t->v[i], open );
+			for( k = 0; k < numseen && seen[k] != w; k++ );
+			if( k < numseen )
+				continue;
+			if( numseen < ARRAYSIZE( seen ))
+				seen[numseen++] = w;
+
+			const float cost = R_StudioLodEdgeCost( u, w, open );
 
 			if( cost < pu->cost )
 			{
 				pu->cost = cost;
-				pu->target = t->v[i];
+				pu->target = w;
 			}
 		}
 	}
+
+	ge_lod.costs[u] = pu->target >= 0 ? pu->cost : 1e30f;
 }
 
 static void R_StudioLodUnlink( int corner )
@@ -6657,10 +6674,16 @@ static qboolean R_StudioLodCollapse( void )
 {
 	int u = -1;
 
+	float best = 1e30f;
+
+	// the same as the cheapest with a target: a vertex without one costs 1e30f
 	for( int i = 0; i < ge_lod.numverts; i++ )
 	{
-		if( ge_lod.verts[i].target >= 0 && ( u < 0 || ge_lod.verts[i].cost < ge_lod.verts[u].cost ))
+		if( ge_lod.costs[i] < best )
+		{
+			best = ge_lod.costs[i];
 			u = i;
+		}
 	}
 
 	if( u < 0 )
@@ -6743,7 +6766,7 @@ static qboolean R_StudioLodCollapse( void )
 	}
 
 	ge_lod.verts[u].target = -1;
-	ge_lod.verts[u].cost = 1e30f;
+	ge_lod.verts[u].cost = ge_lod.costs[u] = 1e30f;
 
 	for( int i = 0; i < numtouched; i++ )
 	{
@@ -7021,8 +7044,9 @@ static qboolean R_StudioLodBegin( gemodel_t *gm )
 	ge_lod.tris = malloc( max * sizeof( lodtri_t ) + 4 );
 	ge_lod.next = malloc( max * 3 * sizeof( int ) + 4 );
 	ge_lod.verts = malloc( sub->numverts * sizeof( lodvert_t ) + 4 );
+	ge_lod.costs = malloc( sub->numverts * sizeof( float ) + 4 );
 	ge_lod.norms = malloc( sub->numnorms * sizeof( vec3_t ) + 4 );
-	if( !lb || !ge_lod.tris || !ge_lod.next || !ge_lod.verts || !ge_lod.norms || gm->nummesh > 255 )
+	if( !lb || !ge_lod.tris || !ge_lod.next || !ge_lod.verts || !ge_lod.costs || !ge_lod.norms || gm->nummesh > 255 )
 		return false;
 
 	for( int i = 0; i < sub->numverts; i++ )
@@ -7033,7 +7057,7 @@ static qboolean R_StudioLodBegin( gemodel_t *gm )
 		ge_lod.verts[i].bone = vertbone[i];
 		ge_lod.verts[i].head = -1;
 		ge_lod.verts[i].target = -1;
-		ge_lod.verts[i].cost = 1e30f;
+		ge_lod.verts[i].cost = ge_lod.costs[i] = 1e30f;
 	}
 
 	for( int i = 0; i < sub->numnorms; i++ )
