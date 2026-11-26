@@ -1039,3 +1039,9 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
     luck of register allocation), `psp_update` wrote a truncated EBOOT on a full stick (both today's updates).
   - Known limitation: prebuilt lightmaps keep switchable lights as the map starts them; when the game switches
     one later (deluge's key lights go off when a key is used) the baked light stays.
+- 2026-11-25 (evening): **switchable lights in prebuilt lightmaps** (`56d34483`). The surfaces that styles 32 and
+  up reach (with a layer brighter than 8 of 255) keep their light without those styles as 332 pixels, plus a byte a
+  luxel per style (the brightest channel) and the layer's color: deluge_beta_v3 1482 surfaces, 149 KB. When the
+  server changes such a style, its surfaces are built again into their pages (light scale back from each 332 level,
+  plus the layers, gamma, 332). Tested with a server command that Use()s the red key light by name: off, then on
+  again; on again matches the load-time bake (mean difference 1.3 of 255). Animated styles (1-31) stay frozen there.
