@@ -1053,3 +1053,6 @@ Newest entries at the end. Plan and open work: [PLAN.md](../../PLAN.md). Search 
   0.6 -> 1.0 ms, sound channels 5 -> 15, particles 28-136 -> 380, tracers 1-5 -> 26.
   With 15 bots (16 players): 51-58 fps (~54), 45 fps while they join, all under 60. Per frame: CL_EmitEntities
   4.6 ms, SCR2 7.5 ms, packets 1.9 ms, send 2.2 ms; sound channels 31, particles 452, tracers 37.
+  16 players with only 6 bots firing (`stress 15 0 here 6`): 55-62 fps (~59), half the windows at 60 or
+  above. 9 fewer shooters save only ~1.6 ms a frame (18.5 -> 16.9 ms): sound channels 31 -> 16, particles 452 -> 240,
+  tracers 37 -> 7; the players themselves (entities, packets, drawing) are the rest.
